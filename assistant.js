@@ -846,7 +846,8 @@ function callClaude(messages, cfg, extraSystem) {
       // (~14.5K tokens) from the request. Phoenix dispatches its OWN text-parsed TOOL: blocks,
       // so the built-ins are never used — removing them is quality-neutral. See changelog 2026-06-27.
       ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, userMsg],
-      { encoding: 'utf8' }
+      // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
+      { encoding: 'utf8', shell: process.platform === 'win32' }
     );
     child.stdout.on('data', chunk => stdoutChunks.push(chunk));
     child.stderr.on('data', chunk => stderrChunks.push(chunk));
@@ -1348,7 +1349,8 @@ function callClaudeSeat(messages, { model, systemPrompt }) {
       // --tools '' --strict-mcp-config: see callClaude — withhold the unused built-in tool/MCP
       // schemas (~14.5K tokens). The troubleshooter uses only its own TROUBLESHOOTER_TOOLS.
       ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, userMsg],
-      { encoding: 'utf8' }
+      // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
+      { encoding: 'utf8', shell: process.platform === 'win32' }
     );
     child.stdout.on('data', chunk => stdoutChunks.push(chunk));
     child.stderr.on('data', chunk => stderrChunks.push(chunk));
@@ -1654,7 +1656,7 @@ function claudeCliCheck() {
     const finish = (val) => { if (done) return; done = true; clearTimeout(timer); try { if (child) child.kill(); } catch {} resolve(val); };
     const timer = setTimeout(() => finish({ present: false, error: 'timeout' }), 8000);
     try {
-      child = spawn('claude', ['--version'], { encoding: 'utf8' });
+      child = spawn('claude', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
     } catch (e) { finish({ present: false, error: e.message }); return; }
     child.stdout.on('data', d => out += d);
     child.stderr.on('data', d => err += d);

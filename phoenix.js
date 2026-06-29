@@ -87,7 +87,8 @@ function callClaude(systemPrompt, user) {
   const r = spawnSync(
     'claude',
     ['--print', '--model', 'claude-sonnet-4-6', '--system-prompt', systemPrompt, user],
-    { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }
+    // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
+    { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, shell: process.platform === 'win32' }
   );
   if (r.error)      throw new Error(`Claude CLI: ${r.error.message}`);
   if (r.status !== 0) throw new Error(`Claude CLI exit ${r.status}: ${r.stderr}`);
@@ -320,7 +321,7 @@ async function generateMetaprompt(userPrompt, category) {
 async function callClaudeMeta(systemPrompt, user, model) {
   return new Promise((resolve, reject) => {
     const out = [], err = [];
-    const child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, user], { encoding: 'utf8' });
+    const child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, user], { encoding: 'utf8', shell: process.platform === 'win32' });
     child.stdout.on('data', d => out.push(d));
     child.stderr.on('data', d => err.push(d));
     child.on('error', e => reject(new Error('Claude CLI: ' + e.message)));
