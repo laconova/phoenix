@@ -1,0 +1,2558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Phoenix</title>
+  <link rel="icon" href="/vendor/favicon.ico">
+  <script type="module" src="/vendor/model-viewer.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #737373;
+      --panel: #B3B3B3;
+      --outline: #FF7A18;
+      --border-soft: #D8D8D8;
+      --text: #2A2A2A;
+      --muted: #6B6B6B;
+      --accent: #FF7A18;
+      --accent-hover: #E2660D;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    #header {
+      padding: 10px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--outline);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    #logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--accent);
+    }
+    #logo-badge {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 2px solid var(--outline);
+      background: #2e2e2e;            /* dark coin → the gold phoenix (now transparent bg) pops */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    #logo-badge img {
+      width: 112%;                    /* slight fill; keeps wing tips inside the circle */
+      height: 112%;
+      object-fit: contain;
+    }
+    #logo-word { font-weight: 700; letter-spacing: 0.06em; }
+
+    #settings-btn {
+      background: transparent;
+      border: none;
+      font-size: 18px;
+      color: var(--accent);
+      cursor: pointer;
+      padding: 2px 6px;
+      line-height: 1;
+    }
+
+    #mode-indicator { font-size: 11px; font-weight: 600; color: #fff; background: var(--accent); border-radius: 10px; padding: 2px 8px; margin-left: 10px; }
+    #mode-indicator[hidden] { display: none; }
+
+    #settings-panel {
+      position: absolute;
+      top: 44px;
+      right: 12px;
+      z-index: 50;
+      background: var(--panel);
+      border: 1px solid var(--outline);
+      border-radius: 8px;
+      padding: 12px 14px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 220px;
+    }
+
+    #settings-panel[hidden] { display: none; }
+
+    .settings-title {
+      font-weight: 600;
+      font-size: 13px;
+      color: var(--text);
+    }
+
+    .gate-row {
+      font-size: 13px;
+      color: var(--text);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .settings-hint {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    #logo { cursor: pointer; }
+    #menu-panel {
+      position: absolute; top: 44px; left: 12px; z-index: 50;
+      background: var(--panel); border: 1px solid var(--outline); border-radius: 8px;
+      padding: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+      display: flex; flex-direction: column; gap: 2px; min-width: 180px;
+    }
+    #menu-panel[hidden] { display: none; }
+    .menu-item {
+      text-align: left; background: transparent; border: none; color: var(--text);
+      font-size: 13px; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+    }
+    .menu-item:hover { background: var(--accent); color: #fff; }
+
+    /* Reusable modal (Troubleshooter + the "coming next" panels) */
+    #tool-modal {
+      position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.45);
+      display: flex; align-items: center; justify-content: center;
+    }
+    #tool-modal[hidden] { display: none; }
+    .modal-box {
+      background: var(--panel); border: 1px solid var(--outline); border-radius: 10px;
+      width: min(680px, 90vw); max-height: 80vh; display: flex; flex-direction: column;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    }
+    .modal-head {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 14px; border-bottom: 1px solid var(--outline);
+      font-weight: 700; color: var(--text);
+    }
+    .modal-close { background: transparent; border: none; font-size: 18px; color: var(--accent); cursor: pointer; line-height: 1; }
+    .modal-body { padding: 14px; overflow: auto; }
+    #tool-pre { font-family: 'Consolas','Courier New',monospace; font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+    .pf-pass { color: #2e7d32; }
+    .pf-warn { color: #c77800; }
+    .pf-fail { color: #b23333; }
+    .modal-note { font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .modal-actions { margin-top: 12px; display: flex; gap: 8px; }
+    .modal-btn { padding: 7px 14px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .modal-btn:hover { background: var(--accent-hover); }
+
+    /* ── Troubleshooter chat ── */
+    .ts-transcript { display: flex; flex-direction: column; gap: 8px; max-height: calc(80vh - 130px); overflow-y: auto; margin-bottom: 10px; }
+    .ts-bubble { padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-width: 90%; }
+    .ts-bubble-user { background: var(--accent); color: #fff; align-self: flex-end; }
+    .ts-bubble-phoenix { background: var(--panel); color: var(--text); align-self: flex-start; }
+    .ts-input-row { display: flex; gap: 8px; }
+    .ts-input { flex: 1; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); outline: none; }
+    .ts-input:focus { border-color: var(--accent); }
+    .ts-thinking { opacity: 0.55; font-style: italic; }
+    .ts-status { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; background: #2a2a2a; border: 1px solid var(--border-soft); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; align-self: stretch; }
+    .ts-status-line { line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #ddd; }
+    .pf-pass { color: #6abf69; }
+    .pf-warn { color: #ffb347; }
+    .pf-fail { color: #ff6b6b; }
+
+    /* ── Settings form ── */
+    .set-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+    .set-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .set-row input, .set-row select { padding: 7px 10px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); outline: none; width: 100%; }
+    .set-row input:focus, .set-row select:focus { border-color: var(--accent); }
+    .set-status { font-size: 12px; color: var(--muted); line-height: 1.5; padding-left: 8px; align-self: center; }
+    .set-hint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.5; }
+    /* ── Feedback textarea ── */
+    .fb-textarea { width: 100%; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); resize: vertical; outline: none; }
+    .fb-textarea:focus { border-color: var(--accent); }
+    /* ── Palette editor ── */
+    .pal-textarea { width: 100%; padding: 7px 10px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); resize: vertical; outline: none; }
+    .pal-textarea:focus { border-color: var(--accent); }
+    .pal-marker { font-size: 10px; color: var(--muted); flex-shrink: 0; font-style: italic; }
+
+    /* ── Theme picker ── */
+    .theme-row { display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:8px; cursor:pointer; border:1px solid transparent; margin-bottom:6px; }
+    .theme-row:hover { border-color:var(--accent); background:rgba(0,0,0,0.06); }
+    .theme-row-active { border-color:var(--accent) !important; }
+    .theme-swatches { display:flex; gap:3px; flex-shrink:0; }
+    .theme-swatch { width:18px; height:18px; border-radius:4px; border:1px solid rgba(0,0,0,0.2); display:inline-block; }
+    .theme-name { flex:1; font-size:13px; color:var(--text); }
+    .theme-check { font-size:13px; color:var(--accent); font-weight:700; width:16px; text-align:center; }
+
+    /* ── Main content area (chat + artifacts side by side) ── */
+    #main-area {
+      flex: 1;
+      display: flex;
+      flex-direction: row;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── Chat panel ── */
+    #chat-wrap {
+      flex: 0 0 360px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border-right: 1px solid var(--outline);
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .bubble {
+      max-width: 75%;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .bubble.user {
+      align-self: flex-end;
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+
+    .bubble.phoenix {
+      align-self: flex-start;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border-soft);
+      border-bottom-left-radius: 3px;
+    }
+
+    .bubble.error {
+      align-self: flex-start;
+      background: #FBE9E9;
+      color: #B23333;
+      border: 1px solid #E3A9A9;
+      border-bottom-left-radius: 3px;
+    }
+
+    .bubble.busy-note {
+      align-self: center;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 4px 8px;
+    }
+
+    /* ── Input row ── */
+    #input-row {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--panel);
+      border-top: 1px solid var(--outline);
+      flex-shrink: 0;
+    }
+
+    #user-input {
+      flex: 1;
+      padding: 9px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-soft);
+      background: var(--panel);
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+      resize: none;
+    }
+
+    #user-input:focus {
+      border-color: var(--accent);
+    }
+
+    #user-input:disabled {
+      opacity: 0.5;
+    }
+
+    #send-btn {
+      padding: 9px 18px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    #send-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+
+    #send-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* ── Artifacts column (middle) ── */
+    #artifacts-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+      border-right: 1px solid var(--outline);
+    }
+
+    /* Tab bar */
+    #art-tabs {
+      display: flex;
+      flex-direction: row;
+      background: var(--panel);
+      border-bottom: 1px solid var(--outline);
+      flex-shrink: 0;
+    }
+
+    .art-tab-btn {
+      padding: 8px 20px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+
+    .art-tab-btn:hover {
+      color: var(--text);
+    }
+
+    .art-tab-btn.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+
+    .art-tab-btn.gate-waiting {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      animation: gatePulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes gatePulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.45; }
+    }
+
+    /* Tab panels container */
+    #art-panels {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .art-panel {
+      display: none;
+      position: absolute;
+      inset: 0;
+      overflow: auto;
+      padding: 16px;
+    }
+
+    .art-panel.visible {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    .art-placeholder {
+      color: #B8B8B8;
+      font-size: 13px;
+      font-style: italic;
+      margin: auto;
+    }
+
+    /* Prompt panel */
+    #artPrompt {
+      width: 100%;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: transparent;
+      border: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    /* Image-tab editable prompt */
+    .img-prompt-edit {
+      width: 100%;
+      min-height: 90px;
+      margin-top: 10px;
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      padding: 8px;
+      resize: vertical;
+      outline: none;
+    }
+
+    .img-prompt-edit:focus {
+      border-color: var(--accent);
+    }
+
+    /* Image panel */
+    #artImage {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+
+    #artImage.loaded {
+      display: block;
+    }
+
+    /* Mesh panel */
+    #artMesh {
+      width: 100%;
+      height: 100%;
+      display: none;
+      background: transparent;
+    }
+
+    #artMesh.loaded {
+      display: block;
+    }
+
+    /* ── Debug console ── */
+    #console-wrap {
+      height: 15vh;
+      min-height: 90px;
+      background: #0d0d0d;
+      border-top: 2px solid var(--outline);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    #console-wrap.collapsed {
+      height: auto;
+      min-height: 0;
+    }
+
+    #console-wrap.collapsed #console-log {
+      display: none;
+    }
+
+    #console-title {
+      padding: 4px 10px;
+      font-size: 11px;
+      font-family: monospace;
+      color: #555;
+      background: #111;
+      border-bottom: 1px solid #1a1a1a;
+      flex-shrink: 0;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    #console-caret {
+      display: inline-block;
+      font-size: 10px;
+    }
+
+    #console-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 10px;
+    }
+
+    .log-line {
+      font-family: 'Consolas', 'Courier New', monospace;
+      font-size: 11px;
+      color: #666;
+      line-height: 1.6;
+      white-space: pre;
+    }
+
+    .log-line.cat-error, .log-line.cat-pyerr {
+      color: #993333;
+    }
+
+    .log-line.cat-llm {
+      color: #4a7a4a;
+    }
+
+    .log-line.cat-system {
+      color: #4a6a8a;
+    }
+
+    .log-line.cat-progress {
+      color: #7a7a3a;
+    }
+
+    .log-line.cat-tool {
+      color: #3a6a7a;
+    }
+
+    .log-line.cat-pipeline {
+      color: #5a5a5a;
+    }
+
+    /* ── Artifact action buttons ── */
+    .art-actions {
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+      justify-content: center;
+    }
+
+    .art-btn {
+      padding: 7px 14px;
+      border-radius: 8px;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .art-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+
+    .art-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .art-btn.lib-locked {
+      opacity: 0.45;
+      background: var(--muted);
+    }
+
+    .face-label { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:4px; }
+    .face-input { width:84px; padding:6px 8px; border-radius:8px; border:1px solid var(--border-soft); background:var(--panel); color:var(--text); font-size:13px; outline:none; }
+    .face-input:focus { border-color:var(--accent); }
+
+    /* ── Right-rail asset library ── */
+    #library-wrap { flex: 0 0 440px; display:flex; flex-direction:column; overflow:hidden; background: var(--panel); }
+    #library-header { padding:0 6px; color:var(--text); border-bottom:1px solid var(--outline); display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }
+    #lib-tabs { display:flex; gap:2px; }
+    .lib-tab-btn { padding:6px 9px; border:none; background:transparent; color:var(--muted); font-size:11px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:color 0.15s, border-color 0.15s; }
+    .lib-tab-btn:hover { color:var(--text); }
+    .lib-tab-btn.active { color:var(--text); border-bottom-color:var(--accent); }
+    .lib-panel { display:none; }
+    .lib-panel.visible { display:block; }
+    #library-refresh { background:transparent; border:none; color:var(--accent); cursor:pointer; font-size:15px; line-height:1; padding:0 4px; }
+    #library-list { flex:1; overflow-y:auto; padding:6px 0; }
+    .lib-cat { font-size:11px; text-transform:uppercase; letter-spacing:0.07em; font-weight:700; color:var(--text); padding:7px 12px 6px; margin-top:4px; background:rgba(128,128,128,0.10); border-top:1px solid rgba(128,128,128,0.18); }
+    .lib-cat:first-child { border-top:none; margin-top:0; }
+    .lib-item { padding:5px 12px; font-size:12px; color:var(--text); cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
+    .lib-item:hover { background:var(--accent); color:#fff; }
+    .lib-item.selected { border-left:3px solid var(--accent); padding-left:9px; }
+    .lib-empty { color:#B8B8B8; font-style:italic; font-size:12px; padding:10px 12px; }
+    .lib-item-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-actions { display:none; gap:4px; flex-shrink:0; }
+    .lib-item:hover .lib-actions { display:flex; }
+    .lib-act-btn { background:transparent; border:none; cursor:pointer; color:var(--muted); font-size:12px; padding:0 2px; line-height:1; }
+    .lib-item:hover .lib-act-btn { color:#fff; }
+    .lib-act-btn:hover { color:#fff; text-shadow:0 0 2px rgba(0,0,0,0.4); }
+    .lib-swatch { width:12px; height:12px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); flex-shrink:0; }
+  </style>
+</head>
+<body>
+
+  <div id="header">
+    <div style="display:flex;align-items:center;">
+      <span id="logo"><span id="logo-badge"><img src="/vendor/logo.png" alt="Phoenix"></span><span id="logo-word">Phoenix</span></span>
+      <span id="mode-indicator" hidden>Blender-only</span>
+    </div>
+    <button id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
+  </div>
+  <div id="settings-panel" hidden>
+    <div class="settings-title">Approval gates</div>
+    <label class="gate-row"><input type="checkbox" id="gate-prompt"> Prompt gate</label>
+    <label class="gate-row"><input type="checkbox" id="gate-image"> Image gate</label>
+    <label class="gate-row"><input type="checkbox" id="gate-mesh"> Mesh gate</label>
+    <div class="settings-hint">On = stop for your approval after this stage. Off = auto-continue with no LLM between steps.</div>
+    <label class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;"><input type="checkbox" id="gate-notool"> Blender-only mode</label>
+    <div class="settings-hint">On = model directly in Blender (bpy), image/3D generation tools disabled. (Same as /notool.)</div>
+  </div>
+  <div id="menu-panel" hidden>
+    <button class="menu-item" data-menu="settings">Settings</button>
+    <button class="menu-item" data-menu="themes">Themes</button>
+    <button class="menu-item" data-menu="troubleshooter">Troubleshooter</button>
+    <button class="menu-item" data-menu="feedback">Feedback / Bug report</button>
+  </div>
+
+  <div id="tool-modal" hidden>
+    <div class="modal-box">
+      <div class="modal-head"><span id="tool-title">Title</span><button class="modal-close" id="tool-close" aria-label="Close">&times;</button></div>
+      <div class="modal-body" id="tool-body"></div>
+    </div>
+  </div>
+
+  <div id="main-area">
+
+    <!-- Left: Chat -->
+    <div id="chat-wrap">
+      <div id="messages"></div>
+      <div id="input-row">
+        <input
+          type="text"
+          id="user-input"
+          placeholder="Message Phoenix…"
+          autocomplete="off"
+        />
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+
+    <!-- Middle: Artifacts -->
+    <div id="artifacts-wrap">
+      <div id="art-tabs">
+        <button class="art-tab-btn active" data-tab="prompt">Prompt</button>
+        <button class="art-tab-btn"        data-tab="image">Image</button>
+        <button class="art-tab-btn"        data-tab="mesh">Mesh</button>
+      </div>
+      <div id="art-panels">
+
+        <!-- Prompt panel -->
+        <div class="art-panel visible" id="panel-prompt">
+          <span class="art-placeholder" id="prompt-placeholder">no artifact yet</span>
+          <pre id="artPrompt"></pre>
+          <textarea id="prompt-edit" class="img-prompt-edit" placeholder="prompt (editable) — Approve uses this"></textarea>
+          <div class="art-actions" id="prompt-actions">
+            <button class="art-btn" data-action="approve-prompt">Approve &amp; Generate image</button>
+            <button class="art-btn" data-action="regen-prompt">Regenerate prompt</button>
+          </div>
+        </div>
+
+        <!-- Image panel -->
+        <div class="art-panel" id="panel-image">
+          <span class="art-placeholder" id="image-placeholder">no artifact yet</span>
+          <img id="artImage" alt="Generated image" />
+          <textarea id="image-prompt-edit" class="img-prompt-edit" placeholder="prompt (editable) — Regenerate uses this"></textarea>
+          <div class="art-actions" id="image-actions">
+            <button class="art-btn" data-action="load-image">Load image…</button>
+            <button class="art-btn" data-action="regen-image">Regenerate</button>
+            <button class="art-btn" data-action="make-3d">Make 3D</button>
+          </div>
+          <input type="file" id="image-file" accept="image/png,image/jpeg,image/webp" style="display:none;" />
+        </div>
+
+        <!-- Mesh panel -->
+        <div class="art-panel" id="panel-mesh">
+          <span class="art-placeholder" id="mesh-placeholder">no artifact yet</span>
+          <model-viewer
+            id="artMesh"
+            camera-controls
+            auto-rotate
+            style="width:100%;height:100%"
+          ></model-viewer>
+          <div class="art-actions" id="mesh-actions">
+            <label class="face-label">faces:
+              <input type="number" id="mesh-faces" class="face-input" min="200" max="300000" step="500" placeholder="auto" />
+            </label>
+            <button class="art-btn" data-action="import-raw">Import raw</button>
+            <button class="art-btn" data-action="import-cleaned">Import cleaned</button>
+            <button class="art-btn" data-action="regen-mesh">Regenerate mesh</button>
+            <button class="art-btn" data-action="save-brush">Save as brush</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Right rail: Asset library -->
+    <div id="library-wrap">
+      <div id="library-header">
+        <div id="lib-tabs">
+          <button class="lib-tab-btn active" data-libtab="assets">Assets</button>
+          <button class="lib-tab-btn"        data-libtab="brushes">Brushes</button>
+          <button class="lib-tab-btn"        data-libtab="materials">Materials</button>
+          <button class="lib-tab-btn"        data-libtab="palette">Palette</button>
+          <button class="lib-tab-btn"        data-libtab="workflows">Workflows</button>
+        </div>
+        <button id="library-refresh" title="Refresh">&#x21bb;</button>
+      </div>
+      <div id="library-list">
+        <div class="lib-panel visible" id="lib-assets-body"></div>
+        <div class="lib-panel"         id="lib-brushes-body"></div>
+        <div class="lib-panel"         id="lib-materials-body"></div>
+        <div class="lib-panel"         id="lib-palette-body"></div>
+        <div class="lib-panel"         id="lib-workflows-body"></div>
+      </div>
+    </div>
+
+  </div><!-- /#main-area -->
+
+  <div id="console-wrap" class="collapsed">
+    <div id="console-title"><span id="console-caret">▸</span> debug console</div>
+    <div id="console-log"></div>
+  </div>
+
+  <script>
+    (function () {
+      const messagesEl  = document.getElementById('messages');
+      const inputEl     = document.getElementById('user-input');
+      const sendBtn     = document.getElementById('send-btn');
+      const consoleEl   = document.getElementById('console-log');
+
+      // ── Theme system ─────────────────────────────────────────────────────────
+
+      const THEMES = {
+        'orange-light': { name: 'Orange (Light)', vars: { '--bg':'#737373','--panel':'#B3B3B3','--outline':'#FF7A18','--border-soft':'#D8D8D8','--text':'#2A2A2A','--muted':'#6B6B6B','--accent':'#FF7A18','--accent-hover':'#E2660D' } },
+        'dark-orange':  { name: 'Dark + Orange',  vars: { '--bg':'#1E1E1E','--panel':'#2A2A2A','--outline':'#FF7A18','--border-soft':'#3A3A3A','--text':'#E8E8E8','--muted':'#9A9A9A','--accent':'#FF7A18','--accent-hover':'#E2660D' } },
+        'dark-teal':    { name: 'Dark + Teal',    vars: { '--bg':'#16191D','--panel':'#1F242A','--outline':'#1FB6A6','--border-soft':'#2D353D','--text':'#E6EDF3','--muted':'#8A98A6','--accent':'#1FB6A6','--accent-hover':'#17968A' } },
+        'light-blue':   { name: 'Light + Blue',   vars: { '--bg':'#ECECEC','--panel':'#FFFFFF','--outline':'#2D7FF9','--border-soft':'#D0D0D0','--text':'#2A2A2A','--muted':'#6B6B6B','--accent':'#2D7FF9','--accent-hover':'#1C6AE0' } },
+      };
+      const THEME_STORAGE_KEY = 'phoenix-theme';
+      let _currentTheme = 'orange-light';
+
+      function applyTheme(key) {
+        const t = THEMES[key]; if (!t) return;
+        for (const [k, v] of Object.entries(t.vars)) document.documentElement.style.setProperty(k, v);
+        _currentTheme = key;
+        try { localStorage.setItem(THEME_STORAGE_KEY, key); } catch (_) {}
+      }
+
+      // Apply saved (or default) theme immediately on load
+      try { applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'orange-light'); } catch (_) { applyTheme('orange-light'); }
+
+      // ── Debug console collapse toggle (starts collapsed) ─────────────────────
+
+      const consoleWrapEl  = document.getElementById('console-wrap');
+      const consoleTitleEl = document.getElementById('console-title');
+      const consoleCaretEl = document.getElementById('console-caret');
+
+      function updateConsoleCaret() {
+        const collapsed = consoleWrapEl.classList.contains('collapsed');
+        if (consoleCaretEl) consoleCaretEl.textContent = collapsed ? '▸' : '▾';
+      }
+
+      consoleTitleEl.addEventListener('click', function () {
+        consoleWrapEl.classList.toggle('collapsed');
+        updateConsoleCaret();
+        if (!consoleWrapEl.classList.contains('collapsed')) {
+          consoleEl.scrollTop = consoleEl.scrollHeight;
+        }
+      });
+
+      updateConsoleCaret();
+
+      // ── Blender-only mode state ──────────────────────────────────────────────
+
+      let blenderOnly = false;
+      const modeIndicatorEl = document.getElementById('mode-indicator');
+      function updateModeIndicator() { if (modeIndicatorEl) modeIndicatorEl.hidden = !blenderOnly; }
+      // single source of truth — keeps the header badge AND the gear checkbox in sync
+      function setBlenderOnly(on) {
+        blenderOnly = !!on;
+        updateModeIndicator();
+        const cb = document.getElementById('gate-notool');
+        if (cb) cb.checked = blenderOnly;
+      }
+
+      // ── Artifacts ───────────────────────────────────────────────────────────
+
+      const artPromptEl       = document.getElementById('artPrompt');
+      const promptEditEl      = document.getElementById('prompt-edit');
+      const imagePromptEditEl = document.getElementById('image-prompt-edit');
+      const artImageEl        = document.getElementById('artImage');
+      const imageFileEl       = document.getElementById('image-file');
+      const artMeshEl         = document.getElementById('artMesh');
+      const promptPlaceholder = document.getElementById('prompt-placeholder');
+      const imagePlaceholder  = document.getElementById('image-placeholder');
+      const meshPlaceholder   = document.getElementById('mesh-placeholder');
+
+      const libAssetsBody    = document.getElementById('lib-assets-body');
+      const libBrushesBody   = document.getElementById('lib-brushes-body');
+      const libMaterialsBody = document.getElementById('lib-materials-body');
+      const libPaletteBody    = document.getElementById('lib-palette-body');
+      const libWorkflowsBody  = document.getElementById('lib-workflows-body');
+      const libraryRefreshEl  = document.getElementById('library-refresh');
+
+      let currentMesh = null;
+      // True when the displayed mesh was loaded from the library (a staged GLB with no source image)
+      // → "Regenerate mesh" can't work for it (it would regen from the last GENERATED image instead).
+      let meshFromLibrary = false;
+      function updateRegenLock() {
+        const btn = document.querySelector('#mesh-actions [data-action="regen-mesh"]');
+        if (!btn) return;
+        btn.classList.toggle('lib-locked', meshFromLibrary);
+        btn.title = meshFromLibrary
+          ? 'Not available for a library asset — it has no source image to regenerate from.'
+          : '';
+      }
+
+      // True when the displayed image was loaded by the user (upload), not generated
+      // → "Regenerate" image can't work for it (there is no source prompt that produced it).
+      let imageFromUser = false;
+      function updateRegenImageLock() {
+        const btn = document.querySelector('#image-actions [data-action="regen-image"]');
+        if (!btn) return;
+        btn.classList.toggle('lib-locked', imageFromUser);
+        btn.title = imageFromUser
+          ? 'Not available for a loaded image — there is no source prompt to regenerate from. Use "Make 3D", or type a prompt in chat to generate a fresh image.'
+          : '';
+      }
+
+      // mirrors phoenix.js CATEGORIES target_face_num (UI hint only; keep in sync)
+      const FACE_DEFAULTS = { flat:3500, furniture:12000, item:7500, architecture:18000, flora:30000, fauna:40000 };
+      const meshFacesEl = document.getElementById('mesh-faces');
+
+      function parsePromptText(t) {
+        const s = String(t || '');
+        const negIdx = s.search(/NEGATIVE:/i);
+        let posPart, negPart = '';
+        if (negIdx >= 0) { posPart = s.slice(0, negIdx); negPart = s.slice(negIdx).replace(/NEGATIVE:/i, ''); }
+        else { posPart = s; }
+        const pos = posPart.replace(/POSITIVE:/i, '').trim();
+        const neg = negPart.trim();
+        return { pos, neg };
+      }
+
+      const tabBtns   = document.querySelectorAll('.art-tab-btn');
+      const tabPanels = {
+        prompt: document.getElementById('panel-prompt'),
+        image:  document.getElementById('panel-image'),
+        mesh:   document.getElementById('panel-mesh'),
+      };
+
+      function switchTab(tab) {
+        tabBtns.forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.tab === tab);
+        });
+        Object.entries(tabPanels).forEach(([name, panel]) => {
+          panel.classList.toggle('visible', name === tab);
+        });
+      }
+
+      tabBtns.forEach(btn => {
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+      });
+
+      // ── Gate-waiting highlight ───────────────────────────────────────────────
+
+      function setGateWaiting(stage) {
+        document.querySelectorAll('.art-tab-btn').forEach(b => b.classList.toggle('gate-waiting', b.dataset.tab === stage));
+      }
+
+      function clearGateWaiting() {
+        document.querySelectorAll('.art-tab-btn').forEach(b => b.classList.remove('gate-waiting'));
+      }
+
+      // ── Settings panel ──────────────────────────────────────────────────────
+
+      const settingsBtn   = document.getElementById('settings-btn');
+      const settingsPanel = document.getElementById('settings-panel');
+      const logoEl        = document.getElementById('logo');
+      const menuPanel     = document.getElementById('menu-panel');
+      const toolModal     = document.getElementById('tool-modal');
+      const toolTitle     = document.getElementById('tool-title');
+      const toolBody      = document.getElementById('tool-body');
+      const toolClose     = document.getElementById('tool-close');
+
+      async function loadGates() {
+        try {
+          const res = await fetch('/config');
+          if (!res.ok) return;
+          const c = await res.json();
+          const g = c.gates || {};
+          document.getElementById('gate-prompt').checked = g.prompt !== false;
+          document.getElementById('gate-image').checked  = g.image  !== false;
+          document.getElementById('gate-mesh').checked   = g.mesh   !== false;
+          document.getElementById('gate-notool').checked = blenderOnly;
+        } catch (_) {}
+      }
+
+      async function saveGates() {
+        const gates = {
+          prompt: document.getElementById('gate-prompt').checked,
+          image:  document.getElementById('gate-image').checked,
+          mesh:   document.getElementById('gate-mesh').checked,
+        };
+        try {
+          await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gates }) });
+        } catch (_) {}
+      }
+
+      settingsBtn.addEventListener('click', function () {
+        settingsPanel.hidden = !settingsPanel.hidden;
+        if (!settingsPanel.hidden) loadGates();
+      });
+
+      document.getElementById('gate-prompt').addEventListener('change', saveGates);
+      document.getElementById('gate-image').addEventListener('change', saveGates);
+      document.getElementById('gate-mesh').addEventListener('change', saveGates);
+      document.getElementById('gate-notool').addEventListener('change', function () { setBlenderOnly(this.checked); });
+
+      document.addEventListener('click', function (e) {
+        if (!settingsPanel.hidden && !settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+          settingsPanel.hidden = true;
+        }
+      });
+
+      // ── Menu panel (logo click) ──────────────────────────────────────────────
+
+      logoEl.addEventListener('click', e => { e.stopPropagation(); menuPanel.hidden = !menuPanel.hidden; });
+
+      document.addEventListener('click', function (e) {
+        if (!menuPanel.hidden && !menuPanel.contains(e.target) && e.target !== logoEl && !logoEl.contains(e.target)) {
+          menuPanel.hidden = true;
+        }
+      });
+
+      // ── Modal (reusable) ─────────────────────────────────────────────────────
+
+      function openModal(title) { toolTitle.textContent = title; toolModal.hidden = false; }
+      function closeModal() { toolModal.hidden = true; }
+      toolClose.addEventListener('click', closeModal);
+      toolModal.addEventListener('click', e => { if (e.target === toolModal) closeModal(); });
+
+      // ── Menu item dispatch ────────────────────────────────────────────────────
+
+      menuPanel.addEventListener('click', e => {
+        const btn = e.target.closest('.menu-item'); if (!btn) return;
+        menuPanel.hidden = true;
+        const which = btn.dataset.menu;
+        if (which === 'troubleshooter') return openTroubleshooter();
+        if (which === 'settings') return openSettings();
+        if (which === 'themes') return openThemes();
+        if (which === 'feedback') return openFeedback();
+        const titles = {};
+        openModal(titles[which] || which);
+        toolBody.innerHTML = '<p class="modal-note">Geplant — kommt als Nächstes in dieser Reihenfolge: Troubleshooter ✓ · Settings ✓ · Themes ✓ · Feedback. Dieser Eintrag ist noch nicht gebaut.</p>';
+      });
+
+      // ── Troubleshooter chat ──────────────────────────────────────────────────
+
+      // Persistent across close/reopen within the same browser session.
+      let _tsMessages = [];   // full context sent to /troubleshoot (includes TOOL_RESULT entries)
+      let _tsDisplay  = [];   // [{role:'user'|'phoenix', text}] — display-only transcript
+
+      function _appendTsBubble(container, role, text) {
+        const div = document.createElement('div');
+        div.className = 'ts-bubble ts-bubble-' + role + (role === 'phoenix' && text === '…' ? ' ts-thinking' : '');
+        div.textContent = text;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
+      }
+
+      async function openTroubleshooter() {
+        openModal('Troubleshooter');
+        toolBody.innerHTML = '';
+
+        // Build chat layout dynamically (avoids any static-DOM timing issues)
+        const transcript = document.createElement('div');
+        transcript.className = 'ts-transcript';
+
+        const inputRow = document.createElement('div');
+        inputRow.className = 'ts-input-row';
+
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'ts-input';
+        inp.placeholder = 'Ask a question…';
+
+        const sendBtn = document.createElement('button');
+        sendBtn.className = 'modal-btn';
+        sendBtn.textContent = 'Send';
+
+        inputRow.appendChild(inp);
+        inputRow.appendChild(sendBtn);
+        toolBody.appendChild(transcript);
+        toolBody.appendChild(inputRow);
+
+        // Re-render prior display messages (if session was already open before)
+        for (const m of _tsDisplay) {
+          _appendTsBubble(transcript, m.role, m.text);
+        }
+
+        async function sendTsMessage(userText) {
+          if (!userText.trim()) return;
+          inp.disabled = true;
+          sendBtn.disabled = true;
+
+          _appendTsBubble(transcript, 'user', userText);
+          _tsDisplay.push({ role: 'user', text: userText });
+          _tsMessages.push({ role: 'user', content: userText });
+
+          const thinkingBubble = _appendTsBubble(transcript, 'phoenix', '…');
+
+          try {
+            const res = await fetch('/troubleshoot', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ messages: _tsMessages }),
+            });
+            const data = await res.json();
+            thinkingBubble.remove();
+
+            if (data.error) {
+              const errText = '[Error] ' + data.error;
+              _appendTsBubble(transcript, 'phoenix', errText);
+              _tsDisplay.push({ role: 'phoenix', text: errText });
+              // Roll back the user message we pushed (no server context update)
+              _tsMessages.pop();
+            } else {
+              const replyText = data.text || '(no response)';
+              _appendTsBubble(transcript, 'phoenix', replyText);
+              _tsDisplay.push({ role: 'phoenix', text: replyText });
+              _tsMessages = data.messages; // update to full server context
+            }
+          } catch (e) {
+            thinkingBubble.remove();
+            const errText = '[Error] ' + e.message;
+            _appendTsBubble(transcript, 'phoenix', errText);
+            _tsDisplay.push({ role: 'phoenix', text: errText });
+            _tsMessages.pop(); // roll back user message
+          }
+
+          inp.disabled = false;
+          sendBtn.disabled = false;
+          inp.focus();
+        }
+
+        sendBtn.addEventListener('click', () => {
+          const v = inp.value.trim();
+          inp.value = '';
+          sendTsMessage(v);
+        });
+        inp.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            const v = inp.value.trim();
+            inp.value = '';
+            sendTsMessage(v);
+          }
+        });
+
+        // LLM-on-demand: show a fresh, colour-coded preflight status on open — no LLM call,
+        // zero tokens. The Claude seat only fires when the user actually types a question.
+        const statusBox = document.createElement('div');
+        statusBox.className = 'ts-status';
+        statusBox.textContent = 'Running preflight…';
+        transcript.insertBefore(statusBox, transcript.firstChild);
+        fetch('/preflight', { method: 'POST' })
+          .then(r => r.json())
+          .then(d => _renderPreflight(statusBox, d.output || '(no preflight output)'))
+          .catch(e => { statusBox.textContent = 'Preflight failed: ' + e.message; });
+        inp.focus();
+      }
+
+      // ── Settings form ────────────────────────────────────────────────────────
+
+      async function openSettings() {
+        openModal('Settings');
+        toolBody.innerHTML = '';
+
+        const KNOWN_MODELS = [
+          { label: 'Opus 4.8',   value: 'claude-opus-4-8' },
+          { label: 'Sonnet 4.6', value: 'claude-sonnet-4-6' },
+          { label: 'Haiku 4.5',  value: 'claude-haiku-4-5-20251001' },
+          { label: 'Custom…', value: '__custom__' },
+        ];
+
+        function makeRow(labelText, inputEl) {
+          const row = document.createElement('div');
+          row.className = 'set-row';
+          const lbl = document.createElement('label');
+          lbl.className = 'set-label';
+          lbl.textContent = labelText;
+          row.appendChild(lbl);
+          row.appendChild(inputEl);
+          return row;
+        }
+
+        // Model select
+        const modelSel = document.createElement('select');
+        modelSel.id = 'set-model';
+        for (const opt of KNOWN_MODELS) {
+          const o = document.createElement('option');
+          o.value = opt.value;
+          o.textContent = opt.label;
+          modelSel.appendChild(o);
+        }
+
+        // Custom model text input (hidden unless Custom… is selected)
+        const modelCustom = document.createElement('input');
+        modelCustom.type = 'text';
+        modelCustom.id = 'set-model-custom';
+        modelCustom.placeholder = 'model id';
+        modelCustom.style.display = 'none';
+        modelCustom.style.marginTop = '6px';
+
+        const modelRow = makeRow('Orchestrator model', modelSel);
+        modelRow.appendChild(modelCustom);
+        toolBody.appendChild(modelRow);
+
+        modelSel.addEventListener('change', function () {
+          modelCustom.style.display = modelSel.value === '__custom__' ? '' : 'none';
+        });
+
+        // History length
+        const histInp = document.createElement('input');
+        histInp.type = 'number';
+        histInp.id = 'set-history';
+        histInp.min = '1';
+        histInp.max = '50';
+        histInp.step = '1';
+        toolBody.appendChild(makeRow('History length', histInp));
+
+        // LM Studio endpoint
+        const localInp = document.createElement('input');
+        localInp.type = 'text';
+        localInp.id = 'set-local';
+        localInp.placeholder = 'http://localhost:1234/v1';
+        toolBody.appendChild(makeRow('LM Studio endpoint', localInp));
+
+        // ComfyUI endpoint
+        const comfyInp = document.createElement('input');
+        comfyInp.type = 'text';
+        comfyInp.id = 'set-comfyui';
+        comfyInp.placeholder = 'http://localhost:8000';
+        toolBody.appendChild(makeRow('ComfyUI endpoint', comfyInp));
+
+        // Actions row: [Save settings] button + status line
+        const actRow = document.createElement('div');
+        actRow.className = 'modal-actions';
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'modal-btn';
+        saveBtn.textContent = 'Save settings';
+        const statusEl = document.createElement('span');
+        statusEl.className = 'set-status';
+        actRow.appendChild(saveBtn);
+        actRow.appendChild(statusEl);
+        toolBody.appendChild(actRow);
+
+        // Hint line
+        const hint = document.createElement('p');
+        hint.className = 'set-hint';
+        hint.textContent = 'Changes take effect on your next message. The model is verified with the Claude CLI and endpoints are pinged before saving — this takes a few seconds.';
+        toolBody.appendChild(hint);
+
+        // Prefill from server
+        try {
+          const r = await fetch('/config');
+          const c = await r.json();
+          const orch = c.orchestrator || {};
+          const eps  = c.endpoints   || {};
+
+          const knownMatch = KNOWN_MODELS.find(m => m.value !== '__custom__' && m.value === orch.model);
+          if (knownMatch) {
+            modelSel.value = orch.model;
+            modelCustom.style.display = 'none';
+          } else if (orch.model) {
+            modelSel.value = '__custom__';
+            modelCustom.value = orch.model;
+            modelCustom.style.display = '';
+          }
+
+          if (orch.historyMessages !== undefined) histInp.value = orch.historyMessages;
+          localInp.value = eps.local   || '';
+          comfyInp.value = eps.comfyui || '';
+        } catch (_) {}
+
+        saveBtn.addEventListener('click', async function () {
+          const chosenModel = modelSel.value === '__custom__'
+            ? modelCustom.value.trim()
+            : modelSel.value;
+
+          saveBtn.disabled = true;
+          statusEl.textContent = 'Validating… (verifying model + pinging endpoints)';
+
+          const body = {
+            orchestrator: { model: chosenModel, historyMessages: Number(histInp.value) },
+            endpoints: { local: localInp.value.trim(), comfyui: comfyInp.value.trim() },
+          };
+
+          try {
+            const res = await fetch('/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (res.ok) {
+              statusEl.textContent = '✅ Saved. Active from your next message.';
+            } else {
+              statusEl.textContent = '⚠️ ' + (data.error || 'Save failed');
+            }
+          } catch (e) {
+            statusEl.textContent = '⚠️ Network error: ' + e.message;
+          }
+
+          saveBtn.disabled = false;
+        });
+      }
+
+      // ── Themes picker ────────────────────────────────────────────────────────
+
+      function openThemes() {
+        openModal('Themes');
+        toolBody.innerHTML = '';
+
+        function renderThemeRows() {
+          toolBody.innerHTML = '';
+
+          const hint = document.createElement('p');
+          hint.className = 'set-hint';
+          hint.style.marginBottom = '12px';
+          hint.textContent = 'Theme is saved in your browser and restored on reload.';
+          toolBody.appendChild(hint);
+
+          for (const [key, theme] of Object.entries(THEMES)) {
+            const row = document.createElement('div');
+            row.className = 'theme-row' + (key === _currentTheme ? ' theme-row-active' : '');
+            row.title = theme.name;
+
+            // Colour swatches: bg, panel, accent
+            const swatchWrap = document.createElement('span');
+            swatchWrap.className = 'theme-swatches';
+            ['--bg', '--panel', '--accent'].forEach(function (v) {
+              const sw = document.createElement('span');
+              sw.className = 'theme-swatch';
+              sw.style.background = theme.vars[v];
+              swatchWrap.appendChild(sw);
+            });
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'theme-name';
+            nameEl.textContent = theme.name;
+
+            const checkEl = document.createElement('span');
+            checkEl.className = 'theme-check';
+            checkEl.textContent = key === _currentTheme ? '✓' : '';
+
+            row.appendChild(swatchWrap);
+            row.appendChild(nameEl);
+            row.appendChild(checkEl);
+
+            row.addEventListener('click', (function (k) {
+              return function () { applyTheme(k); renderThemeRows(); };
+            })(key));
+
+            toolBody.appendChild(row);
+          }
+        }
+
+        renderThemeRows();
+      }
+
+      // ── Feedback / Bug report ─────────────────────────────────────────────────
+
+      async function openFeedback() {
+        openModal('Feedback / Bug report');
+        toolBody.innerHTML = '';
+
+        // Description textarea
+        const descRow = document.createElement('div');
+        descRow.className = 'set-row';
+        const descLbl = document.createElement('label');
+        descLbl.className = 'set-label';
+        descLbl.textContent = 'Describe the problem';
+        const desc = document.createElement('textarea');
+        desc.id = 'fb-desc';
+        desc.rows = 4;
+        desc.className = 'fb-textarea';
+        desc.placeholder = 'Describe the problem: what you did, what happened…';
+        descRow.appendChild(descLbl);
+        descRow.appendChild(desc);
+        toolBody.appendChild(descRow);
+
+        // Technical details preview (readonly)
+        const previewRow = document.createElement('div');
+        previewRow.className = 'set-row';
+        const previewLbl = document.createElement('label');
+        previewLbl.className = 'set-label';
+        previewLbl.textContent = 'Technical details included in the report:';
+        const preview = document.createElement('textarea');
+        preview.id = 'fb-preview';
+        preview.rows = 8;
+        preview.className = 'fb-textarea';
+        preview.readOnly = true;
+        preview.style.fontFamily = 'monospace';
+        preview.value = 'Loading…';
+        previewRow.appendChild(previewLbl);
+        previewRow.appendChild(preview);
+        toolBody.appendChild(previewRow);
+
+        // Actions row: [Copy bug report] button + status
+        const actRow = document.createElement('div');
+        actRow.className = 'modal-actions';
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'modal-btn';
+        copyBtn.textContent = 'Copy bug report';
+        const statusEl = document.createElement('span');
+        statusEl.className = 'set-status';
+        actRow.appendChild(copyBtn);
+        actRow.appendChild(statusEl);
+        toolBody.appendChild(actRow);
+
+        // Hint
+        const hint = document.createElement('p');
+        hint.className = 'set-hint';
+        hint.textContent = 'Automatic submission is coming later — for now, copy this and send it to the developer manually.';
+        toolBody.appendChild(hint);
+
+        // Fetch technical details from /bugreport on open
+        try {
+          const r = await fetch('/bugreport');
+          const data = await r.json();
+          if (r.ok && data.report) {
+            preview.value = data.report;
+          } else {
+            preview.value = '(failed to load technical details: ' + (data.error || r.status) + ')';
+          }
+        } catch (e) {
+          preview.value = '(failed to load technical details: ' + e.message + ')';
+        }
+
+        // Copy handler
+        copyBtn.addEventListener('click', async function () {
+          const full = (desc.value.trim() ? 'Problem: ' + desc.value.trim() + '\n\n' : '') + preview.value;
+          try {
+            await navigator.clipboard.writeText(full);
+            statusEl.textContent = '✅ Copied to clipboard — paste it to send.';
+          } catch (_) {
+            try {
+              preview.select();
+              document.execCommand('copy');
+              statusEl.textContent = '✅ Copied to clipboard — paste it to send.';
+            } catch (e2) {
+              statusEl.textContent = '⚠️ Copy failed — select the text manually.';
+            }
+          }
+        });
+      }
+
+      // Render preflight text as colour-coded lines (PASS/WARN/FAIL). No LLM involved.
+      function _renderPreflight(container, output) {
+        container.textContent = '';
+        for (const line of output.split('\n')) {
+          const row = document.createElement('div');
+          row.className = 'ts-status-line';
+          if (line.includes('[PASS]'))      row.classList.add('pf-pass');
+          else if (line.includes('[WARN]')) row.classList.add('pf-warn');
+          else if (line.includes('[FAIL]')) row.classList.add('pf-fail');
+          row.textContent = line;
+          container.appendChild(row);
+        }
+      }
+
+      // ── Artifact display ─────────────────────────────────────────────────────
+
+      function setArtifact(obj) {
+        if (obj.slot === 'prompt') {
+          artPromptEl.textContent = obj.text || '';
+          promptPlaceholder.style.display = obj.text ? 'none' : '';
+          if (promptEditEl) promptEditEl.value = obj.text || '';
+          if (imagePromptEditEl) imagePromptEditEl.value = obj.text || '';
+          switchTab('prompt');
+        } else if (obj.slot === 'image') {
+          artImageEl.src = obj.url;
+          artImageEl.classList.add('loaded');
+          imagePlaceholder.style.display = 'none';
+          switchTab('image');
+          imageFromUser = (obj.source === 'upload');
+          updateRegenImageLock();
+        } else if (obj.slot === 'mesh') {
+          artMeshEl.src = obj.url;
+          artMeshEl.classList.add('loaded');
+          meshPlaceholder.style.display = 'none';
+          switchTab('mesh');
+          try {
+            const pParam = new URL(obj.url, window.location.href).searchParams.get('p');
+            if (pParam) {
+              const relPath = decodeURIComponent(pParam);
+              const parts = relPath.split('/');
+              if (parts.length >= 2) {
+                const fileName = parts[parts.length - 1];
+                const category = parts[parts.length - 2];
+                currentMesh = { name: fileName, category: category };
+              }
+            }
+          } catch (_) {}
+          if (meshFacesEl && !meshFacesEl.value && currentMesh && FACE_DEFAULTS[currentMesh.category]) {
+            meshFacesEl.value = FACE_DEFAULTS[currentMesh.category];
+          }
+          meshFromLibrary = (obj.source === 'library');
+          updateRegenLock();
+        }
+      }
+
+      // ── Helpers ─────────────────────────────────────────────────────────────
+
+      function appendBubble(cls, text) {
+        const div = document.createElement('div');
+        div.className = 'bubble ' + cls;
+        div.textContent = text;
+        messagesEl.appendChild(div);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return div;
+      }
+
+      function setInputEnabled(on) {
+        inputEl.disabled  = !on;
+        sendBtn.disabled  = !on;
+        if (on) inputEl.focus();
+      }
+
+      function setActionsEnabled(on) {
+        document.querySelectorAll('.art-btn').forEach(b => b.disabled = !on);
+      }
+
+      async function postAction(action, input) {
+        setActionsEnabled(false);
+        clearGateWaiting();
+        setInputEnabled(false);
+        let res;
+        try {
+          res = await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
+        } catch (err) {
+          appendBubble('error', 'Network error: ' + err.message);
+          setActionsEnabled(true);
+          setInputEnabled(true);
+          return;
+        }
+        if (res.status === 409) {
+          appendBubble('busy-note', 'busy… try again in a moment');
+          setActionsEnabled(true);
+          setInputEnabled(true);
+          return;
+        }
+        if (!res.ok) {
+          const b = await res.text();
+          appendBubble('error', 'Server error ' + res.status + ': ' + b);
+          setActionsEnabled(true);
+          setInputEnabled(true);
+          return;
+        }
+        // 202 — reply/error arrives via SSE, which re-enables.
+      }
+
+      function appendLogLine(rec) {
+        const hms     = rec.ts ? rec.ts.slice(11, 19) : '??:??:??';
+        const cat     = rec.cat || 'unknown';
+
+        // Build compact fields object (exclude ts and cat)
+        const fields = {};
+        for (const k of Object.keys(rec)) {
+          if (k !== 'ts' && k !== 'cat') fields[k] = rec[k];
+        }
+        let compact = JSON.stringify(fields);
+        if (compact.length > 300) compact = compact.slice(0, 300) + '…';
+
+        const line = document.createElement('div');
+        line.className = 'log-line cat-' + cat;
+        line.textContent = '[' + hms + '] [' + cat + '] ' + compact;
+        consoleEl.appendChild(line);
+        consoleEl.scrollTop = consoleEl.scrollHeight;
+      }
+
+      // ── SSE ─────────────────────────────────────────────────────────────────
+
+      const es = new EventSource('/events');
+
+      es.onmessage = function (e) {
+        let obj;
+        try { obj = JSON.parse(e.data); } catch { return; }
+
+        if (obj.kind === 'event') {
+          if (obj.rec && obj.rec.cat === 'gate') { setGateWaiting(obj.rec.awaiting); switchTab(obj.rec.awaiting); }
+          appendLogLine(obj.rec);
+          return;
+        }
+
+        if (obj.kind === 'artifact') {
+          setArtifact(obj);
+          if (obj.slot === 'mesh') refreshLibrary();
+          return;
+        }
+
+        if (obj.kind === 'reply') {
+          appendBubble('phoenix', obj.text);
+          setInputEnabled(true);
+          setActionsEnabled(true);
+          refreshLibrary();
+          return;
+        }
+
+        if (obj.kind === 'error') {
+          appendBubble('error', 'Error: ' + obj.message);
+          setInputEnabled(true);
+          setActionsEnabled(true);
+          return;
+        }
+
+        if (obj.kind === 'notice') { appendBubble('phoenix', obj.text); refreshLibrary(); return; }
+
+        // 'user' kind is ignored — we already appended optimistically on send
+      };
+
+      es.onerror = function () {
+        // SSE reconnects automatically; no action needed
+      };
+
+      // ── Send ────────────────────────────────────────────────────────────────
+
+      async function sendChat(message, noTool) {
+        appendBubble('user', message);
+        clearGateWaiting();
+        setInputEnabled(false);
+        let res;
+        try {
+          res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, noTool: !!noTool }),
+          });
+        } catch (err) {
+          appendBubble('error', 'Network error: ' + err.message);
+          setInputEnabled(true);
+          return;
+        }
+        if (res.status === 409) {
+          appendBubble('busy-note', 'busy… try again in a moment');
+          setInputEnabled(true);
+          return;
+        }
+        if (!res.ok) {
+          const body = await res.text();
+          appendBubble('error', 'Server error ' + res.status + ': ' + body);
+          setInputEnabled(true);
+          return;
+        }
+        // 202 — reply/error arrives via SSE
+      }
+
+      async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text) return;
+
+        // Slash commands (client-side; bypass / augment the orchestrator)
+        if (text[0] === '/') {
+          const sp   = text.indexOf(' ');
+          const cmd  = (sp === -1 ? text : text.slice(0, sp)).toLowerCase();
+          const rest = sp === -1 ? '' : text.slice(sp + 1).trim();
+          inputEl.value = '';
+          if (cmd === '/notool') {
+            const arg = rest.toLowerCase();
+            if (rest === '') {
+              appendBubble('phoenix', 'Blender-only mode is ' + (blenderOnly ? 'ON' : 'OFF') + '. Use "/notool on", "/notool off", or "/notool <description>" for a single message.');
+            } else if (arg === 'on') {
+              setBlenderOnly(true);
+              appendBubble('phoenix', 'Blender-only mode ON — I will model meshes directly in Blender (bpy), without the image/3D generation tools.');
+            } else if (arg === 'off') {
+              setBlenderOnly(false);
+              appendBubble('phoenix', 'Blender-only mode OFF — generation tools re-enabled.');
+            } else {
+              // one-shot: this single message runs Blender-only regardless of the toggle
+              sendChat(rest, true);
+            }
+            return;
+          }
+          if (cmd === '/generate') {
+            if (!rest) { appendBubble('phoenix', 'Usage: /generate <description>'); return; }
+            postAction('generate_image', { description: rest });
+            return;
+          }
+          if (cmd === '/regenerate') {
+            postAction('generate_image', {}); // re-run from the last description, new seed
+            return;
+          }
+          if (cmd === '/make3d') {
+            postAction('image_to_3d', {});
+            return;
+          }
+          if (cmd === '/import') {
+            if (!currentMesh) { appendBubble('error', 'No staged mesh to import yet.'); return; }
+            const cleanup = rest.toLowerCase() === 'cleaned';
+            postAction('import_asset', { name: currentMesh.name, cleanup });
+            return;
+          }
+          if (cmd === '/spawn') {
+            const parts = rest.split(/\s+/).filter(Boolean);
+            const slug = parts[0];
+            if (!slug) { appendBubble('phoenix', 'Usage: /spawn <brush-slug> [x y z]'); return; }
+            const input = { name: slug };
+            const nx = parseFloat(parts[1]), ny = parseFloat(parts[2]), nz = parseFloat(parts[3]);
+            if (Number.isFinite(nx)) input.x = nx;
+            if (Number.isFinite(ny)) input.y = ny;
+            if (Number.isFinite(nz)) input.z = nz;
+            postAction('use_brush', input);
+            return;
+          }
+          if (cmd === '/help') {
+            appendBubble('phoenix', [
+              'Commands:',
+              '/generate <desc> — generate an image',
+              '/regenerate — regenerate from the last description (new seed)',
+              '/make3d — turn the current image into 3D',
+              '/import [raw|cleaned] — import the current mesh (default raw)',
+              '/spawn <slug> [x y z] — place a brush from the library',
+              '/notool [on|off|<desc>] — Blender-only mode (model with bpy)',
+              '/help — this list',
+            ].join('\n'));
+            return;
+          }
+          appendBubble('phoenix', 'Unknown command. Available: /generate /regenerate /make3d /import /spawn /notool /help');
+          return;
+        }
+
+        inputEl.value = '';
+        sendChat(text, blenderOnly);
+      }
+
+      sendBtn.addEventListener('click', sendMessage);
+
+      inputEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+
+      // ── Action buttons ──────────────────────────────────────────────────────
+
+      document.getElementById('prompt-actions').addEventListener('click', function (e) {
+        const btn = e.target.closest('.art-btn'); if (!btn) return;
+        const act = btn.dataset.action;
+        if (act === 'approve-prompt') {
+          const { pos, neg } = parsePromptText(promptEditEl ? promptEditEl.value : '');
+          if (pos) postAction('generate_image', { prompt: pos, negative: neg });
+          else postAction('generate_image', {});
+        } else if (act === 'regen-prompt') {
+          postAction('generate_image', {});
+        }
+      });
+
+      document.getElementById('image-actions').addEventListener('click', function (e) {
+        const btn = e.target.closest('.art-btn');
+        if (!btn) return;
+        const act = btn.dataset.action;
+        if (act === 'load-image') {
+          imageFileEl.click();
+        } else if (act === 'regen-image') {
+          if (imageFromUser) { appendBubble('phoenix', 'Can’t regenerate a loaded image — it has no source prompt. Use "Make 3D" on it, or type a prompt in chat to generate a fresh image.'); return; }
+          const src = imagePromptEditEl ? imagePromptEditEl.value : '';
+          const { pos, neg } = parsePromptText(src);
+          if (pos) postAction('generate_image', { prompt: pos, negative: neg });
+          else postAction('generate_image', {});   // empty box → metaprompter from description
+        } else if (act === 'make-3d') {
+          postAction('image_to_3d', {});
+        }
+      });
+
+      imageFileEl.addEventListener('change', async function () {
+        const file = imageFileEl.files && imageFileEl.files[0];
+        if (!file) return;
+        setActionsEnabled(false);
+        try {
+          const buf = await file.arrayBuffer();
+          const res = await fetch('/upload?name=' + encodeURIComponent(file.name), {
+            method: 'POST',
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+            body: buf,
+          });
+          if (!res.ok) { const b = await res.text(); appendBubble('error', 'Upload failed ' + res.status + ': ' + b); setActionsEnabled(true); }
+          // on success the SSE 'reply' re-enables buttons and the 'artifact' shows the image
+        } catch (err) {
+          appendBubble('error', 'Upload error: ' + err.message);
+          setActionsEnabled(true);
+        } finally {
+          imageFileEl.value = ''; // allow re-selecting the same file
+        }
+      });
+
+      document.getElementById('mesh-actions').addEventListener('click', function (e) {
+        const btn = e.target.closest('.art-btn');
+        if (!btn) return;
+        const act = btn.dataset.action;
+        if (act === 'import-raw') {
+          if (!currentMesh) { appendBubble('error', 'No staged mesh to import yet.'); return; }
+          postAction('import_asset', { name: currentMesh.name, cleanup: false });
+        } else if (act === 'import-cleaned') {
+          if (!currentMesh) { appendBubble('error', 'No staged mesh to import yet.'); return; }
+          postAction('import_asset', { name: currentMesh.name, cleanup: true });
+        } else if (act === 'regen-mesh') {
+          if (meshFromLibrary) { appendBubble('phoenix', 'Can’t regenerate a library asset — it has no source image. Generate a new prop, or just import this one as-is.'); return; }
+          const n = parseInt(meshFacesEl && meshFacesEl.value, 10);
+          const input = (Number.isFinite(n) && n > 0) ? { target_face_num: n } : {};
+          postAction('image_to_3d', input);
+        } else if (act === 'save-brush') {
+          if (!currentMesh) { appendBubble('error', 'Import the mesh first, then save it as a brush.'); return; }
+          const nm = prompt('Brush name (slug):');
+          if (nm) postAction('save_as_brush', { name: nm.trim(), category: currentMesh.category });
+        }
+      });
+
+      // ── Library (right rail) ─────────────────────────────────────────────────
+
+      const LIB_CAT_ORDER = ['flat', 'furniture', 'item', 'architecture', 'flora', 'fauna'];
+
+      function makeLibItem(opts) {
+        const el = document.createElement('div');
+        el.className = 'lib-item';
+        el.dataset.kind = opts.kind;
+        Object.entries(opts.dataset).forEach(([k, v]) => { el.dataset[k] = v; });
+        if (opts.swatchColor) {
+          const sw = document.createElement('span');
+          sw.className = 'lib-swatch';
+          const [r, g, b] = opts.swatchColor;
+          sw.style.background = 'rgb(' + Math.round(r * 255) + ',' + Math.round(g * 255) + ',' + Math.round(b * 255) + ')';
+          el.appendChild(sw);
+        }
+        const nm = document.createElement('span');
+        nm.className = 'lib-item-name';
+        nm.textContent = opts.label;
+        el.title = opts.label;
+        el.appendChild(nm);
+        if (opts.actions && opts.actions.length) {
+          const acts = document.createElement('span');
+          acts.className = 'lib-actions';
+          opts.actions.forEach(act => {
+            const btn = document.createElement('button');
+            btn.className = 'lib-act-btn';
+            btn.dataset.act = act;
+            btn.textContent = act === 'rename' ? '✎' : '🗑';
+            btn.title = act;
+            acts.appendChild(btn);
+          });
+          el.appendChild(acts);
+        }
+        return el;
+      }
+
+      async function loadAssets() {
+        try {
+          const res = await fetch('/assets');
+          const data = await res.json();
+          const assets = data.assets || [];
+          libAssetsBody.innerHTML = '';
+          if (assets.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lib-empty';
+            empty.textContent = 'no staged assets yet';
+            libAssetsBody.appendChild(empty);
+            return;
+          }
+          const grouped = {};
+          for (const asset of assets) {
+            if (!grouped[asset.category]) grouped[asset.category] = [];
+            grouped[asset.category].push(asset);
+          }
+          const cats = [
+            ...LIB_CAT_ORDER.filter(c => grouped[c] && grouped[c].length),
+            ...Object.keys(grouped).filter(c => !LIB_CAT_ORDER.includes(c)),
+          ];
+          for (const cat of cats) {
+            const hdr = document.createElement('div');
+            hdr.className = 'lib-cat';
+            hdr.textContent = cat;
+            libAssetsBody.appendChild(hdr);
+            for (const a of grouped[cat]) {
+              libAssetsBody.appendChild(makeLibItem({ kind: 'asset', label: a.label || a.name, dataset: { name: a.name, category: a.category }, actions: ['rename', 'delete'] }));
+            }
+          }
+        } catch (_) {}
+      }
+
+      async function loadBrushes() {
+        try {
+          const res = await fetch('/brushes');
+          const data = await res.json();
+          const brushes = data.brushes || [];
+          libBrushesBody.innerHTML = '';
+          if (brushes.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lib-empty';
+            empty.textContent = 'no brushes yet';
+            libBrushesBody.appendChild(empty);
+            return;
+          }
+          const grouped = { sci_fi: [], phoenix: [] };
+          for (const b of brushes) {
+            const key = b.type === 'sci_fi' ? 'sci_fi' : 'phoenix';
+            if (!grouped[key]) grouped[key] = [];
+            grouped[key].push(b);
+          }
+          const order = [['sci_fi', 'Sci-Fi'], ['phoenix', 'Phoenix']];
+          for (const [key, label] of order) {
+            if (!grouped[key] || !grouped[key].length) continue;
+            const hdr = document.createElement('div');
+            hdr.className = 'lib-cat';
+            hdr.textContent = label;
+            libBrushesBody.appendChild(hdr);
+            for (const b of grouped[key]) {
+              libBrushesBody.appendChild(makeLibItem({ kind: 'brush', label: b.display, dataset: { slug: b.slug, display: b.display }, actions: ['rename', 'delete'] }));
+            }
+          }
+        } catch (_) {}
+      }
+
+      async function loadMaterials() {
+        try {
+          const res = await fetch('/materials');
+          const data = await res.json();
+          const materials = data.materials || [];
+          libMaterialsBody.innerHTML = '';
+          if (materials.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lib-empty';
+            empty.textContent = 'no materials';
+            libMaterialsBody.appendChild(empty);
+            return;
+          }
+          for (const m of materials) {
+            libMaterialsBody.appendChild(makeLibItem({ kind: 'material', label: m.name, dataset: { name: m.name }, swatchColor: m.color || null }));
+          }
+        } catch (_) {}
+      }
+
+      function refreshLibrary() { loadAssets(); loadBrushes(); loadMaterials(); loadPaletteTab(); loadWorkflowsTab(); }
+
+      const libRoot = document.getElementById('library-list');
+      let _libClickTimer = null;
+
+      libRoot.addEventListener('click', function (e) {
+        const actBtn = e.target.closest('.lib-act-btn');
+        const item = e.target.closest('.lib-item');
+        if (!item) return;
+        if (actBtn) {
+          clearTimeout(_libClickTimer);
+          const act = actBtn.dataset.act;
+          const kind = item.dataset.kind;
+          if (act === 'rename') {
+            if (kind === 'asset') {
+              const nl = prompt('Label for ' + item.dataset.name + ':', item.querySelector('.lib-item-name').textContent);
+              if (nl !== null) postAction('rename_asset', { category: item.dataset.category, name: item.dataset.name, label: nl.trim() });
+            } else if (kind === 'brush') {
+              const nd = prompt('Display name:', item.dataset.display || '');
+              if (nd && nd.trim()) postAction('rename_brush', { slug: item.dataset.slug, display: nd.trim() });
+            }
+          } else if (act === 'delete') {
+            if (kind === 'asset') {
+              if (confirm('Delete ' + item.dataset.category + '/' + item.dataset.name + '? This removes the file.')) postAction('delete_asset', { category: item.dataset.category, name: item.dataset.name });
+            } else if (kind === 'brush') {
+              if (confirm('Delete brush "' + (item.dataset.display || item.dataset.slug) + '"?')) postAction('delete_brush', { slug: item.dataset.slug });
+            }
+          }
+          return;
+        }
+        clearTimeout(_libClickTimer);
+        _libClickTimer = setTimeout(function () {
+          libRoot.querySelectorAll('.lib-item').forEach(function (el) { el.classList.remove('selected'); });
+          item.classList.add('selected');
+          const kind = item.dataset.kind;
+          if (kind === 'asset') {
+            currentMesh = { name: item.dataset.name, category: item.dataset.category };
+            const p = 'staging/' + item.dataset.category + '/' + item.dataset.name;
+            fetch('/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot: 'mesh', p, source: 'library' }) }).catch(function () {});
+          } else if (kind === 'material') {
+            postAction('apply_material', { name: item.dataset.name });
+          }
+        }, 250);
+      });
+
+      libRoot.addEventListener('dblclick', function (e) {
+        if (e.target.closest('.lib-act-btn')) return;
+        const item = e.target.closest('.lib-item');
+        if (!item) return;
+        clearTimeout(_libClickTimer);
+        libRoot.querySelectorAll('.lib-item').forEach(function (el) { el.classList.remove('selected'); });
+        item.classList.add('selected');
+        const kind = item.dataset.kind;
+        if (kind === 'asset') {
+          currentMesh = { name: item.dataset.name, category: item.dataset.category };
+          postAction('import_asset', { name: item.dataset.name, cleanup: false });
+        } else if (kind === 'brush') {
+          postAction('use_brush', { name: item.dataset.slug });
+        }
+      });
+
+      // ── Palette tab ──────────────────────────────────────────────────────────
+
+      async function loadPaletteTab() {
+        try {
+          const res = await fetch('/palette');
+          const data = await res.json();
+          const categories = data.categories || {};
+          libPaletteBody.innerHTML = '';
+
+          // "+ Add category" button at the top
+          const addBtn = document.createElement('button');
+          addBtn.className = 'modal-btn';
+          addBtn.style.margin = '8px 12px 4px';
+          addBtn.style.fontSize = '12px';
+          addBtn.style.padding = '5px 10px';
+          addBtn.textContent = '+ Add category';
+          addBtn.addEventListener('click', function () { openPaletteEditor(null, null); });
+          libPaletteBody.appendChild(addBtn);
+
+          // Builtins first (in LIB_CAT_ORDER), then custom keys
+          const builtinOrder = LIB_CAT_ORDER.filter(function (k) { return k in categories; });
+          const customKeys   = Object.keys(categories).filter(function (k) { return !LIB_CAT_ORDER.includes(k); });
+          const allKeys      = builtinOrder.concat(customKeys);
+
+          if (allKeys.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lib-empty';
+            empty.textContent = 'no categories';
+            libPaletteBody.appendChild(empty);
+            return;
+          }
+
+          for (var i = 0; i < allKeys.length; i++) {
+            (function (k) {
+              const cat = categories[k];
+              const row = document.createElement('div');
+              row.className = 'lib-item';
+
+              const nameSpan = document.createElement('span');
+              nameSpan.className = 'lib-item-name';
+              nameSpan.textContent = k;
+
+              const markerSpan = document.createElement('span');
+              markerSpan.className = 'pal-marker';
+              markerSpan.textContent = cat.builtin ? 'builtin' : 'custom';
+
+              row.appendChild(nameSpan);
+              row.appendChild(markerSpan);
+
+              row.addEventListener('click', function () { openPaletteEditor(k, cat); });
+              libPaletteBody.appendChild(row);
+            })(allKeys[i]);
+          }
+        } catch (_) {
+          libPaletteBody.innerHTML = '';
+          const empty = document.createElement('div');
+          empty.className = 'lib-empty';
+          empty.textContent = 'could not load palette';
+          libPaletteBody.appendChild(empty);
+        }
+      }
+
+      async function loadWorkflowsTab() {
+        try {
+          const [wfRes, depRes] = await Promise.all([fetch('/workflows'), fetch('/workflows/deps')]);
+          const wfData  = await wfRes.json();
+          const depData = await depRes.json().catch(function () { return { reachable: false }; });
+          const workflowsMap = wfData.workflows || {};
+          const active       = wfData.active || {};
+          libWorkflowsBody.innerHTML = '';
+
+          const addBtn = document.createElement('div');
+          addBtn.className = 'lib-item';
+          addBtn.style.cursor = 'pointer';
+          addBtn.style.fontWeight = '700';
+          addBtn.style.color = 'var(--accent)';
+          addBtn.textContent = '+ Add workflow';
+          addBtn.addEventListener('click', function () { openWorkflowEditor(null); });
+          libWorkflowsBody.appendChild(addBtn);
+
+          for (const stage of ['image', 'mesh']) {
+            const hdr = document.createElement('div');
+            hdr.className = 'lib-cat';
+            hdr.textContent = stage === 'image' ? 'Image' : '3D / Mesh';
+            libWorkflowsBody.appendChild(hdr);
+
+            const ids = Object.keys(workflowsMap).filter(function (id) { return workflowsMap[id].stage === stage; });
+
+            if (ids.length === 0) {
+              const empty = document.createElement('div');
+              empty.className = 'lib-empty';
+              empty.textContent = 'no workflows';
+              libWorkflowsBody.appendChild(empty);
+              continue;
+            }
+
+            for (var wi = 0; wi < ids.length; wi++) {
+              (function (id) {
+                const e        = workflowsMap[id];
+                const isActive = active[stage] === id;
+
+                const row = document.createElement('div');
+                row.className = 'lib-item';
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'lib-item-name';
+                nameSpan.textContent = e.label;
+
+                const markerSpan = document.createElement('span');
+                markerSpan.className = 'pal-marker';
+                markerSpan.style.fontStyle = 'normal';
+                markerSpan.style.fontWeight = '700';
+                if (isActive) {
+                  markerSpan.textContent = '● active';
+                  markerSpan.style.color = '#4caf50';
+                  row.style.background = 'rgba(76,175,80,0.10)';
+                } else {
+                  markerSpan.textContent = 'select';
+                  markerSpan.style.color = 'var(--accent)';
+                }
+
+                const depSpan = document.createElement('span');
+                depSpan.style.fontSize = '11px';
+                depSpan.style.marginLeft = '6px';
+                if (!depData.reachable) {
+                  depSpan.textContent = 'deps: ComfyUI offline';
+                  depSpan.style.color = '#888';
+                } else {
+                  const d = (depData.deps && depData.deps[id]) || null;
+                  if (d && d.ready) {
+                    depSpan.textContent = '✓ ready';
+                    depSpan.style.color = '#4caf50';
+                  } else {
+                    const missing = [].concat(d ? d.missing_nodes : []).concat(d ? d.missing_models : []);
+                    depSpan.textContent = '✗ ' + (missing.join(', ') || 'missing deps');
+                    depSpan.style.color = '#e06c6c';
+                  }
+                }
+
+                row.appendChild(nameSpan);
+                row.appendChild(markerSpan);
+                row.appendChild(depSpan);
+
+                const tierSpan = document.createElement('span');
+                tierSpan.className = 'pal-marker';
+                tierSpan.style.marginLeft = '6px';
+                tierSpan.textContent = e.builtin ? 'Verified' : 'Custom';
+                tierSpan.style.color = e.builtin ? 'var(--muted)' : 'var(--accent)';
+                row.appendChild(tierSpan);
+
+                if (!e.builtin) {
+                  const editBtn = document.createElement('button');
+                  editBtn.className = 'lib-act-btn'; editBtn.textContent = '✎'; editBtn.title = 'Edit';
+                  editBtn.style.marginLeft = '4px';
+                  editBtn.addEventListener('click', function (ev) { ev.stopPropagation(); openWorkflowEditor(id); });
+                  row.appendChild(editBtn);
+                  const delBtn = document.createElement('button');
+                  delBtn.className = 'lib-act-btn'; delBtn.textContent = '🗑'; delBtn.title = 'Delete';
+                  delBtn.addEventListener('click', async function (ev) {
+                    ev.stopPropagation();
+                    if (!confirm('Delete custom workflow "' + e.label + '"?')) return;
+                    await fetch('/workflows/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) });
+                    loadWorkflowsTab();
+                  });
+                  row.appendChild(delBtn);
+                }
+
+                if (!isActive) {
+                  row.style.cursor = 'pointer';
+                  row.addEventListener('click', async function () {
+                    await fetch('/workflows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage: stage, id: id }) });
+                    loadWorkflowsTab();
+                  });
+                }
+
+                libWorkflowsBody.appendChild(row);
+              })(ids[wi]);
+            }
+          }
+        } catch (_) {
+          libWorkflowsBody.innerHTML = '';
+          const empty = document.createElement('div');
+          empty.className = 'lib-empty';
+          empty.textContent = 'could not load workflows';
+          libWorkflowsBody.appendChild(empty);
+        }
+      }
+
+      async function openWorkflowEditor(editId) {
+        const isEdit = !!editId;
+        openModal(isEdit ? ('Edit workflow: ' + editId) : 'Add workflow');
+        toolBody.innerHTML = '';
+
+        function makeRow(labelText, inputEl) {
+          const row = document.createElement('div'); row.className = 'set-row';
+          const lbl = document.createElement('label'); lbl.className = 'set-label'; lbl.textContent = labelText;
+          row.appendChild(lbl); row.appendChild(inputEl); return row;
+        }
+
+        var uploadedJson = null;
+        var stage = 'image';
+        var nodeChoices = [];
+        var slotControls = {};
+        const nodeMapContainer = document.createElement('div');
+        const statusEl = document.createElement('span'); statusEl.className = 'set-status';
+
+        const idInput = document.createElement('input'); idInput.type = 'text';
+        idInput.placeholder = 'workflow_id (lowercase a-z 0-9 _)';
+        const labelInput = document.createElement('input'); labelInput.type = 'text';
+        labelInput.placeholder = 'Display label';
+
+        var stageControl;
+        if (isEdit) {
+          stageControl = document.createElement('input'); stageControl.type = 'text'; stageControl.disabled = true;
+        } else {
+          stageControl = document.createElement('select');
+          [['image', 'Image'], ['mesh', '3D / Mesh']].forEach(function (o) {
+            const op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; stageControl.appendChild(op);
+          });
+          stageControl.addEventListener('change', function () { stage = stageControl.value; rebuildNodeMap({}); });
+        }
+
+        function slotsFor(s) { return s === 'mesh' ? ['image', 'seed', 'target_face_num', 'output_prefix', 'output'] : ['positive', 'negative', 'cfg', 'steps', 'seed', 'output']; }
+
+        function rebuildNodeMap(prefill) {
+          nodeMapContainer.innerHTML = '';
+          slotControls = {};
+          slotsFor(stage).forEach(function (slot) {
+            const sel = document.createElement('select');
+            const none = document.createElement('option'); none.value = ''; none.textContent = '- none -'; sel.appendChild(none);
+            nodeChoices.forEach(function (nc) {
+              const op = document.createElement('option'); op.value = nc.id;
+              op.textContent = nc.id + ' - ' + nc.class_type + (nc.title ? ' - ' + nc.title : '');
+              sel.appendChild(op);
+            });
+            const fld = document.createElement('input'); fld.type = 'text'; fld.placeholder = 'field (optional)';
+            fld.style.marginLeft = '4px'; fld.style.width = '120px';
+            if (prefill && prefill[slot] != null) {
+              const v = prefill[slot];
+              if (v && typeof v === 'object') { sel.value = String(v.node); fld.value = v.field || ''; }
+              else { sel.value = String(v); }
+            }
+            const wrap = document.createElement('div'); wrap.style.display = 'flex'; wrap.style.alignItems = 'center';
+            wrap.appendChild(sel); wrap.appendChild(fld);
+            slotControls[slot] = { select: sel, field: fld };
+            nodeMapContainer.appendChild(makeRow(slot, wrap));
+          });
+        }
+
+        function readNodes() {
+          const nodes = {};
+          Object.keys(slotControls).forEach(function (slot) {
+            const c = slotControls[slot]; const nid = c.select.value; if (!nid) return;
+            const f = c.field.value.trim(); nodes[slot] = f ? { node: nid, field: f } : nid;
+          });
+          return nodes;
+        }
+
+        const customNodesEl = document.createElement('textarea'); customNodesEl.rows = 2; customNodesEl.className = 'pal-textarea'; customNodesEl.placeholder = 'custom node class names, one per line';
+        const modelsEl = document.createElement('textarea'); modelsEl.rows = 2; modelsEl.className = 'pal-textarea'; modelsEl.placeholder = 'model filenames, one per line';
+        function readDeps() {
+          function lines(t) { return t.split('\n').map(function (x) { return x.trim(); }).filter(Boolean); }
+          return { custom_nodes: lines(customNodesEl.value), models: lines(modelsEl.value) };
+        }
+
+        toolBody.appendChild(makeRow('Stage', stageControl));
+
+        if (!isEdit) {
+          const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.json,application/json';
+          const fileName = document.createElement('span'); fileName.style.marginLeft = '6px'; fileName.style.fontSize = '12px'; fileName.style.color = 'var(--muted)';
+          fileInput.addEventListener('change', function () {
+            const f = fileInput.files && fileInput.files[0]; if (!f) return;
+            const reader = new FileReader();
+            reader.onload = function () { uploadedJson = String(reader.result); fileName.textContent = f.name; statusEl.textContent = 'File loaded - click "Analyze with Phoenix".'; };
+            reader.readAsText(f);
+          });
+          const fileWrap = document.createElement('div'); fileWrap.style.display = 'flex'; fileWrap.style.alignItems = 'center';
+          fileWrap.appendChild(fileInput); fileWrap.appendChild(fileName);
+          toolBody.appendChild(makeRow('Workflow JSON (API format)', fileWrap));
+
+          const analyzeBtn = document.createElement('button'); analyzeBtn.className = 'modal-btn'; analyzeBtn.style.fontSize = '12px'; analyzeBtn.style.padding = '5px 10px';
+          analyzeBtn.textContent = 'Analyze with Phoenix';
+          analyzeBtn.style.marginBottom = '8px';
+          analyzeBtn.addEventListener('click', async function () {
+            if (!uploadedJson) { statusEl.textContent = 'Upload a workflow JSON first.'; return; }
+            stage = stageControl.value;
+            analyzeBtn.disabled = true; statusEl.textContent = 'Analyzing... (Phoenix)';
+            try {
+              const r = await fetch('/workflows/infer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage: stage, json: uploadedJson }) });
+              const d = await r.json();
+              if (r.ok) {
+                nodeChoices = d.nodeChoices || [];
+                rebuildNodeMap(d.nodes || {});
+                if (d.label && !labelInput.value) labelInput.value = d.label;
+                if (!idInput.value && d.label) idInput.value = d.label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                customNodesEl.value = ((d.deps && d.deps.custom_nodes) || []).join('\n');
+                modelsEl.value = ((d.deps && d.deps.models) || []).join('\n');
+                statusEl.textContent = 'Proposal inserted - review + save.';
+              } else {
+                statusEl.textContent = (d.error || 'Infer failed.');
+              }
+            } catch (e) { statusEl.textContent = 'Network error: ' + e.message; }
+            analyzeBtn.disabled = false;
+          });
+          toolBody.appendChild(analyzeBtn);
+        }
+
+        toolBody.appendChild(makeRow('Workflow id', idInput));
+        toolBody.appendChild(makeRow('Label', labelInput));
+
+        const nmHdr = document.createElement('div'); nmHdr.className = 'lib-cat'; nmHdr.textContent = 'Node map'; toolBody.appendChild(nmHdr);
+        toolBody.appendChild(nodeMapContainer);
+
+        const depHdr = document.createElement('div'); depHdr.className = 'lib-cat'; depHdr.textContent = 'Dependencies'; toolBody.appendChild(depHdr);
+        toolBody.appendChild(makeRow('Custom nodes', customNodesEl));
+        toolBody.appendChild(makeRow('Models', modelsEl));
+
+        const actRow = document.createElement('div'); actRow.className = 'modal-actions';
+        const saveBtn = document.createElement('button'); saveBtn.className = 'modal-btn'; saveBtn.textContent = 'Save'; actRow.appendChild(saveBtn);
+        if (isEdit) {
+          const delBtn = document.createElement('button'); delBtn.className = 'modal-btn'; delBtn.style.background = '#c0392b'; delBtn.textContent = 'Delete'; actRow.appendChild(delBtn);
+          delBtn.addEventListener('click', async function () {
+            if (!confirm('Delete custom workflow "' + editId + '"?')) return;
+            delBtn.disabled = true; statusEl.textContent = 'Deleting...';
+            try {
+              const r = await fetch('/workflows/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: editId }) });
+              const d = await r.json();
+              if (r.ok) { loadWorkflowsTab(); closeModal(); } else { statusEl.textContent = (d.error || 'Delete failed.'); delBtn.disabled = false; }
+            } catch (e) { statusEl.textContent = e.message; delBtn.disabled = false; }
+          });
+        }
+        actRow.appendChild(statusEl);
+        toolBody.appendChild(actRow);
+
+        saveBtn.addEventListener('click', async function () {
+          const nodes = readNodes(); const deps = readDeps(); const label = labelInput.value.trim();
+          saveBtn.disabled = true; statusEl.textContent = 'Saving...';
+          try {
+            var r, d;
+            if (isEdit) {
+              r = await fetch('/workflows/custom/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: editId, label: label, nodes: nodes, deps: deps }) });
+            } else {
+              const idv = idInput.value.trim();
+              if (!idv) { statusEl.textContent = 'Workflow id is required.'; saveBtn.disabled = false; return; }
+              if (!uploadedJson) { statusEl.textContent = 'Upload + analyze a workflow first.'; saveBtn.disabled = false; return; }
+              r = await fetch('/workflows/custom', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: idv, label: label, stage: stage, nodes: nodes, deps: deps, json: uploadedJson }) });
+            }
+            d = await r.json();
+            if (r.ok) { loadWorkflowsTab(); closeModal(); } else { statusEl.textContent = (d.error || 'Save failed.'); saveBtn.disabled = false; }
+          } catch (e) { statusEl.textContent = 'Network error: ' + e.message; saveBtn.disabled = false; }
+        });
+
+        if (isEdit) {
+          statusEl.textContent = 'Loading...';
+          try {
+            const r = await fetch('/workflows/raw', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: editId }) });
+            const d = await r.json();
+            if (r.ok) {
+              uploadedJson = d.json; stage = d.entry.stage;
+              stageControl.value = stage === 'mesh' ? '3D / Mesh' : 'Image';
+              nodeChoices = d.nodeChoices || [];
+              idInput.value = editId; idInput.disabled = true;
+              labelInput.value = d.entry.label || '';
+              rebuildNodeMap(d.entry.nodes || {});
+              customNodesEl.value = ((d.entry.deps && d.entry.deps.custom_nodes) || []).join('\n');
+              modelsEl.value = ((d.entry.deps && d.entry.deps.models) || []).join('\n');
+              statusEl.textContent = '';
+            } else { statusEl.textContent = (d.error || 'Load failed.'); }
+          } catch (e) { statusEl.textContent = e.message; }
+        } else {
+          rebuildNodeMap({});
+        }
+      }
+
+      function openPaletteEditor(key, cat) {
+        const isNew     = !key;
+        const isBuiltin = cat && cat.builtin === true;
+        openModal(isNew ? 'New category' : ('Edit: ' + key));
+        toolBody.innerHTML = '';
+
+        function makeRow(labelText, inputEl) {
+          const row = document.createElement('div');
+          row.className = 'set-row';
+          const lbl = document.createElement('label');
+          lbl.className = 'set-label';
+          lbl.textContent = labelText;
+          row.appendChild(lbl);
+          row.appendChild(inputEl);
+          return row;
+        }
+
+        // ── New category: key name + Phoenix helps affordance ──
+        var nameInput = null;
+        var hintEl, styleEl, faceEl, cfgEl, stepsEl;
+
+        if (isNew) {
+          nameInput = document.createElement('input');
+          nameInput.type = 'text';
+          nameInput.placeholder = 'category_key (lowercase, a–z 0–9 _)';
+          toolBody.appendChild(makeRow('Category key', nameInput));
+
+          // Description + "Phoenix helps" button
+          const descInput = document.createElement('input');
+          descInput.type = 'text';
+          descInput.placeholder = 'Describe this category…';
+
+          const draftBtn = document.createElement('button');
+          draftBtn.className = 'modal-btn';
+          draftBtn.style.marginTop = '6px';
+          draftBtn.style.fontSize = '12px';
+          draftBtn.style.padding = '5px 10px';
+          draftBtn.textContent = 'Phoenix helps — draft it';
+
+          const draftStatus = document.createElement('span');
+          draftStatus.className = 'set-status';
+
+          const draftRow = document.createElement('div');
+          draftRow.className = 'set-row';
+          const draftLbl = document.createElement('label');
+          draftLbl.className = 'set-label';
+          draftLbl.textContent = 'Description (for Phoenix)';
+          draftRow.appendChild(draftLbl);
+          draftRow.appendChild(descInput);
+          draftRow.appendChild(draftBtn);
+          draftRow.appendChild(draftStatus);
+          toolBody.appendChild(draftRow);
+
+          draftBtn.addEventListener('click', async function () {
+            const nm   = nameInput.value.trim();
+            const desc = descInput.value.trim();
+            if (!desc) { draftStatus.textContent = '⚠️ Enter a description first.'; return; }
+            draftBtn.disabled = true;
+            draftStatus.textContent = 'Drafting…';
+            try {
+              const r = await fetch('/palette/draft', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: nm, description: desc }),
+              });
+              const d = await r.json();
+              if (r.ok) {
+                if (d.hint  !== undefined) hintEl.value  = d.hint;
+                if (d.style !== undefined) styleEl.value = d.style;
+                if (d.target_face_num !== undefined) faceEl.value  = d.target_face_num;
+                if (d.cfg   !== undefined) cfgEl.value   = d.cfg;
+                if (d.steps !== undefined) stepsEl.value = d.steps;
+                draftStatus.textContent = '✅ Form prefilled — review and save.';
+              } else {
+                draftStatus.textContent = '⚠️ ' + (d.error || 'Draft failed.');
+              }
+            } catch (e) {
+              draftStatus.textContent = '⚠️ Network error: ' + e.message;
+            }
+            draftBtn.disabled = false;
+          });
+        }
+
+        // ── Fields ──
+        hintEl = document.createElement('textarea');
+        hintEl.rows = 2;
+        hintEl.className = 'pal-textarea';
+        hintEl.placeholder = 'Brief categorization hint (one sentence)';
+        if (cat && cat.hint  !== undefined) hintEl.value  = cat.hint;
+        toolBody.appendChild(makeRow('Hint', hintEl));
+
+        styleEl = document.createElement('textarea');
+        styleEl.rows = 3;
+        styleEl.className = 'pal-textarea';
+        styleEl.placeholder = 'Detailed style rules for this category';
+        if (cat && cat.style !== undefined) styleEl.value = cat.style;
+        toolBody.appendChild(makeRow('Style', styleEl));
+
+        faceEl = document.createElement('input');
+        faceEl.type = 'number';
+        faceEl.min  = '200';
+        faceEl.max  = '300000';
+        faceEl.step = '1';
+        if (cat && cat.target_face_num !== undefined) faceEl.value = cat.target_face_num;
+        toolBody.appendChild(makeRow('Target face count', faceEl));
+
+        cfgEl = document.createElement('input');
+        cfgEl.type = 'number';
+        cfgEl.min  = '0';
+        cfgEl.max  = '20';
+        cfgEl.step = '0.1';
+        if (cat && cat.cfg !== undefined) cfgEl.value = cat.cfg;
+        toolBody.appendChild(makeRow('CFG scale', cfgEl));
+
+        stepsEl = document.createElement('input');
+        stepsEl.type = 'number';
+        stepsEl.min  = '1';
+        stepsEl.max  = '100';
+        stepsEl.step = '1';
+        if (cat && cat.steps !== undefined) stepsEl.value = cat.steps;
+        toolBody.appendChild(makeRow('Steps', stepsEl));
+
+        // ── Actions row ──
+        const actRow  = document.createElement('div');
+        actRow.className = 'modal-actions';
+
+        const saveBtn  = document.createElement('button');
+        saveBtn.className = 'modal-btn';
+        saveBtn.textContent = 'Save';
+        actRow.appendChild(saveBtn);
+
+        if (isBuiltin) {
+          const resetBtn = document.createElement('button');
+          resetBtn.className = 'modal-btn';
+          resetBtn.style.background = 'var(--muted)';
+          resetBtn.textContent = 'Reset to default';
+          actRow.appendChild(resetBtn);
+
+          resetBtn.addEventListener('click', async function () {
+            if (!confirm('Reset "' + key + '" to its default style + params?')) return;
+            resetBtn.disabled = true;
+            statusEl.textContent = 'Resetting…';
+            try {
+              const r = await fetch('/palette/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: key }),
+              });
+              const d = await r.json();
+              if (r.ok) {
+                loadPaletteTab();
+                const freshCat = d.categories && d.categories[key];
+                openPaletteEditor(key, freshCat || cat);
+              } else {
+                statusEl.textContent = '⚠️ ' + (d.error || 'Reset failed.');
+                resetBtn.disabled = false;
+              }
+            } catch (e) {
+              statusEl.textContent = '⚠️ Network error: ' + e.message;
+              resetBtn.disabled = false;
+            }
+          });
+        }
+
+        if (!isNew && !isBuiltin) {
+          const deleteBtn = document.createElement('button');
+          deleteBtn.className = 'modal-btn';
+          deleteBtn.style.background = '#c0392b';
+          deleteBtn.textContent = 'Delete';
+          actRow.appendChild(deleteBtn);
+
+          deleteBtn.addEventListener('click', async function () {
+            if (!confirm('Delete category "' + key + '"?')) return;
+            deleteBtn.disabled = true;
+            statusEl.textContent = 'Deleting…';
+            try {
+              const palRes  = await fetch('/palette');
+              const palData = await palRes.json();
+              const cats    = palData.categories || {};
+              delete cats[key];
+              const r = await fetch('/palette', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ categories: cats }),
+              });
+              const d = await r.json();
+              if (r.ok) {
+                loadPaletteTab();
+                closeModal();
+              } else {
+                statusEl.textContent = '⚠️ ' + (d.error || 'Delete failed.');
+                deleteBtn.disabled = false;
+              }
+            } catch (e) {
+              statusEl.textContent = '⚠️ Network error: ' + e.message;
+              deleteBtn.disabled = false;
+            }
+          });
+        }
+
+        const statusEl = document.createElement('span');
+        statusEl.className = 'set-status';
+        actRow.appendChild(statusEl);
+        toolBody.appendChild(actRow);
+
+        // ── Save handler ──
+        saveBtn.addEventListener('click', async function () {
+          saveBtn.disabled = true;
+          statusEl.textContent = 'Saving…';
+          try {
+            const palRes  = await fetch('/palette');
+            const palData = await palRes.json();
+            const cats    = palData.categories || {};
+            const thatKey = isNew ? (nameInput ? nameInput.value.trim() : '') : key;
+            if (!thatKey) {
+              statusEl.textContent = '⚠️ Category key is required.';
+              saveBtn.disabled = false;
+              return;
+            }
+            cats[thatKey] = {
+              hint:            hintEl.value,
+              style:           styleEl.value,
+              target_face_num: Number(faceEl.value),
+              cfg:             Number(cfgEl.value),
+              steps:           Number(stepsEl.value),
+            };
+            const r = await fetch('/palette', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ categories: cats }),
+            });
+            const data = await r.json();
+            if (r.ok) {
+              statusEl.textContent = '✅ Saved.';
+              loadPaletteTab();
+              closeModal();
+            } else {
+              statusEl.textContent = '⚠️ ' + (data.error || 'Save failed.') + (data.field ? ' (field: ' + data.field + ')' : '');
+            }
+          } catch (e) {
+            statusEl.textContent = '⚠️ Network error: ' + e.message;
+          }
+          saveBtn.disabled = false;
+        });
+      }
+
+      // ── Library tabs (Assets | Brushes | Materials | Palette) ────────────────
+      const libTabBtns = document.querySelectorAll('.lib-tab-btn');
+      const libPanels  = { assets: libAssetsBody, brushes: libBrushesBody, materials: libMaterialsBody, palette: libPaletteBody, workflows: libWorkflowsBody };
+      function switchLibTab(name) {
+        libTabBtns.forEach(b => b.classList.toggle('active', b.dataset.libtab === name));
+        Object.entries(libPanels).forEach(([n, p]) => p.classList.toggle('visible', n === name));
+      }
+      libTabBtns.forEach(b => b.addEventListener('click', () => switchLibTab(b.dataset.libtab)));
+
+      libraryRefreshEl.addEventListener('click', refreshLibrary);
+
+      // Initialize buttons as enabled
+      setActionsEnabled(true);
+
+      // Focus input on load
+      inputEl.focus();
+      refreshLibrary();
+    })();
+  </script>
+
+</body>
+</html>

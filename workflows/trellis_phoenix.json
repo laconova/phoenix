@@ -1,0 +1,78 @@
+{
+  "1": {
+    "class_type": "Trellis2LoadModel_GGUF",
+    "inputs": {
+      "modelname": "TRELLIS.2-4B",
+      "model_format": "GGUF Q4_K_M",
+      "backend": "sdpa",
+      "device": "cuda",
+      "low_vram": true,
+      "keep_models_loaded": true
+    }
+  },
+  "2": {
+    "class_type": "Trellis2LoadImageWithTransparency_GGUF",
+    "inputs": {
+      "image": "phoenix_input.png"
+    }
+  },
+  "3": {
+    "class_type": "Trellis2PreProcessImage_GGUF",
+    "inputs": {
+      "image": ["2", 2],
+      "padding": 0,
+      "remove_background": false
+    }
+  },
+  "4": {
+    "class_type": "Trellis2MeshWithVoxelGenerator_GGUF",
+    "inputs": {
+      "pipeline": ["1", 0],
+      "image": ["3", 0],
+      "seed": 12345,
+      "pipeline_type": "1024_cascade",
+      "sparse_structure_steps": 12,
+      "shape_steps": 12,
+      "texture_steps": 12,
+      "max_num_tokens": 49152,
+      "sparse_structure_resolution": 32,
+      "max_views": 4,
+      "generate_texture_slat": true,
+      "use_tiled_decoder": true
+    }
+  },
+  "5": {
+    "class_type": "Trellis2PostProcessAndUnWrapAndRasterizer_GGUF",
+    "inputs": {
+      "mesh": ["4", 0],
+      "bvh": ["4", 1],
+      "mesh_cluster_threshold_cone_half_angle_rad": 60.0,
+      "mesh_cluster_refine_iterations": 0,
+      "mesh_cluster_global_iterations": 1,
+      "mesh_cluster_smooth_strength": 1,
+      "texture_size": 1024,
+      "remesh": true,
+      "remesh_band": 1.0,
+      "remesh_project": 0.0,
+      "target_face_num": 50000,
+      "simplify_method": "Cumesh",
+      "fill_holes": true,
+      "texture_alpha_mode": "OPAQUE",
+      "dual_contouring_resolution": "1024",
+      "double_side_material": false,
+      "remove_floaters": true,
+      "bake_on_vertices": false,
+      "use_custom_normals": false,
+      "uv_unwrap_method": "Xatlas",
+      "remove_inner_faces": true
+    }
+  },
+  "6": {
+    "class_type": "Trellis2ExportMesh_GGUF",
+    "inputs": {
+      "trimesh": ["5", 0],
+      "filename_prefix": "phoenix_output",
+      "file_format": "glb"
+    }
+  }
+}

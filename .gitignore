@@ -1,0 +1,17 @@
+# runtime / user data (auto-seeded on first run)
+phoenix-config.json
+workflows.json
+palette.json
+library-labels.json
+
+# generated / runtime dirs
+output/
+staging/
+session/
+logs/
+brushes/
+
+# OS / editor / node
+.DS_Store
+node_modules/
+*.log
