@@ -32,8 +32,8 @@ The core text → 3D prop pipeline, driven from one browser UI:
 ## Middle future
 
 - **Video generation** — a video stage beyond the current image/mesh pipeline.
+- **AI sound generation & editing** — generate and edit audio alongside the visuals.
 - **Live motion capture** — drive animation from live mocap.
-- **Sound editing** — audio in the pipeline alongside the visuals.
 - **Depth-to-video** — depth-conditioned video generation.
 
 ## Further out (no fixed timeframe)
