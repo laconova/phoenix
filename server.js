@@ -713,7 +713,7 @@ async function handler(req, res) {
         const finish = (ok, msg) => { if (!done) { done = true; resolve({ ok, msg }); } };
         let child;
         try {
-          child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, 'ok'], { encoding: 'utf8' });
+          child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, 'ok'], { encoding: 'utf8', shell: process.platform === 'win32' });
         } catch (e) { return finish(false, 'could not launch claude: ' + e.message); }
         const timer = setTimeout(() => { try { child.kill(); } catch (_) {} finish(false, 'model probe timed out'); }, 25000);
         child.on('error', e => { clearTimeout(timer); finish(false, 'claude CLI error: ' + e.message); });
