@@ -38,13 +38,17 @@ Each stage has an optional **gate** (pause for your approval). The generation en
 ```bash
 git clone https://github.com/laconova/phoenix.git
 cd phoenix
-cp phoenix-config.example.json phoenix-config.json   # then edit endpoints / models if needed
 
 # start ComfyUI separately, then:
 node server.js
 ```
 
 Open **http://127.0.0.1:7777**.
+
+On first run Phoenix creates `phoenix-config.json` from the example automatically — no manual copy
+needed. To customize endpoints/models, edit that file, or pre-create it yourself:
+`copy phoenix-config.example.json phoenix-config.json` (Windows) /
+`cp phoenix-config.example.json phoenix-config.json` (macOS/Linux).
 
 On first run, Phoenix seeds its registry with three built‑in ("Verified") workflows — **Flux Klein** and **SD 1.5** (image) and **Trellis2‑GGUF** (mesh). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
 
@@ -62,7 +66,7 @@ Workflows tab → **+ Add workflow** → pick the stage (image / mesh) → uploa
 
 ## Configuration
 
-Copy `phoenix-config.example.json` → `phoenix-config.json`. Key fields:
+Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on first run (or copy it yourself — `copy` on Windows, `cp` on macOS/Linux). Key fields:
 
 - **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`).
 - **`endpoints`** — ComfyUI + local‑model URLs.

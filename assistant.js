@@ -17,6 +17,7 @@ const workflows = require('./workflows');
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const CONFIG_FILE   = path.join(__dirname, 'phoenix-config.json');
+const CONFIG_EXAMPLE_FILE = path.join(__dirname, 'phoenix-config.example.json');
 const BLENDER_PORT  = 9876;
 const HISTORY_FILE  = path.join(__dirname, 'session', 'history.json');
 const STATE_FILE    = path.join(__dirname, 'session', 'state.json');
@@ -32,6 +33,18 @@ function loadConfig() {
 
 function saveConfig(cfg) {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+}
+
+// First-run seed: if there's no phoenix-config.json yet, create it from the shipped example
+// so a fresh clone works with just `node server.js` (no manual copy step — CMD has no `cp`).
+// No-op when the config already exists or the example isn't present (e.g. the dev tree). Non-fatal.
+function ensureConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_FILE) && fs.existsSync(CONFIG_EXAMPLE_FILE)) {
+      fs.copyFileSync(CONFIG_EXAMPLE_FILE, CONFIG_FILE);
+      console.log('[setup] Created phoenix-config.json from phoenix-config.example.json — edit it to change endpoints/models.');
+    }
+  } catch (_) { /* non-fatal: loadConfig() falls back to defaults */ }
 }
 
 function getConfigValue(cfg, dotKey) {
@@ -1709,4 +1722,4 @@ async function onboardingStatus(cfg) {
   return { completed, node, comfyui, claudeCli, lmstudio, blender };
 }
 
-module.exports = { runTurn, callClaude, callBlender, loadConfig, saveConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, tsTailDebugLog, runTroubleshootTurn, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };
+module.exports = { runTurn, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, tsTailDebugLog, runTroubleshootTurn, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };

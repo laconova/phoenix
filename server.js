@@ -17,6 +17,7 @@ const workingDir = __dirname;
 // ─── Session ──────────────────────────────────────────────────────────────────
 
 const fresh   = process.argv.includes('--fresh');
+a.ensureConfig();   // first-run: seed phoenix-config.json from the example if missing
 let history   = fresh ? [] : a.loadHistory();
 let state     = a.loadState();
 let cfg       = a.loadConfig();
