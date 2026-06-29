@@ -315,6 +315,30 @@ function validateNodeMap(stage, nodes, obj) {
 }
 
 /**
+ * missingModelsForWorkflow(workflowObj, objectInfo) → [string]
+ * Returns a de-duplicated array (first-seen order) of model filenames that are
+ * referenced by the workflow JSON but not present in the ComfyUI /object_info response.
+ * A model is considered missing iff it is NOT in collectEnumValues(objectInfo) — exact
+ * enum membership only. No substring fallback: ComfyUI's own validation is exact enum
+ * membership (value_not_in_list), so substring matching would produce false negatives
+ * (e.g. ae.safetensors is a substring of flux2-vae.safetensors but is a distinct model).
+ * checkDeps retains its original two-part guard unchanged for backwards compatibility.
+ */
+function missingModelsForWorkflow(workflowObj, objectInfo) {
+  const candidates = collectModelCandidates(workflowObj);
+  const enumVals   = collectEnumValues(objectInfo);
+  const seen       = new Set();
+  const missing    = [];
+  for (const m of candidates) {
+    if (!seen.has(m) && !enumVals.has(m)) {
+      seen.add(m);
+      missing.push(m);
+    }
+  }
+  return missing;
+}
+
+/**
  * addCustomWorkflow(entry, jsonText) → the saved registry entry (with id)
  * Validates, writes the JSON file, updates the registry.
  */
@@ -407,6 +431,6 @@ module.exports = {
   DEFAULT_WORKFLOWS, WORKFLOWS_FILE, DEFAULT_ACTIVE, DEFAULT_FIELDS,
   loadRegistry, saveRegistry, getActive, resolveSlot, collectEnumValues, checkDeps,
   MODEL_INPUT_FIELDS, validateWorkflowJson, stripNonNodeKeys, prepareWorkflowJson,
-  collectNodeChoices, collectModelCandidates,
+  collectNodeChoices, collectModelCandidates, missingModelsForWorkflow,
   listClassTypes, validateNodeMap, addCustomWorkflow, deleteCustomWorkflow, updateCustomWorkflow,
 };

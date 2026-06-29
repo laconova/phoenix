@@ -443,6 +443,25 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
 
   dbg.event('progress', { label: 'generate_image', description, category: category || 'auto' });
 
+  // ── Pre-gen guard: check for missing models before starting ──────────────────
+  try {
+    const _wfEntry = workflows.getActive('image', cfg);
+    let _wfObj = null;
+    try { _wfObj = JSON.parse(fs.readFileSync(_wfEntry.file, 'utf8')); } catch { /* file unreadable — skip */ }
+    if (_wfObj) {
+      const _base = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8000';
+      const _oiRes = await fetch(_base + '/object_info', { signal: AbortSignal.timeout(8000) });
+      if (_oiRes.ok) {
+        const _objectInfo = await _oiRes.json();
+        const _missing = workflows.missingModelsForWorkflow(_wfObj, _objectInfo);
+        if (_missing.length > 0) {
+          const _label = _wfEntry.label || _wfEntry.id;
+          return `⚠️ Can't generate yet — ComfyUI is missing these models for workflow "${_label}": ${_missing.join(', ')}. Install them in ComfyUI's models folder, or pick another workflow in the Workflows tab.`;
+        }
+      }
+    }
+  } catch { /* ComfyUI unreachable or guard error — skip, let normal path run */ }
+
   // ── Background path (server / web UI) ────────────────────────────────────────
   if (opts.background) {
     const result = jobs.start({ kind: 'image', label: description || 'image' }, async (id) => {
@@ -541,6 +560,25 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
   };
 
   dbg.event('progress', { label: 'image_to_3d', image, description, category: category || 'auto' });
+
+  // ── Pre-gen guard: check for missing models before starting ──────────────────
+  try {
+    const _wfEntry = workflows.getActive('mesh', cfg);
+    let _wfObj = null;
+    try { _wfObj = JSON.parse(fs.readFileSync(_wfEntry.file, 'utf8')); } catch { /* file unreadable — skip */ }
+    if (_wfObj) {
+      const _base = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8000';
+      const _oiRes = await fetch(_base + '/object_info', { signal: AbortSignal.timeout(8000) });
+      if (_oiRes.ok) {
+        const _objectInfo = await _oiRes.json();
+        const _missing = workflows.missingModelsForWorkflow(_wfObj, _objectInfo);
+        if (_missing.length > 0) {
+          const _label = _wfEntry.label || _wfEntry.id;
+          return `⚠️ Can't generate yet — ComfyUI is missing these models for workflow "${_label}": ${_missing.join(', ')}. Install them in ComfyUI's models folder, or pick another workflow in the Workflows tab.`;
+        }
+      }
+    }
+  } catch { /* ComfyUI unreachable or guard error — skip, let normal path run */ }
 
   // ── Background path (server / web UI) ────────────────────────────────────────
   if (opts.background) {
@@ -1120,11 +1158,12 @@ TOOL-CALL FORMAT — exactly these two lines, no preamble, no code fence around 
 TOOL: tool_name
 INPUT: {"key": "value"}
 
-AVAILABLE TOOLS (only these four are allowed):
+AVAILABLE TOOLS (only these five are allowed):
 - run_preflight         Runs the full preflight health check and returns the status. INPUT: {}
 - tail_debug_log        Reads the last ~40 lines of the current debug log. INPUT: {}
 - probe_blender_socket  Tests whether the Blender IPC socket on port 9876 is reachable. INPUT: {}
 - check_workflow_deps   Checks whether the ACTIVE image + mesh workflows' required custom nodes and models are installed in ComfyUI. INPUT: {}
+- list_lmstudio_models  Lists the models currently loaded by LM Studio (the local model server). Use when the user can't find or select a local model (e.g. a metaprompter seat model like Gemma 12B). INPUT: {}
 
 RULES:
 1. The latest preflight status is ALREADY provided below — base your diagnosis on it directly. Do NOT call a tool just to confirm what preflight already shows.
@@ -1250,11 +1289,39 @@ async function tsCheckWorkflowDeps() {
   return lines.join('\n');
 }
 
+async function listLmStudioModels(cfg) {
+  const localBase = (cfg && cfg.endpoints && cfg.endpoints.local) || 'http://localhost:1234/v1';
+  try {
+    const r = await fetch(localBase + '/models', { signal: AbortSignal.timeout(4000) });
+    if (r.ok) {
+      const j = await r.json();
+      const models = Array.isArray(j.data) ? j.data.map(m => m && m.id).filter(x => typeof x === 'string') : [];
+      return { reachable: true, base: localBase, models };
+    }
+    return { reachable: false, base: localBase, models: [], error: 'HTTP ' + r.status };
+  } catch (e) {
+    return { reachable: false, base: localBase, models: [], error: (e && e.message) || String(e) };
+  }
+}
+
+async function tsListLmStudioModels() {
+  const cfg = loadConfig();
+  const r = await listLmStudioModels(cfg);
+  if (!r.reachable) {
+    return 'Could not reach LM Studio at ' + r.base + ' (' + (r.error || 'unreachable') + '). Make sure LM Studio is running and its local server is started.';
+  }
+  if (r.models.length === 0) {
+    return 'LM Studio is reachable at ' + r.base + ' but no models are currently loaded. Load the model you want (e.g. Gemma 12B) in LM Studio, then it will appear here and in Settings.';
+  }
+  return 'LM Studio models currently loaded at ' + r.base + ':\n' + r.models.map(m => '- ' + m).join('\n');
+}
+
 const TROUBLESHOOTER_TOOLS = {
   run_preflight:        tsRunPreflight,
   tail_debug_log:       tsTailDebugLog,
   probe_blender_socket: tsProbeBlenderSocket,
   check_workflow_deps:  tsCheckWorkflowDeps,
+  list_lmstudio_models: tsListLmStudioModels,
 };
 
 // ── Seat-aware Claude caller (parallel to callClaude; does NOT change the orchestrator) ──
@@ -1569,8 +1636,8 @@ Output ONLY the JSON object.`;
       : [],
   };
 
-  // Default models to auto-detected candidates if Claude returned none
-  if (deps.models.length === 0) deps.models = models;
+  // Union Claude's models with the auto-detected candidates (dedupe) so no referenced model is dropped
+  deps.models = [...new Set([...deps.models, ...models])];
 
   const label = (typeof parsed.label === 'string' && parsed.label.trim()) ? parsed.label.trim() : '';
 
@@ -1578,4 +1645,66 @@ Output ONLY the JSON object.`;
   return { nodes, deps, label, nodeChoices: choices, modelCandidates: models };
 }
 
-module.exports = { runTurn, callClaude, callBlender, loadConfig, saveConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, tsTailDebugLog, runTroubleshootTurn, draftPaletteCategory, inferWorkflowMap };
+// ─── Claude CLI probe ─────────────────────────────────────────────────────────
+
+function claudeCliCheck() {
+  return new Promise((resolve) => {
+    let done = false; let out = ''; let err = '';
+    let child;
+    const finish = (val) => { if (done) return; done = true; clearTimeout(timer); try { if (child) child.kill(); } catch {} resolve(val); };
+    const timer = setTimeout(() => finish({ present: false, error: 'timeout' }), 8000);
+    try {
+      child = spawn('claude', ['--version'], { encoding: 'utf8' });
+    } catch (e) { finish({ present: false, error: e.message }); return; }
+    child.stdout.on('data', d => out += d);
+    child.stderr.on('data', d => err += d);
+    child.on('error', e => finish({ present: false, error: e.message }));
+    child.on('close', code => finish(code === 0 ? { present: true, version: out.trim() || '(unknown)' } : { present: false, error: err.trim() || ('exit ' + code) }));
+  });
+}
+
+// ─── Onboarding status aggregate ─────────────────────────────────────────────
+
+async function onboardingStatus(cfg) {
+  cfg = cfg || {};
+  const completed  = !!(cfg.onboarding && cfg.onboarding.completed);
+  const comfyBase  = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8000';
+  const localBase  = (cfg.endpoints && cfg.endpoints.local)   || 'http://localhost:1234/v1';
+
+  const node = { present: true, version: process.version };
+
+  let comfyui = { reachable: false, base: comfyBase };
+  try {
+    const r = await fetch(comfyBase + '/object_info', { signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      const info = await r.json();
+      const reg  = workflows.loadRegistry();
+      const deps = {};
+      for (const [id, entry] of Object.entries(reg.workflows)) deps[id] = workflows.checkDeps(entry, info);
+      const active = {
+        image: (cfg.workflows && cfg.workflows.image) || workflows.DEFAULT_ACTIVE.image,
+        mesh:  (cfg.workflows && cfg.workflows.mesh)  || workflows.DEFAULT_ACTIVE.mesh,
+      };
+      comfyui = { reachable: true, base: comfyBase, deps, active };
+    } else {
+      comfyui = { reachable: false, base: comfyBase, error: 'HTTP ' + r.status };
+    }
+  } catch (e) { comfyui = { reachable: false, base: comfyBase, error: (e && e.message) || String(e) }; }
+
+  const claudeCli = await claudeCliCheck();
+
+  let lmstudio = { reachable: false, base: localBase };
+  try {
+    const r = await fetch(localBase + '/models', { signal: AbortSignal.timeout(4000) });
+    lmstudio = { reachable: !!r.ok, base: localBase };
+  } catch (e) { lmstudio = { reachable: false, base: localBase, error: (e && e.message) || String(e) }; }
+
+  const blenderPath = (cfg.apps && cfg.apps.blender) || null;
+  let blenderPresent = false;
+  try { blenderPresent = !!(blenderPath && fs.existsSync(blenderPath)); } catch {}
+  const blender = { present: blenderPresent, path: blenderPath };
+
+  return { completed, node, comfyui, claudeCli, lmstudio, blender };
+}
+
+module.exports = { runTurn, callClaude, callBlender, loadConfig, saveConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, tsTailDebugLog, runTroubleshootTurn, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };

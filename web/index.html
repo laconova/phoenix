@@ -599,6 +599,27 @@
     .lib-item:hover .lib-act-btn { color:#fff; }
     .lib-act-btn:hover { color:#fff; text-shadow:0 0 2px rgba(0,0,0,0.4); }
     .lib-swatch { width:12px; height:12px; border-radius:3px; border:1px solid rgba(0,0,0,0.25); flex-shrink:0; }
+    #onboarding-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex; align-items: center; justify-content: center; z-index: 9999; }
+    .onb-card { background: var(--bg, #1e1e1e); color: var(--text); width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; border-radius: 12px; padding: 22px 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.5); border: 1px solid rgba(128,128,128,0.25); }
+    .onb-prog { display: flex; gap: 8px; justify-content: center; margin-bottom: 16px; }
+    .onb-dot { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: rgba(128,128,128,0.2); color: var(--muted); }
+    .onb-dot.active { background: var(--accent); color: #fff; }
+    .onb-dot.done { background: rgba(76,175,80,0.85); color: #fff; }
+    .onb-body h2 { margin: 0 0 10px; font-size: 20px; }
+    .onb-body p { line-height: 1.5; margin: 0 0 10px; }
+    .onb-list { display: flex; flex-direction: column; gap: 10px; margin: 6px 0; }
+    .onb-row { border: 1px solid rgba(128,128,128,0.2); border-radius: 8px; padding: 10px 12px; }
+    .onb-row-top { display: flex; align-items: center; justify-content: space-between; }
+    .onb-name { font-weight: 700; }
+    .onb-hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .onb-link { color: var(--accent); text-decoration: none; font-weight: 700; }
+    .onb-pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; }
+    .onb-ok { background: rgba(76,175,80,0.18); color: #4caf50; }
+    .onb-bad { background: rgba(224,108,108,0.18); color: #e06c6c; }
+    .onb-opt { background: rgba(128,128,128,0.18); color: var(--muted); }
+    .onb-cats { line-height: 1.6; padding-left: 18px; margin: 6px 0; }
+    .onb-nav { display: flex; align-items: center; justify-content: space-between; margin-top: 18px; }
+    .onb-secondary { background: var(--muted) !important; }
   </style>
 </head>
 <body>
@@ -624,6 +645,7 @@
     <button class="menu-item" data-menu="themes">Themes</button>
     <button class="menu-item" data-menu="troubleshooter">Troubleshooter</button>
     <button class="menu-item" data-menu="feedback">Feedback / Bug report</button>
+    <button class="menu-item" data-menu="onboarding">Setup</button>
   </div>
 
   <div id="tool-modal" hidden>
@@ -960,6 +982,7 @@
         const which = btn.dataset.menu;
         if (which === 'troubleshooter') return openTroubleshooter();
         if (which === 'settings') return openSettings();
+        if (which === 'onboarding') return openOnboarding();
         if (which === 'themes') return openThemes();
         if (which === 'feedback') return openFeedback();
         const titles = {};
@@ -1156,6 +1179,82 @@
         comfyInp.placeholder = 'http://localhost:8000';
         toolBody.appendChild(makeRow('ComfyUI endpoint', comfyInp));
 
+        // Metaprompter seat
+        const META_MODELS = [
+          { label: 'Haiku 4.5 (Claude · cheap, no 2nd machine)', value: 'claude-haiku-4-5-20251001' },
+          { label: 'Sonnet 4.6 (Claude)', value: 'claude-sonnet-4-6' },
+          { label: 'Opus 4.8 (Claude · max)', value: 'claude-opus-4-8' },
+          { label: 'Local (LM Studio)…', value: '__local__' },
+        ];
+        const metaSel = document.createElement('select');
+        metaSel.id = 'set-meta';
+        for (const opt of META_MODELS) { const o = document.createElement('option'); o.value = opt.value; o.textContent = opt.label; metaSel.appendChild(o); }
+        const metaLocal = document.createElement('input');
+        metaLocal.type = 'text'; metaLocal.id = 'set-meta-local';
+        metaLocal.placeholder = 'local model id (e.g. google/gemma-4-e4b)';
+        metaLocal.style.display = 'none'; metaLocal.style.marginTop = '6px';
+        const metaList = document.createElement('select');
+        metaList.id = 'set-meta-lmlist';
+        metaList.style.display = 'none'; metaList.style.marginTop = '6px';
+        async function populateMetaList() {
+          metaList.innerHTML = '';
+          const ph = document.createElement('option'); ph.value = ''; ph.textContent = '— loaded LM Studio models —'; metaList.appendChild(ph);
+          try {
+            const r = await fetch('/lmstudio/models'); const j = await r.json();
+            if (j.reachable && Array.isArray(j.models) && j.models.length) {
+              for (const id of j.models) { const o = document.createElement('option'); o.value = id; o.textContent = id; metaList.appendChild(o); }
+            } else {
+              const o = document.createElement('option'); o.value = ''; o.disabled = true;
+              o.textContent = j.reachable ? 'LM Studio reachable — no models loaded (load one, e.g. Gemma 12B)' : 'LM Studio not reachable — type the id below';
+              metaList.appendChild(o);
+            }
+          } catch (e) {
+            const o = document.createElement('option'); o.value = ''; o.disabled = true;
+            o.textContent = 'Could not load LM Studio models — type the id below'; metaList.appendChild(o);
+          }
+          if (metaLocal.value && metaList.querySelector('option[value="' + CSS.escape(metaLocal.value) + '"]')) { metaList.value = metaLocal.value; }
+        }
+        const metaRow = makeRow('Metaprompter model', metaSel);
+        metaRow.appendChild(metaList);
+        metaRow.appendChild(metaLocal);
+        toolBody.appendChild(metaRow);
+        metaList.addEventListener('change', function () { if (metaList.value) metaLocal.value = metaList.value; });
+        metaSel.addEventListener('change', function () {
+          const isLocal = metaSel.value === '__local__';
+          metaList.style.display = isLocal ? '' : 'none';
+          metaLocal.style.display = isLocal ? '' : 'none';
+          if (isLocal) populateMetaList();
+        });
+
+        // Free VRAM: eject local metaprompter after use
+        const metaEject = document.createElement('input');
+        metaEject.type = 'checkbox'; metaEject.id = 'set-meta-eject';
+        const metaEjectLabel = document.createElement('label');
+        metaEjectLabel.htmlFor = 'set-meta-eject';
+        metaEjectLabel.textContent = 'Free VRAM: unload local metaprompter after each use';
+        const metaEjectHint = document.createElement('span');
+        metaEjectHint.style.cssText = 'margin-left:6px;opacity:0.6;font-size:0.85em;';
+        metaEjectHint.textContent = '(only applies when a local model is selected)';
+        const metaEjectRow = document.createElement('div');
+        metaEjectRow.className = 'set-row';
+        metaEjectRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px;';
+        metaEjectRow.appendChild(metaEject);
+        metaEjectRow.appendChild(metaEjectLabel);
+        metaEjectRow.appendChild(metaEjectHint);
+        toolBody.appendChild(metaEjectRow);
+
+        // Blender executable path
+        const blenderInp = document.createElement('input');
+        blenderInp.type = 'text'; blenderInp.id = 'set-blender';
+        blenderInp.placeholder = 'path to blender.exe (optional)';
+        toolBody.appendChild(makeRow('Blender path', blenderInp));
+
+        // Feedback endpoint URL
+        const feedbackInp = document.createElement('input');
+        feedbackInp.type = 'text'; feedbackInp.id = 'set-feedback-url';
+        feedbackInp.placeholder = 'https://yourdomain/feedback.php (optional)';
+        toolBody.appendChild(makeRow('Feedback endpoint', feedbackInp));
+
         // Actions row: [Save settings] button + status line
         const actRow = document.createElement('div');
         actRow.className = 'modal-actions';
@@ -1194,6 +1293,16 @@
           if (orch.historyMessages !== undefined) histInp.value = orch.historyMessages;
           localInp.value = eps.local   || '';
           comfyInp.value = eps.comfyui || '';
+
+          const meta = c.metaprompter || {};
+          const apps = c.apps || {};
+          const metaKnown = META_MODELS.find(m => m.value !== '__local__' && m.value === meta.model);
+          if (metaKnown) { metaSel.value = meta.model; metaLocal.style.display = 'none'; }
+          else if (meta.model) { metaSel.value = '__local__'; metaLocal.value = meta.model; metaLocal.style.display = ''; metaList.style.display = ''; populateMetaList(); }
+          metaEject.checked = !!(meta && meta.ejectAfterUse);
+          blenderInp.value = apps.blender || '';
+          const fb = c.feedback || {};
+          feedbackInp.value = fb.endpointUrl || '';
         } catch (_) {}
 
         saveBtn.addEventListener('click', async function () {
@@ -1204,9 +1313,13 @@
           saveBtn.disabled = true;
           statusEl.textContent = 'Validating… (verifying model + pinging endpoints)';
 
+          const chosenMeta = metaSel.value === '__local__' ? metaLocal.value.trim() : metaSel.value;
           const body = {
             orchestrator: { model: chosenModel, historyMessages: Number(histInp.value) },
+            metaprompter: { model: chosenMeta, ejectAfterUse: metaEject.checked },
             endpoints: { local: localInp.value.trim(), comfyui: comfyInp.value.trim() },
+            apps: { blender: blenderInp.value.trim() },
+            feedback: { endpointUrl: feedbackInp.value.trim() },
           };
 
           try {
@@ -1303,6 +1416,21 @@
         descRow.appendChild(desc);
         toolBody.appendChild(descRow);
 
+        // Optional contact (for follow-up)
+        const contactRow = document.createElement('div');
+        contactRow.className = 'set-row';
+        const contactLbl = document.createElement('label');
+        contactLbl.className = 'set-label';
+        contactLbl.textContent = 'Your email (optional — only if you want a reply)';
+        const contact = document.createElement('input');
+        contact.type = 'text';
+        contact.id = 'fb-contact';
+        contact.className = 'fb-textarea';
+        contact.placeholder = 'you@example.com';
+        contactRow.appendChild(contactLbl);
+        contactRow.appendChild(contact);
+        toolBody.appendChild(contactRow);
+
         // Technical details preview (readonly)
         const previewRow = document.createElement('div');
         previewRow.className = 'set-row';
@@ -1320,14 +1448,18 @@
         previewRow.appendChild(preview);
         toolBody.appendChild(previewRow);
 
-        // Actions row: [Copy bug report] button + status
+        // Actions row: [Send feedback] [Copy bug report] buttons + status
         const actRow = document.createElement('div');
         actRow.className = 'modal-actions';
+        const sendBtn = document.createElement('button');
+        sendBtn.className = 'modal-btn';
+        sendBtn.textContent = 'Send feedback';
         const copyBtn = document.createElement('button');
         copyBtn.className = 'modal-btn';
         copyBtn.textContent = 'Copy bug report';
         const statusEl = document.createElement('span');
         statusEl.className = 'set-status';
+        actRow.appendChild(sendBtn);
         actRow.appendChild(copyBtn);
         actRow.appendChild(statusEl);
         toolBody.appendChild(actRow);
@@ -1335,7 +1467,7 @@
         // Hint
         const hint = document.createElement('p');
         hint.className = 'set-hint';
-        hint.textContent = 'Automatic submission is coming later — for now, copy this and send it to the developer manually.';
+        hint.textContent = 'Send goes straight to the developer if a feedback endpoint is set (Settings). Otherwise use Copy and send it manually.';
         toolBody.appendChild(hint);
 
         // Fetch technical details from /bugreport on open
@@ -1366,6 +1498,32 @@
               statusEl.textContent = '⚠️ Copy failed — select the text manually.';
             }
           }
+        });
+
+        // Send handler — POSTs to the Phoenix server, which proxies to the configured endpoint
+        sendBtn.addEventListener('click', async function () {
+          const msg = desc.value.trim();
+          if (!msg) { statusEl.textContent = '⚠️ Describe the problem first.'; return; }
+          sendBtn.disabled = true;
+          statusEl.textContent = 'Sending…';
+          try {
+            const r = await fetch('/feedback', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: msg, contact: contact.value.trim(), report: preview.value }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (r.ok) {
+              statusEl.textContent = '✅ Sent. Thank you!';
+            } else if (r.status === 400 && /not configured/i.test(data.error || '')) {
+              statusEl.textContent = '⚠️ No feedback endpoint set — add it in Settings, or use Copy.';
+            } else {
+              statusEl.textContent = '⚠️ ' + (data.error || ('Send failed (' + r.status + ')'));
+            }
+          } catch (e) {
+            statusEl.textContent = '⚠️ Network error: ' + e.message;
+          }
+          sendBtn.disabled = false;
         });
       }
 
@@ -2534,6 +2692,140 @@
         });
       }
 
+      // ── Onboarding wizard ────────────────────────────────────────────────────
+      let _onbStatus = null;
+      let _onbStep = 0;
+
+      async function fetchOnbStatus() {
+        try { const r = await fetch('/onboarding/status'); return await r.json(); } catch (e) { return null; }
+      }
+      async function initOnboarding() {
+        const st = await fetchOnbStatus();
+        if (st && !st.completed) { _onbStatus = st; openOnboarding(); }
+      }
+      function _wfReady(st) {
+        if (!(st && st.comfyui && st.comfyui.reachable && st.comfyui.deps && st.comfyui.active)) return false;
+        const di = st.comfyui.deps[st.comfyui.active.image];
+        const dm = st.comfyui.deps[st.comfyui.active.mesh];
+        return !!(di && di.ready && dm && dm.ready);
+      }
+      function _modelsHint(st) {
+        if (!(st && st.comfyui && st.comfyui.reachable)) return 'Models for the active workflow (checked once ComfyUI is up).';
+        const miss = [];
+        if (st.comfyui.deps && st.comfyui.active) {
+          for (const id of [st.comfyui.active.image, st.comfyui.active.mesh]) {
+            const d = st.comfyui.deps[id];
+            if (d && !d.ready) { (d.missing_models || []).forEach(m => miss.push(m)); (d.missing_nodes || []).forEach(m => miss.push(m)); }
+          }
+        }
+        return miss.length ? ('Missing: ' + miss.join(', ')) : 'All models for the active workflow are present.';
+      }
+      function _coreReady(st) {
+        return !!(st && st.comfyui && st.comfyui.reachable && st.claudeCli && st.claudeCli.present && _wfReady(st));
+      }
+      function _onbPill(ok, optional) {
+        const s = document.createElement('span');
+        s.className = 'onb-pill ' + (ok ? 'onb-ok' : (optional ? 'onb-opt' : 'onb-bad'));
+        s.textContent = ok ? '✓ ready' : (optional ? '— optional' : '✗ missing');
+        return s;
+      }
+      async function openOnboarding() {
+        let ov = document.getElementById('onboarding-overlay');
+        if (ov) ov.remove();
+        ov = document.createElement('div'); ov.id = 'onboarding-overlay';
+        document.body.appendChild(ov);
+        _onbStep = 0;
+        if (!_onbStatus) _onbStatus = await fetchOnbStatus();
+        renderOnb();
+      }
+      function closeOnboarding() { const ov = document.getElementById('onboarding-overlay'); if (ov) ov.remove(); }
+      function renderOnb() {
+        const ov = document.getElementById('onboarding-overlay'); if (!ov) return;
+        const st = _onbStatus || {};
+        ov.innerHTML = '';
+        const card = document.createElement('div'); card.className = 'onb-card';
+
+        const prog = document.createElement('div'); prog.className = 'onb-prog';
+        ['Welcome', 'Setup', 'First prop', 'Done'].forEach((lbl, i) => {
+          const d = document.createElement('span');
+          d.className = 'onb-dot' + (i === _onbStep ? ' active' : '') + (i < _onbStep ? ' done' : '');
+          d.textContent = String(i + 1); d.title = lbl; prog.appendChild(d);
+        });
+        card.appendChild(prog);
+
+        const body = document.createElement('div'); body.className = 'onb-body';
+
+        if (_onbStep === 0) {
+          body.innerHTML = '<h2>Welcome to Phoenix</h2>'
+            + '<p>Phoenix turns a text prompt into a 3D prop — it drives your local ComfyUI through a guided pipeline: prompt → reference image → 3D mesh → Blender.</p>'
+            + '<p><b>What you\'ll need:</b> a running <b>ComfyUI</b> (+ models), the <b>Claude CLI</b>, and <b>Node</b>. This wizard checks each and helps you fix anything missing. Optional: LM Studio + Blender.</p>';
+        } else if (_onbStep === 1) {
+          const h = document.createElement('h2'); h.textContent = 'Prerequisites'; body.appendChild(h);
+          const list = document.createElement('div'); list.className = 'onb-list';
+          const rows = [
+            ['Node.js', !!(st.node && st.node.present), false, 'Runtime — already running' + (st.node && st.node.version ? ' (' + st.node.version + ')' : '') + '.', null],
+            ['ComfyUI', !!(st.comfyui && st.comfyui.reachable), false, 'The local generation backend Phoenix talks to.', 'https://github.com/comfyanonymous/ComfyUI'],
+            ['Models / workflow', _wfReady(st), false, _modelsHint(st), 'https://github.com/comfyanonymous/ComfyUI#installing'],
+            ['Claude CLI', !!(st.claudeCli && st.claudeCli.present), false, 'Powers the assistant. Install it and sign in.', 'https://docs.claude.com/en/docs/claude-code'],
+            ['LM Studio', !!(st.lmstudio && st.lmstudio.reachable), true, 'Optional — local model for the metaprompter.', 'https://lmstudio.ai/'],
+            ['Blender', !!(st.blender && st.blender.present), true, 'Optional — for import / scene sync.', 'https://www.blender.org/'],
+          ];
+          rows.forEach(function (r) {
+            const name = r[0], ok = r[1], opt = r[2], hint = r[3], link = r[4];
+            const row = document.createElement('div'); row.className = 'onb-row';
+            const top = document.createElement('div'); top.className = 'onb-row-top';
+            const nm = document.createElement('span'); nm.className = 'onb-name'; nm.textContent = name;
+            top.appendChild(nm); top.appendChild(_onbPill(ok, opt));
+            row.appendChild(top);
+            const hd = document.createElement('div'); hd.className = 'onb-hint'; hd.textContent = hint;
+            if (link && !ok) { const a = document.createElement('a'); a.href = link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = ' Get it →'; a.className = 'onb-link'; hd.appendChild(a); }
+            row.appendChild(hd);
+            list.appendChild(row);
+          });
+          body.appendChild(list);
+          const reBtn = document.createElement('button'); reBtn.className = 'modal-btn'; reBtn.style.marginTop = '10px'; reBtn.textContent = 'Re-check';
+          reBtn.addEventListener('click', async function () { reBtn.disabled = true; reBtn.textContent = 'Checking…'; _onbStatus = await fetchOnbStatus(); renderOnb(); });
+          body.appendChild(reBtn);
+          const tsLink = document.createElement('button'); tsLink.className = 'modal-btn onb-secondary'; tsLink.style.marginTop = '10px'; tsLink.style.marginLeft = '8px'; tsLink.textContent = 'Stuck? Open Troubleshooter';
+          tsLink.addEventListener('click', function () { closeOnboarding(); openTroubleshooter(); });
+          body.appendChild(tsLink);
+        } else if (_onbStep === 2) {
+          if (_coreReady(st)) {
+            body.innerHTML = '<h2>Your first prop</h2><p>Everything\'s ready ✓</p>'
+              + '<p>Close this wizard, type a prompt in the chat (e.g. <i>"a wooden treasure chest"</i>), and Phoenix generates a reference image, then a 3D mesh. Approve each gate as it appears.</p>';
+          } else {
+            const h = document.createElement('h2'); h.textContent = 'Your first prop'; body.appendChild(h);
+            const p = document.createElement('p'); p.textContent = 'Almost — finish the required items on the previous step first (ComfyUI, Claude, and a runnable workflow must be green), then come back.'; body.appendChild(p);
+            const re = document.createElement('button'); re.className = 'modal-btn'; re.style.marginTop = '8px'; re.textContent = 'Re-check';
+            re.addEventListener('click', async function () { _onbStatus = await fetchOnbStatus(); renderOnb(); });
+            body.appendChild(re);
+          }
+        } else if (_onbStep === 3) {
+          body.innerHTML = '<h2>You\'re set up 🎉</h2><p>Phoenix is ready. A quick map of how it works:</p>'
+            + '<ul class="onb-cats">'
+            + '<li><b>You stay in control</b> — Phoenix (the chat on the left) drives the pipeline, but the modules are yours to steer: approve or skip each gate, edit the prompt, regenerate, or run a step yourself.</li>'
+            + '<li><b>Generate</b> — type a prompt in chat; Phoenix runs prompt → image → mesh with optional approval gates.</li>'
+            + '<li><b>Workflows</b> — pick which generator runs, or add your own (Verified + Custom).</li>'
+            + '<li><b>Palette</b> — per-category style presets that shape the look.</li>'
+            + '<li><b>Library</b> — your staged assets, brushes, materials.</li>'
+            + '<li><b>Troubleshooter</b> — checks your stack and helps fix what\'s missing.</li>'
+            + '</ul><p class="onb-hint">Reopen this anytime from the menu → Setup.</p>';
+        }
+        card.appendChild(body);
+
+        const nav = document.createElement('div'); nav.className = 'onb-nav';
+        const left = document.createElement('div');
+        if (_onbStep > 0) { const b = document.createElement('button'); b.className = 'modal-btn onb-secondary'; b.textContent = 'Back'; b.addEventListener('click', function () { _onbStep--; renderOnb(); }); left.appendChild(b); }
+        const right = document.createElement('div'); right.style.display = 'flex'; right.style.gap = '8px';
+        const skip = document.createElement('button'); skip.className = 'modal-btn onb-secondary'; skip.textContent = 'Skip for now'; skip.addEventListener('click', closeOnboarding); right.appendChild(skip);
+        if (_onbStep < 3) { const n = document.createElement('button'); n.className = 'modal-btn'; n.textContent = 'Next'; n.addEventListener('click', function () { _onbStep++; renderOnb(); }); right.appendChild(n); }
+        else { const f = document.createElement('button'); f.className = 'modal-btn'; f.textContent = 'Finish'; f.addEventListener('click', async function () { try { await fetch('/onboarding/complete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ completed: true }) }); } catch (e) {} closeOnboarding(); }); right.appendChild(f); }
+        nav.appendChild(left); nav.appendChild(right);
+        card.appendChild(nav);
+
+        ov.appendChild(card);
+      }
+
       // ── Library tabs (Assets | Brushes | Materials | Palette) ────────────────
       const libTabBtns = document.querySelectorAll('.lib-tab-btn');
       const libPanels  = { assets: libAssetsBody, brushes: libBrushesBody, materials: libMaterialsBody, palette: libPaletteBody, workflows: libWorkflowsBody };
@@ -2551,6 +2843,7 @@
       // Focus input on load
       inputEl.focus();
       refreshLibrary();
+      initOnboarding();
     })();
   </script>
 

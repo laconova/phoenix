@@ -538,10 +538,14 @@ async function handler(req, res) {
   if (method === 'GET' && urlPath === '/config') {
     const fresh = a.loadConfig();
     const orch = (fresh.seats && fresh.seats.orchestrator) || {};
+    const meta = (fresh.seats && fresh.seats.metaprompter) || {};
     sendJSON(res, 200, {
       gates: (fresh && fresh.gates) || {},
       orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3 },
+      metaprompter: { model: meta.model || '', ejectAfterUse: !!meta.ejectAfterUse },
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
+      apps: { blender: (fresh.apps && fresh.apps.blender) || '' },
+      feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
     return;
   }
@@ -602,6 +606,33 @@ async function handler(req, res) {
       logTail,
     ].join('\n');
     sendJSON(res, 200, { report });
+    return;
+  }
+
+  // ── POST /feedback ───────────────────────────────────────────────────────
+  if (method === 'POST' && urlPath === '/feedback') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const message = (body && typeof body.message === 'string') ? body.message.trim() : '';
+    if (!message) { sendJSON(res, 400, { error: 'Message is required.' }); return; }
+    const fresh = a.loadConfig();
+    const url = fresh.feedback && fresh.feedback.endpointUrl;
+    if (!url) { sendJSON(res, 400, { error: 'Feedback endpoint is not configured. Set it in Settings.' }); return; }
+    const payload = {
+      message,
+      contact: (body && typeof body.contact === 'string') ? body.contact.trim() : '',
+      report:  (body && typeof body.report  === 'string') ? body.report  : '',
+      context: (body && typeof body.context === 'string') ? body.context : '',
+      version: (fresh.version || ''),
+    };
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(10000) });
+      if (r.ok) { sendJSON(res, 200, { ok: true }); }
+      else { sendJSON(res, 502, { error: 'Feedback endpoint returned ' + r.status }); }
+    } catch (e) {
+      sendJSON(res, 502, { error: 'Could not reach feedback endpoint: ' + String(e.message || e) });
+    }
     return;
   }
 
@@ -696,19 +727,25 @@ async function handler(req, res) {
     if (!fresh.gates || typeof fresh.gates !== 'object') fresh.gates = {};
     if (!fresh.seats || typeof fresh.seats !== 'object') fresh.seats = {};
     if (!fresh.seats.orchestrator || typeof fresh.seats.orchestrator !== 'object') fresh.seats.orchestrator = {};
+    if (!fresh.seats.metaprompter || typeof fresh.seats.metaprompter !== 'object') fresh.seats.metaprompter = {};
     if (!fresh.endpoints || typeof fresh.endpoints !== 'object') fresh.endpoints = {};
+    if (!fresh.apps || typeof fresh.apps !== 'object') fresh.apps = {};
+    if (!fresh.feedback || typeof fresh.feedback !== 'object') fresh.feedback = {};
 
     const hasGates = body && typeof body.gates === 'object' && body.gates !== null;
     const hasOrch  = body && typeof body.orchestrator === 'object' && body.orchestrator !== null;
+    const hasMeta  = body && typeof body.metaprompter === 'object' && body.metaprompter !== null;
     const hasEps   = body && typeof body.endpoints === 'object' && body.endpoints !== null;
+    const hasApps  = body && typeof body.apps === 'object' && body.apps !== null;
+    const hasFb    = body && typeof body.feedback === 'object' && body.feedback !== null;
 
-    if (!hasGates && !hasOrch && !hasEps) {
+    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb) {
       sendJSON(res, 400, { error: 'No settings provided.' });
       return;
     }
 
     // Stage validated changes (only applied on full success)
-    const staged = { gates: {}, orchestrator: {}, endpoints: {} };
+    const staged = { gates: {}, orchestrator: {}, metaprompter: {}, endpoints: {}, apps: {}, feedback: {} };
 
     if (hasGates) {
       for (const k of ['prompt', 'image', 'mesh']) {
@@ -781,17 +818,63 @@ async function handler(req, res) {
       staged.endpoints.comfyui = comfyui;
     }
 
+    // Validate metaprompter model (probe only Claude models, only if changed)
+    if (hasMeta && 'model' in body.metaprompter) {
+      const mm = body.metaprompter.model;
+      if (typeof mm !== 'string' || !mm.trim()) {
+        sendJSON(res, 400, { error: 'Metaprompter model must be a non-empty string.', field: 'metaprompter' });
+        return;
+      }
+      if (/^claude/i.test(mm) && mm !== fresh.seats.metaprompter.model) {
+        const { ok, msg } = await validateClaudeModel(mm);
+        if (!ok) {
+          sendJSON(res, 400, { error: 'Metaprompter model "' + mm + '" was not accepted by the Claude CLI: ' + msg, field: 'metaprompter' });
+          return;
+        }
+      }
+      staged.metaprompter.model = mm.trim();
+    }
+
+    if (hasMeta && 'ejectAfterUse' in body.metaprompter) {
+      staged.metaprompter.ejectAfterUse = !!body.metaprompter.ejectAfterUse;
+    }
+
+    // Validate Blender path (string; empty allowed to clear)
+    if (hasApps && 'blender' in body.apps) {
+      const bp = body.apps.blender;
+      if (typeof bp !== 'string') {
+        sendJSON(res, 400, { error: 'Blender path must be a string.', field: 'blender' });
+        return;
+      }
+      staged.apps.blender = bp.trim();
+    }
+
+    // Validate feedback endpointUrl (format-only; no GET ping — the PHP endpoint only accepts POST)
+    if (hasFb && 'endpointUrl' in body.feedback) {
+      const u = body.feedback.endpointUrl;
+      if (typeof u !== 'string') { sendJSON(res, 400, { error: 'Feedback endpoint must be a string.', field: 'endpointUrl' }); return; }
+      const t = u.trim();
+      if (t && !/^https?:\/\//.test(t)) { sendJSON(res, 400, { error: 'Feedback endpoint must be an http(s) URL (or empty to clear).', field: 'endpointUrl' }); return; }
+      staged.feedback.endpointUrl = t;
+    }
+
     // All validations passed — apply staged changes (isolated-field merge)
     Object.assign(fresh.gates, staged.gates);
     Object.assign(fresh.seats.orchestrator, staged.orchestrator);
+    Object.assign(fresh.seats.metaprompter, staged.metaprompter);
     Object.assign(fresh.endpoints, staged.endpoints);
+    if ('blender' in staged.apps) fresh.apps.blender = staged.apps.blender;
+    if ('endpointUrl' in staged.feedback) fresh.feedback.endpointUrl = staged.feedback.endpointUrl;
 
     a.saveConfig(fresh);
     cfg = fresh;
     sendJSON(res, 200, {
       gates: fresh.gates,
       orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages },
+      metaprompter: { model: fresh.seats.metaprompter.model, ejectAfterUse: !!fresh.seats.metaprompter.ejectAfterUse },
       endpoints: { local: fresh.endpoints.local, comfyui: fresh.endpoints.comfyui },
+      apps: { blender: (fresh.apps && fresh.apps.blender) || '' },
+      feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
     return;
   }
@@ -1019,6 +1102,17 @@ async function handler(req, res) {
     return;
   }
 
+  // ── GET /lmstudio/models ─────────────────────────────────────────────────
+  // Returns models currently loaded in LM Studio. Always responds 200 —
+  // { reachable: false, error, base } when LM Studio is unreachable so the UI
+  // can render a graceful "offline" badge (same convention as /workflows/deps).
+  if (method === 'GET' && urlPath === '/lmstudio/models') {
+    const localCfg = a.loadConfig();
+    const result = await a.listLmStudioModels(localCfg);
+    sendJSON(res, 200, result);
+    return;
+  }
+
   // ── POST /workflows/infer ────────────────────────────────────────────────
   // Infers a Phoenix node-map from a ComfyUI API-format workflow JSON.
   // Body: { stage: 'image'|'mesh', json: <workflow as string or object> }
@@ -1203,6 +1297,30 @@ async function handler(req, res) {
     } catch (e) {
       sendJSON(res, 400, { error: String(e.message || e) });
     }
+    return;
+  }
+
+  // ── GET /onboarding/status ───────────────────────────────────────────────
+  if (method === 'GET' && urlPath === '/onboarding/status') {
+    try {
+      const st = await a.onboardingStatus(a.loadConfig());
+      sendJSON(res, 200, st);
+    } catch (e) {
+      sendJSON(res, 500, { error: String(e.message || e) });
+    }
+    return;
+  }
+
+  // ── POST /onboarding/complete ────────────────────────────────────────────
+  if (method === 'POST' && urlPath === '/onboarding/complete') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const completed = (body && typeof body.completed === 'boolean') ? body.completed : true;
+    const cfg = a.loadConfig();
+    cfg.onboarding = cfg.onboarding || {};
+    cfg.onboarding.completed = completed;
+    a.saveConfig(cfg);
+    sendJSON(res, 200, { completed });
     return;
   }
 

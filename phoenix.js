@@ -1,7 +1,7 @@
 'use strict';
 
 const readline = require('readline');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
 const net  = require('net');
@@ -25,12 +25,13 @@ const _palette = loadPalette();
 
 const COMFY_BASE   = (_cfg.endpoints && _cfg.endpoints.comfyui) || 'http://localhost:8000';
 const LOCAL_BASE   = process.env.LOCAL_API   || (_cfg.endpoints && _cfg.endpoints.local) || 'http://localhost:1234/v1';
-const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.model) || 'google/gemma-4-e4b';
+const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.model) || 'claude-haiku-4-5-20251001';
+const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse);
 const GEMMA_TEMP   = (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.temperature) || 0.7;
 const BLENDER_PORT = 9876;
 
 const COMFY_OUTPUT   = path.join(
-  process.env.USERPROFILE || 'C:\\Users\\erazz',
+  process.env.USERPROFILE || process.env.HOME || '',
   'Documents', 'ComfyUI', 'output'
 );
 // Active image/3D workflow files + node-maps now come from the registry (workflows.js)
@@ -95,27 +96,59 @@ function callClaude(systemPrompt, user) {
   return r.stdout.trim();
 }
 
+function lmsLoad(modelKey) {
+  try {
+    const r = spawnSync('lms', ['load', modelKey, '-y'], { encoding: 'utf8', timeout: 120000 });
+    if (r.error)       { dbg.event('eject', { phase: 'load-error',   model: modelKey, error: r.error.message }); return; }
+    if (r.status !== 0){ dbg.event('eject', { phase: 'load-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
+    dbg.event('eject', { phase: 'loaded', model: modelKey });
+  } catch (e) { dbg.event('eject', { phase: 'load-throw', error: (e && e.message) || String(e) }); }
+}
+function lmsUnload(modelKey) {
+  try {
+    const r = spawnSync('lms', ['unload', modelKey], { encoding: 'utf8', timeout: 30000 });
+    if (r.error)       { dbg.event('eject', { phase: 'unload-error',   model: modelKey, error: r.error.message }); return; }
+    if (r.status !== 0){ dbg.event('eject', { phase: 'unload-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
+    dbg.event('eject', { phase: 'unloaded', model: modelKey });
+  } catch (e) { dbg.event('eject', { phase: 'unload-throw', error: (e && e.message) || String(e) }); }
+}
+
 async function callLocal(systemPrompt, user) {
   const _t = Date.now();
-  const res = await fetch(`${LOCAL_BASE}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: GEMMA_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: user },
-      ],
-      temperature: GEMMA_TEMP,
-      max_tokens: 4000,
-      stream: false,
-      thinking: { type: 'disabled' },
-    }),
+  const body = JSON.stringify({
+    model: GEMMA_MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: user },
+    ],
+    temperature: GEMMA_TEMP,
+    max_tokens: 4000,
+    stream: false,
+    thinking: { type: 'disabled' },
   });
-  if (!res.ok) throw new Error(`Local LLM ${res.status}: ${await res.text()}`);
-  const content = (await res.json()).choices[0].message.content.trim();
-  dbg.llm('metaprompter', { ms: Date.now() - _t, respChars: content.length });
-  return content;
+  // Up to 2 attempts: LM Studio JIT-loads the model on the first request, which can
+  // briefly return "No models loaded" before the load finishes (a race). One retry
+  // after a short wait lets the load complete instead of failing the whole gen.
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await fetch(`${LOCAL_BASE}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (res.ok) {
+        const content = (await res.json()).choices[0].message.content.trim();
+        dbg.llm('metaprompter', { ms: Date.now() - _t, respChars: content.length, attempt });
+        return content;
+      }
+      lastErr = `HTTP ${res.status}: ${await res.text()}`;
+    } catch (e) {
+      lastErr = (e && e.message) || String(e);
+    }
+    if (attempt < 2) await new Promise(r => setTimeout(r, 3000)); // give JIT loading time
+  }
+  throw new Error(`Local metaprompter model "${GEMMA_MODEL}" isn't responding from LM Studio at ${LOCAL_BASE} (${lastErr}). Load the model in LM Studio (or enable JIT loading), then retry — or switch the metaprompter to Haiku in Settings (no local model needed).`);
 }
 
 // ─── Blender IPC ─────────────────────────────────────────────────────────────
@@ -181,10 +214,13 @@ async function comfyQueue(workflow) {
 
 async function comfyPoll(promptId, timeoutMs = 600000) {
   const deadline = Date.now() + timeoutMs;
+  let consecFails = 0;
+  const MAX_CONSEC_FAILS = 5; // ~15s of consecutive unreachable polls ⇒ ComfyUI is gone, not a blip
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
     try {
       const res = await fetch(`${COMFY_BASE}/history/${promptId}`);
+      consecFails = 0; // got a response ⇒ ComfyUI is reachable
       if (!res.ok) continue;
       const hist  = await res.json();
       const entry = hist[promptId];
@@ -192,7 +228,14 @@ async function comfyPoll(promptId, timeoutMs = 600000) {
       const done = (entry.status && entry.status.completed) ||
                    (entry.outputs && Object.keys(entry.outputs).length > 0);
       if (done) return entry.outputs || {};
-    } catch { /* network blip, keep polling */ }
+    } catch {
+      // A thrown fetch = ComfyUI unreachable. Tolerate a few (transient blip),
+      // but bail fast if it stays down instead of polling silently to the timeout.
+      consecFails++;
+      if (consecFails >= MAX_CONSEC_FAILS) {
+        throw new Error(`ComfyUI became unreachable during generation (${consecFails} consecutive failed status checks) — is ComfyUI still running?`);
+      }
+    }
   }
   throw new Error(`ComfyUI timed out after ${timeoutMs / 60000} min — check the UI`);
 }
@@ -248,7 +291,19 @@ const META_SYSTEM = META_SYSTEM_HEADER +
   Object.entries(_palette.categories).map(([k, v]) => `\n- ${k}: ${v.style}`).join('');
 
 async function generateMetaprompt(userPrompt, category) {
-  const text = await callLocal(META_SYSTEM, `Category: ${category}\nDescription: ${userPrompt}`);
+  const _mpUser = `Category: ${category}\nDescription: ${userPrompt}`;
+  const isLocal = !/^claude/i.test(GEMMA_MODEL);
+  let text;
+  if (isLocal) {
+    if (EJECT_AFTER) lmsLoad(GEMMA_MODEL);
+    try {
+      text = await callLocal(META_SYSTEM, _mpUser);
+    } finally {
+      if (EJECT_AFTER) lmsUnload(GEMMA_MODEL);
+    }
+  } else {
+    text = await callClaudeMeta(META_SYSTEM, _mpUser, GEMMA_MODEL);
+  }
   const posM = text.match(/POSITIVE:\s*([\s\S]+?)(?:\nNEGATIVE:|$)/i);
   const negM = text.match(/NEGATIVE:\s*([\s\S]+?)$/i);
   const positive = posM ? posM[1].trim() : '';
@@ -256,12 +311,26 @@ async function generateMetaprompt(userPrompt, category) {
   if (!positive) {
     console.error('\n  [WARN] Gemma returned empty POSITIVE — raw output below:');
     console.error('  ' + text.slice(0, 400).replace(/\n/g, '\n  '));
-    throw new Error('Empty POSITIVE from Gemma metaprompter — hit [r] to retry');
+    throw new Error('Empty POSITIVE from metaprompter — hit [r] to retry');
   }
   return {
     positive,
     negative: negative || 'blurry, low quality, distorted, multiple objects, cluttered background, shadows, people, text',
   };
+}
+
+async function callClaudeMeta(systemPrompt, user, model) {
+  return new Promise((resolve, reject) => {
+    const out = [], err = [];
+    const child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, user], { encoding: 'utf8' });
+    child.stdout.on('data', d => out.push(d));
+    child.stderr.on('data', d => err.push(d));
+    child.on('error', e => reject(new Error('Claude CLI: ' + e.message)));
+    child.on('close', code => {
+      if (code !== 0) { reject(new Error('Claude CLI exit ' + code + ': ' + err.join('').trim())); return; }
+      resolve(out.join('').trim());
+    });
+  });
 }
 
 // ─── Stage: Flux image gen ───────────────────────────────────────────────────
@@ -741,7 +810,8 @@ if (_si >= 0) {
         await runImageStage(_desc, _cat, _ppos, _nneg);
       } catch (e) {
         process.stderr.write(`Stage error: ${e.message}\n`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     })();
   } else if (_stageName === 'mesh') {
@@ -757,7 +827,8 @@ if (_si >= 0) {
         await runMeshStage(_image, _desc, _cat, Number.isFinite(_faces) ? _faces : null);
       } catch (e) {
         process.stderr.write(`Stage error: ${e.message}\n`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     })();
   } else if (_stageName === 'prompt') {
@@ -776,7 +847,8 @@ if (_si >= 0) {
         process.stdout.write(`RESULT_PROMPT_NEG: ${negative.replace(/\n/g, ' ')}\n`);
       } catch (e) {
         process.stderr.write(`Stage error: ${e.message}\n`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     })();
   } else {

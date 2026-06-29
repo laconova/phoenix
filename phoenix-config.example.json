@@ -3,7 +3,7 @@
   "gates": { "prompt": false, "image": true, "mesh": false },
   "seats": {
     "orchestrator": { "model": "claude-opus-4-8", "historyMessages": 3 },
-    "metaprompter": { "model": "google/gemma-4-e4b", "temperature": 0.7 },
+    "metaprompter": { "model": "claude-haiku-4-5-20251001", "temperature": 0.7 },
     "troubleshooter": { "model": "claude-sonnet-4-6", "historyMessages": 8 }
   },
   "endpoints": { "local": "http://localhost:1234/v1", "comfyui": "http://localhost:8000" },
