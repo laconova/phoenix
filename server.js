@@ -544,7 +544,7 @@ async function handler(req, res) {
       orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3 },
       metaprompter: { model: meta.model || '', ejectAfterUse: !!meta.ejectAfterUse },
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
-      apps: { blender: (fresh.apps && fresh.apps.blender) || '' },
+      apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
     return;
@@ -849,6 +849,16 @@ async function handler(req, res) {
       staged.apps.blender = bp.trim();
     }
 
+    // Validate ComfyUI output path (string; empty allowed to clear; directory need not exist)
+    if (hasApps && 'comfyOutput' in body.apps) {
+      const co = body.apps.comfyOutput;
+      if (typeof co !== 'string') {
+        sendJSON(res, 400, { error: 'ComfyUI output path must be a string.', field: 'comfyOutput' });
+        return;
+      }
+      staged.apps.comfyOutput = co.trim();
+    }
+
     // Validate feedback endpointUrl (format-only; no GET ping — the PHP endpoint only accepts POST)
     if (hasFb && 'endpointUrl' in body.feedback) {
       const u = body.feedback.endpointUrl;
@@ -864,6 +874,7 @@ async function handler(req, res) {
     Object.assign(fresh.seats.metaprompter, staged.metaprompter);
     Object.assign(fresh.endpoints, staged.endpoints);
     if ('blender' in staged.apps) fresh.apps.blender = staged.apps.blender;
+    if ('comfyOutput' in staged.apps) fresh.apps.comfyOutput = staged.apps.comfyOutput;
     if ('endpointUrl' in staged.feedback) fresh.feedback.endpointUrl = staged.feedback.endpointUrl;
 
     a.saveConfig(fresh);
@@ -873,7 +884,7 @@ async function handler(req, res) {
       orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages },
       metaprompter: { model: fresh.seats.metaprompter.model, ejectAfterUse: !!fresh.seats.metaprompter.ejectAfterUse },
       endpoints: { local: fresh.endpoints.local, comfyui: fresh.endpoints.comfyui },
-      apps: { blender: (fresh.apps && fresh.apps.blender) || '' },
+      apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
     return;

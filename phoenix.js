@@ -30,10 +30,8 @@ const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.meta
 const GEMMA_TEMP   = (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.temperature) || 0.7;
 const BLENDER_PORT = 9876;
 
-const COMFY_OUTPUT   = path.join(
-  process.env.USERPROFILE || process.env.HOME || '',
-  'Documents', 'ComfyUI', 'output'
-);
+const COMFY_OUTPUT = (_cfg.apps && _cfg.apps.comfyOutput) ||
+  path.join(process.env.USERPROFILE || process.env.HOME || '', 'Documents', 'ComfyUI', 'output');
 // Active image/3D workflow files + node-maps now come from the registry (workflows.js)
 // via getActive(stage, _cfg). The old FLUX_WORKFLOW / TRELLIS_WORKFLOW constants were
 // removed in the Phase 2 engine refactor (2026-06-27).

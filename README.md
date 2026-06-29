@@ -67,6 +67,8 @@ Copy `phoenix-config.example.json` → `phoenix-config.json`. Key fields:
 - **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`).
 - **`endpoints`** — ComfyUI + local‑model URLs.
 - **`gates`** — which stages pause for approval (`prompt` / `image` / `mesh`).
+- **`apps`** — local paths: `blender` (the Blender executable) and `comfyOutput` (the folder Phoenix
+  reads ComfyUI's generated files from; leave empty to use the default `~/Documents/ComfyUI/output`).
 
 Runtime/user files (`phoenix-config.json`, `workflows.json`, `palette.json`, `output/`, …) are git‑ignored — Phoenix recreates them on first run.
 

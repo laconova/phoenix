@@ -1249,6 +1249,12 @@
         blenderInp.placeholder = 'path to blender.exe (optional)';
         toolBody.appendChild(makeRow('Blender path', blenderInp));
 
+        // ComfyUI output folder
+        const comfyOutputInp = document.createElement('input');
+        comfyOutputInp.type = 'text'; comfyOutputInp.id = 'set-comfy-output';
+        comfyOutputInp.placeholder = 'ComfyUI output folder (optional)';
+        toolBody.appendChild(makeRow('ComfyUI output folder', comfyOutputInp));
+
         // Feedback endpoint URL
         const feedbackInp = document.createElement('input');
         feedbackInp.type = 'text'; feedbackInp.id = 'set-feedback-url';
@@ -1301,6 +1307,7 @@
           else if (meta.model) { metaSel.value = '__local__'; metaLocal.value = meta.model; metaLocal.style.display = ''; metaList.style.display = ''; populateMetaList(); }
           metaEject.checked = !!(meta && meta.ejectAfterUse);
           blenderInp.value = apps.blender || '';
+          comfyOutputInp.value = apps.comfyOutput || '';
           const fb = c.feedback || {};
           feedbackInp.value = fb.endpointUrl || '';
         } catch (_) {}
@@ -1318,7 +1325,7 @@
             orchestrator: { model: chosenModel, historyMessages: Number(histInp.value) },
             metaprompter: { model: chosenMeta, ejectAfterUse: metaEject.checked },
             endpoints: { local: localInp.value.trim(), comfyui: comfyInp.value.trim() },
-            apps: { blender: blenderInp.value.trim() },
+            apps: { blender: blenderInp.value.trim(), comfyOutput: comfyOutputInp.value.trim() },
             feedback: { endpointUrl: feedbackInp.value.trim() },
           };
 

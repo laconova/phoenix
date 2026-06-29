@@ -8,6 +8,6 @@
   },
   "endpoints": { "local": "http://localhost:1234/v1", "comfyui": "http://localhost:8000" },
   "preflight": { "expected": { "python": "3.12", "pytorch": "2.10", "cuda": "cu130", "blender": "5.1" } },
-  "apps": { "blender": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe" },
+  "apps": { "blender": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe", "comfyOutput": "" },
   "sceneSync": { "enabled": true, "intervalSeconds": 120 }
 }
