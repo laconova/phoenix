@@ -10,11 +10,10 @@
  * Saves a .blend library file, appends add_<name>() to phoenix_brushes.py, registers in registry.json.
  */
 
-const net  = require('net');
 const fs   = require('fs');
 const path = require('path');
+const { callBlender } = require('./blender-ipc');
 
-const BLENDER_PORT  = 9876;
 const BRUSHES_DIR   = path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
 const PHOENIX_PY    = path.join(BRUSHES_DIR, 'phoenix_brushes.py');
@@ -40,28 +39,8 @@ const libPath = path.join(LIB_DIR, category, `${slug}.blend`);
 const libFwd  = libPath.replace(/\\/g, '/');
 
 // ─── Blender IPC ──────────────────────────────────────────────────────────────
-
-function callBlender(code) {
-  return new Promise((resolve, reject) => {
-    const msg = JSON.stringify({ type: 'execute', code, strict_json: false }) + '\x00';
-    const sock = new net.Socket();
-    const chunks = [];
-    sock.setTimeout(30000);
-    sock.connect(BLENDER_PORT, 'localhost', () => sock.write(Buffer.from(msg, 'utf8')));
-    sock.on('data', d => { chunks.push(d); if (d.includes(0)) sock.end(); });
-    sock.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').replace(/\x00/g, '').trim();
-      try { resolve(JSON.parse(raw)); } catch { resolve({ output: raw }); }
-    });
-    sock.on('timeout', () => { sock.destroy(); reject(new Error('Blender socket timeout')); });
-    sock.on('error', err => {
-      const msg = err.code === 'ECONNREFUSED'
-        ? 'Blender not reachable on port 9876 — is it open with the IPC server running?'
-        : err.message;
-      reject(new Error(msg));
-    });
-  });
-}
+// File-based transport via blender-ipc.js (callBlender imported above). Was a 9876
+// socket; raw sockets fail cross-process on Windows + Blender 5.1 / Python 3.13.
 
 // ─── Generate add_() function text ────────────────────────────────────────────
 

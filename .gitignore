@@ -15,3 +15,7 @@ brushes/
 .DS_Store
 node_modules/
 *.log
+
+# Python cache (Blender addon)
+__pycache__/
+*.pyc

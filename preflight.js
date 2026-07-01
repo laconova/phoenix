@@ -8,8 +8,8 @@ const fs           = require('fs');
 const path         = require('path');
 const http         = require('http');
 const https        = require('https');
-const net          = require('net');
 const { spawnSync } = require('child_process');
+const { callBlender, ipcDir } = require('./blender-ipc');
 
 // ─── Config path (constant — no side effects) ─────────────────────────────────
 
@@ -48,8 +48,6 @@ async function runPreflight({ exitOnFail = false } = {}) {
   const COMFYUI_BASE       = cfg.endpoints && cfg.endpoints.comfyui || 'http://localhost:8000';
   const METAPROMPTER_MODEL = cfg.seats     && cfg.seats.metaprompter && cfg.seats.metaprompter.model || 'google/gemma-4-e4b';
   const ORCHESTRATOR_MODEL = cfg.seats     && cfg.seats.orchestrator && cfg.seats.orchestrator.model || 'claude-sonnet-4-6';
-  const BLENDER_HOST       = '127.0.0.1';
-  const BLENDER_PORT       = 9876; // confirmed in phoenix.js line 23
   const EXPECTED = (cfg.preflight && cfg.preflight.expected) || {};
 
   // ─── Individual checks (closures over the consts above) ──────────────────────
@@ -136,58 +134,34 @@ async function runPreflight({ exitOnFail = false } = {}) {
     }
   }
 
-  function checkBlender() {
-    const label = `Blender socket (${BLENDER_HOST}:${BLENDER_PORT})`;
-    return new Promise(resolve => {
-      const sock   = new net.Socket();
-      const chunks = [];
-      let connected = false;
-      const code = "import bpy\nprint('BLENDER_VERSION:' + bpy.app.version_string)";
-      const msg  = JSON.stringify({ type: 'execute', code, strict_json: false }) + '\x00';
-
-      const timer = setTimeout(() => {
-        sock.destroy();
-        if (connected) {
-          // Socket was reachable but no IPC reply in time — still a pass, version unknown.
-          console.log(`[PASS] ${label} — reachable (version query timed out)`);
-          resolve(true);
-        } else {
-          console.log(`[FAIL] ${label} — NOT REACHABLE (connection timed out)`);
-          resolve(false);
-        }
-      }, 8000);
-
-      sock.connect(BLENDER_PORT, BLENDER_HOST, () => {
-        connected = true;
-        sock.write(Buffer.from(msg, 'utf8'));
-      });
-
-      sock.on('data', d => { chunks.push(d); if (d.includes(0)) sock.end(); });
-
-      sock.on('end', () => {
-        clearTimeout(timer);
-        const raw = Buffer.concat(chunks).toString('utf8').replace(/\x00/g, '').trim();
-        let stdout = raw;
-        try { const j = JSON.parse(raw); stdout = j.stdout || j.output || raw; } catch { /* keep raw */ }
-        const m   = /BLENDER_VERSION:([^\s]+)/.exec(stdout);
-        const ver = m ? m[1] : null;
-        if (ver) {
-          console.log(`[PASS] ${label} — IPC responded · Blender ${ver}`);
-          if (EXPECTED.blender && !ver.startsWith(EXPECTED.blender))
-            console.log(`[WARN] Blender — running ${ver} ≠ expected ${EXPECTED.blender} (config/runtime drift)`);
-        } else {
-          console.log(`[PASS] ${label} — reachable (version unknown)`);
-        }
-        resolve(true);
-      });
-
-      sock.on('error', err => {
-        clearTimeout(timer);
-        const reason = err.code === 'ECONNREFUSED' ? 'connection refused' : err.message;
-        console.log(`[FAIL] ${label} — NOT REACHABLE (${reason})`);
-        resolve(false);
-      });
-    });
+  async function checkBlender() {
+    const label = 'Blender IPC (file-based)';
+    try {
+      const r = await callBlender(
+        "import bpy\nprint('BLENDER_VERSION:' + bpy.app.version_string)",
+        { timeoutMs: 8000 });
+      if (r.status === 'error') {
+        const last = (r.message || '').trim().split('\n').pop();
+        console.log(`[FAIL] ${label} — addon responded with an error: ${last}`);
+        return false;
+      }
+      const m   = /BLENDER_VERSION:([^\s]+)/.exec(r.stdout || '');
+      const ver = m ? m[1] : null;
+      if (ver) {
+        console.log(`[PASS] ${label} — addon responded · Blender ${ver}`);
+        if (EXPECTED.blender && !ver.startsWith(EXPECTED.blender))
+          console.log(`[WARN] Blender — running ${ver} ≠ expected ${EXPECTED.blender} (config/runtime drift)`);
+      } else {
+        console.log(`[PASS] ${label} — reachable (version unknown)`);
+      }
+      return true;
+    } catch (err) {
+      const reason = /not responding/i.test(err.message)
+        ? 'Blender not open, or the Phoenix IPC addon is not enabled'
+        : err.message;
+      console.log(`[FAIL] ${label} — NOT REACHABLE (${reason})`);
+      return false;
+    }
   }
 
   function checkClaudeCLI() {
@@ -236,14 +210,14 @@ async function runPreflight({ exitOnFail = false } = {}) {
   console.log(`ComfyUI endpoint   : ${COMFYUI_BASE}`);
   console.log(`Metaprompter model : ${METAPROMPTER_MODEL}`);
   console.log(`Orchestrator model : ${ORCHESTRATOR_MODEL}`);
-  console.log(`Blender socket     : ${BLENDER_HOST}:${BLENDER_PORT}`);
+  console.log(`Blender IPC dir    : ${ipcDir(cfg)}`);
   console.log('');
 
   // Run all checks; failures are isolated — one down check never crashes the others.
   const [r1, r2, r3, r4] = await Promise.all([
     checkLocalLLM().catch(e => { console.log(`[FAIL] Local LLM — unexpected error: ${e.message}`); return false; }),
     checkComfyUI().catch(e  => { console.log(`[FAIL] ComfyUI — unexpected error: ${e.message}`);   return false; }),
-    checkBlender().catch(e  => { console.log(`[FAIL] Blender socket — unexpected error: ${e.message}`); return false; }),
+    checkBlender().catch(e  => { console.log(`[FAIL] Blender IPC — unexpected error: ${e.message}`); return false; }),
     Promise.resolve(checkClaudeCLI()),
   ]);
 

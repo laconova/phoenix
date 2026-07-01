@@ -52,6 +52,21 @@ needed. To customize endpoints/models, edit that file, or pre-create it yourself
 
 On first run, Phoenix seeds its registry with three built‑in ("Verified") workflows — **Flux Klein** and **SD 1.5** (image) and **Trellis2‑GGUF** (mesh). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
 
+## Connect Blender
+
+The final pipeline stage imports your prop into Blender. Phoenix talks to Blender through a small **file‑based IPC addon** — no sockets, no ports, no firewall setup (it works the same on Windows and Linux).
+
+**One‑time install (4 clicks):**
+
+1. In Blender: **Edit ▸ Preferences ▸ Add‑ons ▸ Install from Disk…**
+2. Pick **`blender-addon/phoenix_blender_ipc.py`** from this repo.
+3. **Enable** the checkbox next to *"Phoenix Blender IPC"*.
+4. Done — it starts automatically. Press **N** in the 3D viewport to see the **Phoenix** sidebar tab (live status + a manual Start/Stop).
+
+With Blender open and the addon enabled, the import stage drops generated props straight into your scene. The **Troubleshooter**'s Blender check (and the onboarding wizard) flip to ✓ once it's connected.
+
+*Optional:* set `apps.blender` in `phoenix-config.json` to your Blender executable so Phoenix can launch it for you. Requires Blender 3.0+ (tested on 5.1).
+
 ## Features
 
 - **Chat‑driven generation** with per‑stage gates (prompt / image / mesh).

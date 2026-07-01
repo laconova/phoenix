@@ -7,6 +7,7 @@ const path = require('path');
 const net  = require('net');
 const { runPreflight } = require('./preflight');
 const dbg = require('./debug-log');
+const blenderIpc = require('./blender-ipc');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -152,30 +153,10 @@ async function callLocal(systemPrompt, user) {
 
 // ─── Blender IPC ─────────────────────────────────────────────────────────────
 
+// File-based transport — see blender-ipc.js. (Was a 9876 socket; sockets fail
+// cross-process on Windows + Blender 5.1 / Python 3.13. WinError 10035.)
 function callBlender(code) {
-  return new Promise((resolve, reject) => {
-    dbg.ipc('send', { code });
-    const msg  = JSON.stringify({ type: 'execute', code, strict_json: false }) + '\x00';
-    const sock = new net.Socket();
-    const chunks = [];
-
-    sock.setTimeout(90000);
-    sock.connect(BLENDER_PORT, 'localhost', () => sock.write(Buffer.from(msg, 'utf8')));
-    sock.on('data', d => { chunks.push(d); if (d.includes(0)) sock.end(); });
-    sock.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').replace(/\x00/g, '').trim();
-      dbg.ipc('recv', raw);
-      try { resolve(JSON.parse(raw)); } catch { resolve({ output: raw }); }
-    });
-    sock.on('timeout', () => { sock.destroy(); reject(new Error('Blender socket timeout')); });
-    sock.on('error', err => {
-      dbg.ipc('error', err.message);
-      if (err.code === 'ECONNREFUSED')
-        reject(new Error('Blender not reachable on port 9876 — is Blender open with the IPC server running?'));
-      else
-        reject(err);
-    });
-  });
+  return blenderIpc.callBlender(code);
 }
 
 // ─── ComfyUI helpers ─────────────────────────────────────────────────────────

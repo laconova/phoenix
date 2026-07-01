@@ -3,8 +3,8 @@
 const path   = require('path');
 const { spawn } = require('child_process');
 const fs     = require('fs');
-const net    = require('net');
 const dbg    = require('./debug-log');
+const { callBlender } = require('./blender-ipc');
 
 // ─── Stage list ───────────────────────────────────────────────────────────────
 
@@ -15,35 +15,11 @@ const STAGES = ['prompt', 'image', 'mesh', 'import'];
 const PHOENIX_PATH = path.join(__dirname, 'phoenix.js');
 const STAGING_BASE = path.join(__dirname, 'staging');
 const SCENE_FILE   = path.join(__dirname, 'session', 'scene.json');
-const BLENDER_PORT = 9876;
 
-// ─── Blender IPC (mirrors assistant.js callBlender) ──────────────────────────
-
-function callBlender(code) {
-  return new Promise((resolve, reject) => {
-    try { if (dbg && typeof dbg.ipc === 'function') dbg.ipc('send', { code }); } catch {}
-    const msg  = JSON.stringify({ type: 'execute', code, strict_json: false }) + '\x00';
-    const sock = new net.Socket();
-    const chunks = [];
-
-    sock.setTimeout(90000);
-    sock.connect(BLENDER_PORT, 'localhost', () => sock.write(Buffer.from(msg, 'utf8')));
-    sock.on('data', d => { chunks.push(d); if (d.includes(0)) sock.end(); });
-    sock.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').replace(/\x00/g, '').trim();
-      try { if (dbg && typeof dbg.ipc === 'function') dbg.ipc('recv', raw); } catch {}
-      try { resolve(JSON.parse(raw)); } catch { resolve({ output: raw }); }
-    });
-    sock.on('timeout', () => { sock.destroy(); reject(new Error('Blender socket timeout')); });
-    sock.on('error', err => {
-      try { if (dbg && typeof dbg.ipc === 'function') dbg.ipc('error', err.message); } catch {}
-      if (err.code === 'ECONNREFUSED')
-        reject(new Error('Blender not reachable on port 9876 — is Blender open with the IPC server running?'));
-      else
-        reject(err);
-    });
-  });
-}
+// ─── Blender IPC ─────────────────────────────────────────────────────────────
+// File-based transport via blender-ipc.js (callBlender imported above). Was a 9876
+// socket; raw sockets fail cross-process on Windows + Blender 5.1 / Python 3.13
+// (WinError 10035, accept() never returns). blender-ipc handles its own debug logging.
 
 // ─── Phoenix stage spawn helper ───────────────────────────────────────────────
 // Mirrors the spawn/parse pattern in assistant.js toolGenerateImage / toolImageTo3d.

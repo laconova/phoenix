@@ -4,7 +4,28 @@ const readline = require('readline');
 const { spawnSync, spawn } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
+const os   = require('os');
 const net  = require('net');
+const blenderIpc = require('./blender-ipc');
+
+// ─── Windows: resolve claude.exe path once to avoid shell:true newline truncation ──
+// On Windows, spawning 'claude' with shell:true routes through cmd.exe which treats
+// literal newlines in arguments as command separators — truncating multiline system
+// prompts to their first line. We find the real .exe so we can spawn without shell.
+const CLAUDE_EXE = (() => {
+  if (process.platform !== 'win32') return null;
+  try {
+    const r = spawnSync('where.exe', ['claude.cmd'], { encoding: 'utf8' });
+    const cmdPath = (r.stdout || '').trim().split(/\r?\n/)[0].trim();
+    if (!cmdPath) return null;
+    const cmdDir = path.dirname(cmdPath);
+    const content = fs.readFileSync(cmdPath, 'utf8');
+    const m = content.match(/"([^"]+\.exe)"/i);
+    if (!m) return null;
+    // Expand %dp0% (cmd.exe variable = the .cmd file's directory, with trailing sep)
+    return path.normalize(m[1].replace(/%dp0%/gi, cmdDir + path.sep));
+  } catch (_) { return null; }
+})();
 const { runPreflight } = require('./preflight');
 const dbg = require('./debug-log');
 const pipeline = require('./pipeline');
@@ -71,7 +92,7 @@ function autoType(v) {
 
 const CATEGORY_ENUM = Object.keys(palette.loadPalette().categories).join('|');
 
-const SYSTEM_PROMPT = `You are Phoenix, a creative assistant for 3D asset creation in Blender. You can generate images, turn images into 3D assets, and run Blender directly. You control Blender via IPC on TCP port 9876. You have tools — use them.
+const SYSTEM_PROMPT = `You are Phoenix, a creative assistant for 3D asset creation in Blender. You can generate images, turn images into 3D assets, and run Blender directly. You control Blender via file-based IPC (the Phoenix IPC addon). You have tools — use them.
 
 ABSOLUTE RULES — no exceptions:
 1. ANY action in Blender (add/move/delete objects, apply materials, run scripts, check the scene) → emit a TOOL block immediately. No preamble, no description of what you are about to do.
@@ -159,6 +180,7 @@ function loadHistory() {
 }
 
 function saveHistory(history) {
+  ensureSessionDir();   // fresh clone has no session/ dir yet — create before first write
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(history.slice(-HISTORY_KEEP), null, 2));
 }
 
@@ -168,6 +190,7 @@ function loadState() {
 }
 
 function saveState(state) {
+  ensureSessionDir();   // fresh clone has no session/ dir yet — create before first write
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
@@ -206,30 +229,10 @@ function saveSceneCache(cache) {
 
 // ─── Blender IPC ─────────────────────────────────────────────────────────────
 
+// File-based transport — see blender-ipc.js. (Was a 9876 socket; sockets fail
+// cross-process on Windows + Blender 5.1 / Python 3.13. WinError 10035.)
 function callBlender(code) {
-  return new Promise((resolve, reject) => {
-    dbg.ipc('send', { code });
-    const msg  = JSON.stringify({ type: 'execute', code, strict_json: false }) + '\x00';
-    const sock = new net.Socket();
-    const chunks = [];
-
-    sock.setTimeout(90000);
-    sock.connect(BLENDER_PORT, 'localhost', () => sock.write(Buffer.from(msg, 'utf8')));
-    sock.on('data', d => { chunks.push(d); if (d.includes(0)) sock.end(); });
-    sock.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').replace(/\x00/g, '').trim();
-      dbg.ipc('recv', raw);
-      try { resolve(JSON.parse(raw)); } catch { resolve({ output: raw }); }
-    });
-    sock.on('timeout', () => { sock.destroy(); reject(new Error('Blender socket timeout')); });
-    sock.on('error', err => {
-      dbg.ipc('error', err.message);
-      if (err.code === 'ECONNREFUSED')
-        reject(new Error('Blender not reachable on port 9876 — is Blender open with the IPC server running?'));
-      else
-        reject(err);
-    });
-  });
+  return blenderIpc.callBlender(code);
 }
 
 // ─── Tool implementations ─────────────────────────────────────────────────────
@@ -853,19 +856,31 @@ function callClaude(messages, cfg, extraSystem) {
   return new Promise((resolve, reject) => {
     const stdoutChunks = [];
     const stderrChunks = [];
-    const child = spawn(
-      'claude',
-      // --tools '' --strict-mcp-config: withhold Claude Code's built-in tool + MCP schemas
-      // (~14.5K tokens) from the request. Phoenix dispatches its OWN text-parsed TOOL: blocks,
-      // so the built-ins are never used — removing them is quality-neutral. See changelog 2026-06-27.
-      ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, userMsg],
-      // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
-      { encoding: 'utf8', shell: process.platform === 'win32' }
-    );
+
+    // Write system prompt to a temp file to avoid cmd.exe newline truncation on Windows.
+    // (shell:true routes through cmd.exe which treats literal newlines as command separators.)
+    const sysFile = path.join(os.tmpdir(), `phoenix-sys-${process.pid}-${Date.now()}.txt`);
+    try { fs.writeFileSync(sysFile, systemPrompt, 'utf8'); } catch (e) { return reject(new Error('Claude CLI: could not write sys temp file: ' + e.message)); }
+
+    // --tools '' --strict-mcp-config: withhold Claude Code's built-in tool + MCP schemas
+    // (~14.5K tokens) from the request. Phoenix dispatches its OWN text-parsed TOOL: blocks,
+    // so the built-ins are never used — removing them is quality-neutral. See changelog 2026-06-27.
+    const cliArgs = ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt-file', sysFile];
+
+    // Spawn directly (no shell) when we have the real exe path — avoids cmd.exe newline truncation.
+    // Fall back to shell:true (finds the .cmd shim) if exe path resolution failed.
+    const child = CLAUDE_EXE
+      ? spawn(CLAUDE_EXE, cliArgs, { encoding: 'utf8' })
+      : spawn('claude', [...cliArgs, userMsg], { encoding: 'utf8', shell: true });
+
+    // When spawning directly, pipe userMsg via stdin (also avoids newlines-in-positional-args).
+    if (CLAUDE_EXE) { child.stdin.write(userMsg, 'utf8'); child.stdin.end(); }
+
     child.stdout.on('data', chunk => stdoutChunks.push(chunk));
     child.stderr.on('data', chunk => stderrChunks.push(chunk));
-    child.on('error', err => reject(new Error('Claude CLI: ' + err.message)));
+    child.on('error', err => { try { fs.unlinkSync(sysFile); } catch (_) {}; reject(new Error('Claude CLI: ' + err.message)); });
     child.on('close', code => {
+      try { fs.unlinkSync(sysFile); } catch (_) {}
       const stdoutStr = stdoutChunks.join('');
       const stderrStr = stderrChunks.join('');
       if (code !== 0) {
@@ -1175,7 +1190,7 @@ INPUT: {"key": "value"}
 AVAILABLE TOOLS (only these five are allowed):
 - run_preflight         Runs the full preflight health check and returns the status. INPUT: {}
 - tail_debug_log        Reads the last ~40 lines of the current debug log. INPUT: {}
-- probe_blender_socket  Tests whether the Blender IPC socket on port 9876 is reachable. INPUT: {}
+- probe_blender_socket  Tests whether Blender is reachable via the Phoenix file-based IPC (Blender open + IPC addon enabled). INPUT: {}
 - check_workflow_deps   Checks whether the ACTIVE image + mesh workflows' required custom nodes and models are installed in ComfyUI. INPUT: {}
 - list_lmstudio_models  Lists the models currently loaded by LM Studio (the local model server). Use when the user can't find or select a local model (e.g. a metaprompter seat model like Gemma 12B). INPUT: {}
 
@@ -1198,7 +1213,7 @@ function buildTroubleshooterPrompt(cfg, preflightOutput) {
 
   const connectFacts = [
     '## Connect Facts (live from config)',
-    '- Blender IPC socket: 127.0.0.1:9876 (TCP — probe_blender_socket tests this)',
+    '- Blender IPC: file-based via the Phoenix IPC addon (probe_blender_socket tests this)',
     '- Local LM Studio endpoint: ' + localEndpoint,
     '- ComfyUI endpoint: ' + comfyuiEndpoint,
     '- Blender executable: ' + blenderExe,
@@ -1246,20 +1261,9 @@ function tsTailDebugLog() {
 }
 
 function tsProbeBlenderSocket() {
-  return new Promise(resolve => {
-    const sock = new net.Socket();
-    let done = false;
-    const finish = (result) => { if (done) return; done = true; resolve(result); };
-    sock.setTimeout(2000);
-    sock.connect(9876, '127.0.0.1', () => { sock.destroy(); finish('reachable'); });
-    sock.on('timeout', () => { sock.destroy(); finish('not listening (timeout after 2s)'); });
-    sock.on('error', e => {
-      const msg = e.code === 'ECONNREFUSED'
-        ? 'not listening (connection refused — Blender is not open or IPC server is not running)'
-        : 'error: ' + e.message;
-      finish(msg);
-    });
-  });
+  // File-based liveness probe (was a 9876 socket connect). Sends a no-op to the addon.
+  // No cfg in scope here; probes the default IPC dir (matches the zero-config setup).
+  return blenderIpc.probeBlender(null, 3000);
 }
 
 async function tsCheckWorkflowDeps() {
@@ -1357,18 +1361,26 @@ function callClaudeSeat(messages, { model, systemPrompt }) {
   return new Promise((resolve, reject) => {
     const stdoutChunks = [];
     const stderrChunks = [];
-    const child = spawn(
-      'claude',
-      // --tools '' --strict-mcp-config: see callClaude — withhold the unused built-in tool/MCP
-      // schemas (~14.5K tokens). The troubleshooter uses only its own TROUBLESHOOTER_TOOLS.
-      ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, userMsg],
-      // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
-      { encoding: 'utf8', shell: process.platform === 'win32' }
-    );
+
+    // Write system prompt to a temp file — same fix as callClaude (cmd.exe newline truncation).
+    const sysFile = path.join(os.tmpdir(), `phoenix-seat-${process.pid}-${Date.now()}.txt`);
+    try { fs.writeFileSync(sysFile, systemPrompt, 'utf8'); } catch (e) { return reject(new Error('Claude CLI: could not write sys temp file: ' + e.message)); }
+
+    // --tools '' --strict-mcp-config: see callClaude — withhold the unused built-in tool/MCP
+    // schemas (~14.5K tokens). The troubleshooter uses only its own TROUBLESHOOTER_TOOLS.
+    const cliArgs = ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt-file', sysFile];
+
+    const child = CLAUDE_EXE
+      ? spawn(CLAUDE_EXE, cliArgs, { encoding: 'utf8' })
+      : spawn('claude', [...cliArgs, userMsg], { encoding: 'utf8', shell: true });
+
+    if (CLAUDE_EXE) { child.stdin.write(userMsg, 'utf8'); child.stdin.end(); }
+
     child.stdout.on('data', chunk => stdoutChunks.push(chunk));
     child.stderr.on('data', chunk => stderrChunks.push(chunk));
-    child.on('error', err => reject(new Error('Claude CLI: ' + err.message)));
+    child.on('error', err => { try { fs.unlinkSync(sysFile); } catch (_) {}; reject(new Error('Claude CLI: ' + err.message)); });
     child.on('close', code => {
+      try { fs.unlinkSync(sysFile); } catch (_) {}
       const stdoutStr = stdoutChunks.join('');
       const stderrStr = stderrChunks.join('');
       if (code !== 0) {
