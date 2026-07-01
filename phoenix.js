@@ -84,16 +84,12 @@ async function withProgress(label, fn) {
 
 // ─── LLM calls ───────────────────────────────────────────────────────────────
 
+const claudeCli = require('./claude-cli');
+
+// Prompt text must never be a command-line arg (cmd.exe/sh mangle newlines+specials):
+// system prompt goes to a temp file, user via stdin. See claude-cli.js.
 function callClaude(systemPrompt, user) {
-  const r = spawnSync(
-    'claude',
-    ['--print', '--model', 'claude-sonnet-4-6', '--system-prompt', systemPrompt, user],
-    // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
-    { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, shell: process.platform === 'win32' }
-  );
-  if (r.error)      throw new Error(`Claude CLI: ${r.error.message}`);
-  if (r.status !== 0) throw new Error(`Claude CLI exit ${r.status}: ${r.stderr}`);
-  return r.stdout.trim();
+  return claudeCli.runSync('claude-sonnet-4-6', systemPrompt, user);
 }
 
 function lmsLoad(modelKey) {
@@ -300,17 +296,7 @@ async function generateMetaprompt(userPrompt, category) {
 }
 
 async function callClaudeMeta(systemPrompt, user, model) {
-  return new Promise((resolve, reject) => {
-    const out = [], err = [];
-    const child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt', systemPrompt, user], { encoding: 'utf8', shell: process.platform === 'win32' });
-    child.stdout.on('data', d => out.push(d));
-    child.stderr.on('data', d => err.push(d));
-    child.on('error', e => reject(new Error('Claude CLI: ' + e.message)));
-    child.on('close', code => {
-      if (code !== 0) { reject(new Error('Claude CLI exit ' + code + ': ' + err.join('').trim())); return; }
-      resolve(out.join('').trim());
-    });
-  });
+  return claudeCli.runStream(model, systemPrompt, user, { extraFlags: ['--tools', '', '--strict-mcp-config'] });
 }
 
 // ─── Stage: Flux image gen ───────────────────────────────────────────────────
@@ -365,7 +351,7 @@ async function runTrellis(session) {
     set('output_prefix', prefix);
 
     const promptId = await comfyQueue(wf);
-    const outputs  = await comfyPoll(promptId, 600000);
+    const outputs  = await comfyPoll(promptId, 1800000); // 30 min — first mesh run may download several GB of Trellis models before generating
 
     // ExportMesh returns glb_path as STRING output
     let glbPath = null;

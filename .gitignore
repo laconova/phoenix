@@ -19,3 +19,7 @@ node_modules/
 # Python cache (Blender addon)
 __pycache__/
 *.pyc
+
+# Troubleshooting live state (ship the template, not per-issue state files)
+troubleshooting/active/*
+!troubleshooting/active/_TEMPLATE.md

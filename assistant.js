@@ -12,20 +12,7 @@ const blenderIpc = require('./blender-ipc');
 // On Windows, spawning 'claude' with shell:true routes through cmd.exe which treats
 // literal newlines in arguments as command separators — truncating multiline system
 // prompts to their first line. We find the real .exe so we can spawn without shell.
-const CLAUDE_EXE = (() => {
-  if (process.platform !== 'win32') return null;
-  try {
-    const r = spawnSync('where.exe', ['claude.cmd'], { encoding: 'utf8' });
-    const cmdPath = (r.stdout || '').trim().split(/\r?\n/)[0].trim();
-    if (!cmdPath) return null;
-    const cmdDir = path.dirname(cmdPath);
-    const content = fs.readFileSync(cmdPath, 'utf8');
-    const m = content.match(/"([^"]+\.exe)"/i);
-    if (!m) return null;
-    // Expand %dp0% (cmd.exe variable = the .cmd file's directory, with trailing sep)
-    return path.normalize(m[1].replace(/%dp0%/gi, cmdDir + path.sep));
-  } catch (_) { return null; }
-})();
+const claudeCli = require('./claude-cli');
 const { runPreflight } = require('./preflight');
 const dbg = require('./debug-log');
 const pipeline = require('./pipeline');
@@ -853,45 +840,12 @@ function callClaude(messages, cfg, extraSystem) {
   const systemPrompt = extraSystem ? (SYSTEM_PROMPT + '\n\n' + extraSystem) : SYSTEM_PROMPT;
 
   const _t = Date.now();
-  return new Promise((resolve, reject) => {
-    const stdoutChunks = [];
-    const stderrChunks = [];
-
-    // Write system prompt to a temp file to avoid cmd.exe newline truncation on Windows.
-    // (shell:true routes through cmd.exe which treats literal newlines as command separators.)
-    const sysFile = path.join(os.tmpdir(), `phoenix-sys-${process.pid}-${Date.now()}.txt`);
-    try { fs.writeFileSync(sysFile, systemPrompt, 'utf8'); } catch (e) { return reject(new Error('Claude CLI: could not write sys temp file: ' + e.message)); }
-
-    // --tools '' --strict-mcp-config: withhold Claude Code's built-in tool + MCP schemas
-    // (~14.5K tokens) from the request. Phoenix dispatches its OWN text-parsed TOOL: blocks,
-    // so the built-ins are never used — removing them is quality-neutral. See changelog 2026-06-27.
-    const cliArgs = ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt-file', sysFile];
-
-    // Spawn directly (no shell) when we have the real exe path — avoids cmd.exe newline truncation.
-    // Fall back to shell:true (finds the .cmd shim) if exe path resolution failed.
-    const child = CLAUDE_EXE
-      ? spawn(CLAUDE_EXE, cliArgs, { encoding: 'utf8' })
-      : spawn('claude', [...cliArgs, userMsg], { encoding: 'utf8', shell: true });
-
-    // When spawning directly, pipe userMsg via stdin (also avoids newlines-in-positional-args).
-    if (CLAUDE_EXE) { child.stdin.write(userMsg, 'utf8'); child.stdin.end(); }
-
-    child.stdout.on('data', chunk => stdoutChunks.push(chunk));
-    child.stderr.on('data', chunk => stderrChunks.push(chunk));
-    child.on('error', err => { try { fs.unlinkSync(sysFile); } catch (_) {}; reject(new Error('Claude CLI: ' + err.message)); });
-    child.on('close', code => {
-      try { fs.unlinkSync(sysFile); } catch (_) {}
-      const stdoutStr = stdoutChunks.join('');
-      const stderrStr = stderrChunks.join('');
-      if (code !== 0) {
-        reject(new Error('Claude CLI exit ' + code + ': ' + stderrStr));
-        return;
-      }
-      const result = stdoutStr.trim();
+  // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
+  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'] })
+    .then(result => {
       dbg.llm('orchestrator', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
-      resolve(result);
+      return result;
     });
-  });
 }
 
 // ─── Tool dispatch parser ─────────────────────────────────────────────────────
@@ -1187,12 +1141,19 @@ TOOL-CALL FORMAT — exactly these two lines, no preamble, no code fence around 
 TOOL: tool_name
 INPUT: {"key": "value"}
 
-AVAILABLE TOOLS (only these five are allowed):
+AVAILABLE TOOLS (only these six are allowed):
 - run_preflight         Runs the full preflight health check and returns the status. INPUT: {}
 - tail_debug_log        Reads the last ~40 lines of the current debug log. INPUT: {}
 - probe_blender_socket  Tests whether Blender is reachable via the Phoenix file-based IPC (Blender open + IPC addon enabled). INPUT: {}
 - check_workflow_deps   Checks whether the ACTIVE image + mesh workflows' required custom nodes and models are installed in ComfyUI. INPUT: {}
 - list_lmstudio_models  Lists the models currently loaded by LM Studio (the local model server). Use when the user can't find or select a local model (e.g. a metaprompter seat model like Gemma 12B). INPUT: {}
+- read_troubleshooting  The known-trap library. Best: INPUT {"symptom":"<the exact error string>"} — it matches the index server-side and returns the matching fix in ONE call. Also: INPUT {} for the whole symptom→entry INDEX, or {"entry":"<slug>"} for a specific trap. Each fix has symptoms, root cause, "do it for me" steps, "explain it" steps, and verify.
+
+KNOWN-TRAP LIBRARY — use it before guessing on any setup/install/ComfyUI/Trellis/torch/workflow/metaprompter issue:
+- Call read_troubleshooting {"symptom":"<paste the user's exact error/behaviour>"} — one call returns the matched fix (or the index if no match).
+- Present the fix and ASK the user which they prefer: "do it for me" (walk them step by step) or "explain it" (what & why, they run it). Default to explain-first for anything irreversible or a big (GB) download.
+- If the fix needs a server.bat restart + browser refresh, say so plainly and state exactly what to verify afterward (that restart ends this chat).
+- If nothing matches, fall back to your normal diagnosis.
 
 RULES:
 1. The latest preflight status is ALREADY provided below — base your diagnosis on it directly. Do NOT call a tool just to confirm what preflight already shows.
@@ -1334,12 +1295,50 @@ async function tsListLmStudioModels() {
   return 'LM Studio models currently loaded at ' + r.base + ':\n' + r.models.map(m => '- ' + m).join('\n');
 }
 
+const TROUBLESHOOTING_DIR = path.join(__dirname, 'troubleshooting');
+
+// Retrieval over the known-trap library. Read-only; path-safe (bare slugs only).
+//   {}                    → the symptom→entry INDEX
+//   { symptom: "<text>" } → server-side match against the index; returns the matched entry (ONE call)
+//   { entry: "<slug>" }   → that entry directly
+function tsReadIndex()      { return fs.readFileSync(path.join(TROUBLESHOOTING_DIR, 'INDEX.md'), 'utf8'); }
+function tsReadEntry(slug)  {
+  if (/[\\/]|\.\./.test(slug)) return null;
+  const f = path.join(TROUBLESHOOTING_DIR, 'entries', slug + '.md');
+  return fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+}
+async function tsReadTroubleshooting(input) {
+  input = input || {};
+  const entry   = typeof input.entry   === 'string' ? input.entry.trim().replace(/\.md$/i, '') : '';
+  const symptom = typeof input.symptom === 'string' ? input.symptom.trim() : '';
+  try {
+    if (entry) {
+      const c = tsReadEntry(entry);
+      return c || ('No entry "' + entry + '". Index:\n\n' + tsReadIndex());
+    }
+    if (symptom) {
+      const idx = tsReadIndex();
+      for (const line of idx.split(/\r?\n/)) {
+        if (line.includes('|') && line.toLowerCase().includes(symptom.toLowerCase())) {
+          const m = line.match(/`entries\/([a-z0-9-]+)\.md`/);
+          if (m) { const c = tsReadEntry(m[1]); if (c) return 'Matched trap: ' + m[1] + '\n\n' + c; }
+        }
+      }
+      return 'No exact match for "' + symptom + '". Full index below — pick the closest and re-read with {"entry":"<slug>"}:\n\n' + idx;
+    }
+    return tsReadIndex();
+  } catch (e) {
+    return 'Troubleshooting library unavailable: ' + e.message;
+  }
+}
+
 const TROUBLESHOOTER_TOOLS = {
   run_preflight:        tsRunPreflight,
   tail_debug_log:       tsTailDebugLog,
   probe_blender_socket: tsProbeBlenderSocket,
   check_workflow_deps:  tsCheckWorkflowDeps,
   list_lmstudio_models: tsListLmStudioModels,
+  read_troubleshooting: tsReadTroubleshooting,
 };
 
 // ── Seat-aware Claude caller (parallel to callClaude; does NOT change the orchestrator) ──
@@ -1358,40 +1357,12 @@ function callClaudeSeat(messages, { model, systemPrompt }) {
     : '';
   const userMsg = contextBlock + lastUser;
   const _t = Date.now();
-  return new Promise((resolve, reject) => {
-    const stdoutChunks = [];
-    const stderrChunks = [];
-
-    // Write system prompt to a temp file — same fix as callClaude (cmd.exe newline truncation).
-    const sysFile = path.join(os.tmpdir(), `phoenix-seat-${process.pid}-${Date.now()}.txt`);
-    try { fs.writeFileSync(sysFile, systemPrompt, 'utf8'); } catch (e) { return reject(new Error('Claude CLI: could not write sys temp file: ' + e.message)); }
-
-    // --tools '' --strict-mcp-config: see callClaude — withhold the unused built-in tool/MCP
-    // schemas (~14.5K tokens). The troubleshooter uses only its own TROUBLESHOOTER_TOOLS.
-    const cliArgs = ['--print', '--tools', '', '--strict-mcp-config', '--model', model, '--system-prompt-file', sysFile];
-
-    const child = CLAUDE_EXE
-      ? spawn(CLAUDE_EXE, cliArgs, { encoding: 'utf8' })
-      : spawn('claude', [...cliArgs, userMsg], { encoding: 'utf8', shell: true });
-
-    if (CLAUDE_EXE) { child.stdin.write(userMsg, 'utf8'); child.stdin.end(); }
-
-    child.stdout.on('data', chunk => stdoutChunks.push(chunk));
-    child.stderr.on('data', chunk => stderrChunks.push(chunk));
-    child.on('error', err => { try { fs.unlinkSync(sysFile); } catch (_) {}; reject(new Error('Claude CLI: ' + err.message)); });
-    child.on('close', code => {
-      try { fs.unlinkSync(sysFile); } catch (_) {}
-      const stdoutStr = stdoutChunks.join('');
-      const stderrStr = stderrChunks.join('');
-      if (code !== 0) {
-        reject(new Error('Claude CLI exit ' + code + ': ' + stderrStr));
-        return;
-      }
-      const result = stdoutStr.trim();
+  // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
+  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'] })
+    .then(result => {
       dbg.llm('troubleshooter', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
-      resolve(result);
+      return result;
     });
-  });
 }
 
 // ── Troubleshooter turn loop — mirrors runTurn but uses TROUBLESHOOTER_TOOLS only ──
@@ -1439,7 +1410,7 @@ async function runTroubleshootTurn(messages, cfg, preflightOutput) {
     let toolResult;
     const fn = TROUBLESHOOTER_TOOLS[toolCall.name];
     if (!fn) {
-      toolResult = 'ERROR: tool "' + toolCall.name + '" is not available in the troubleshooter. Only run_preflight, tail_debug_log and probe_blender_socket are allowed.';
+      toolResult = 'ERROR: tool "' + toolCall.name + '" is not available in the troubleshooter. Allowed: ' + Object.keys(TROUBLESHOOTER_TOOLS).join(', ') + '.';
     } else {
       try {
         toolResult = await fn(toolCall.input);
