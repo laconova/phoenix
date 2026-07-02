@@ -336,6 +336,12 @@ async function runFlux(session) {
 // ─── Stage: Trellis 3D gen ────────────────────────────────────────────────────
 
 async function runTrellis(session) {
+  // Mesh OOMs on 10GB cards when the local metaprompter is still resident (LM Studio JIT
+  // keeps it loaded ~1h). Eject it before dispatch — unconditionally, not gated by
+  // ejectAfterUse, so the --stage/CLI paths are covered too. lmsUnload is best-effort:
+  // model not loaded / lms missing just logs a warning, the gen is never aborted.
+  if (!/^claude/i.test(GEMMA_MODEL)) lmsUnload(GEMMA_MODEL);
+
   const wfEntry = getActive('mesh', _cfg);
   const n  = wfEntry.nodes;
   const wf = JSON.parse(fs.readFileSync(wfEntry.file, 'utf8'));
@@ -389,7 +395,7 @@ async function blenderCleanup(session) {
 
   const code = [
     'import bpy',
-    `bpy.ops.import_scene.gltf(filepath='${meshPath}')`,
+    `bpy.ops.import_scene.gltf(filepath=${JSON.stringify(meshPath)})`,
     'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
     'for obj in imported:',
     '    bpy.ops.object.select_all(action="DESELECT")',
@@ -408,7 +414,7 @@ async function blenderCleanup(session) {
     '        except Exception as _e:',
     '            bpy.ops.object.shade_smooth()',
     '            print("SMOOTH:fallback " + str(_e))',
-    `    obj.name = '${assetName}'`,
+    `    obj.name = ${JSON.stringify(assetName)}`,
     'print("CLEANUP_DONE:" + str(len(imported)))',
   ].join('\n');
 
@@ -421,10 +427,10 @@ async function importRaw(session) {
 
   const code = [
     'import bpy',
-    `bpy.ops.import_scene.gltf(filepath='${meshPath}')`,
+    `bpy.ops.import_scene.gltf(filepath=${JSON.stringify(meshPath)})`,
     'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
     'for obj in imported:',
-    `    obj.name = '${assetName}'`,
+    `    obj.name = ${JSON.stringify(assetName)}`,
     'print("IMPORT_RAW_DONE:" + str(len(imported)))',
   ].join('\n');
 

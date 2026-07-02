@@ -23,3 +23,6 @@ __pycache__/
 # Troubleshooting live state (ship the template, not per-issue state files)
 troubleshooting/active/*
 !troubleshooting/active/_TEMPLATE.md
+
+# Claude working instructions (references the local dev tree — machine path, never ships)
+CLAUDE.md

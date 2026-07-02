@@ -192,12 +192,12 @@ async function runImportStage(ctx) {
   let code;
   if (!cleanup) {
     // RAW import — default; no shading applied
-    code = `import bpy\nbpy.ops.import_scene.gltf(filepath='${fwd}')\nprint("IMPORT_OK:" + '${basename}')`;
+    code = `import bpy\nbpy.ops.import_scene.gltf(filepath=${JSON.stringify(fwd)})\nprint("IMPORT_OK:" + ${JSON.stringify(basename)})`;
   } else {
     // CLEANED import — mirrors blenderCleanup logic in phoenix.js
     code = [
       'import bpy',
-      `bpy.ops.import_scene.gltf(filepath='${fwd}')`,
+      `bpy.ops.import_scene.gltf(filepath=${JSON.stringify(fwd)})`,
       'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
       'for obj in imported:',
       '    bpy.ops.object.select_all(action="DESELECT")',
@@ -210,7 +210,7 @@ async function runImportStage(ctx) {
       '            bpy.ops.object.shade_smooth_by_angle(angle=0.523599)',
       '        except Exception:',
       '            bpy.ops.object.shade_smooth()',
-      `print("IMPORT_OK:" + '${basename}')`,
+      `print("IMPORT_OK:" + ${JSON.stringify(basename)})`,
     ].join('\n');
   }
 
