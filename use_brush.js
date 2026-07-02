@@ -13,6 +13,8 @@
 const fs   = require('fs');
 const path = require('path');
 const { callBlender } = require('./blender-ipc');
+const { ensureBrushScaffold } = require('./brush-scaffold');
+ensureBrushScaffold(); // brushes/ is gitignored — seed the .py base + registry on first use
 
 const BRUSHES_DIR   = path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
@@ -61,7 +63,7 @@ async function main() {
 
   const srcFwd  = srcPath.replace(/\\/g, '/');
   const fnName  = brush.fn;
-  const nameArg = instanceName ? `name='${instanceName}'` : '';
+  const nameArg = instanceName ? `name=${JSON.stringify(instanceName)}` : '';
   const args_py = [`x=${x}`, `y=${y}`, `z=${z}`, nameArg].filter(Boolean).join(', ');
 
   const code = `

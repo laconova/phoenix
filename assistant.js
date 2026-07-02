@@ -21,6 +21,9 @@ const lock = require('./lock');
 const palette = require('./palette');
 const wf = require('./workflows');
 const workflows = require('./workflows');
+// brushes/ is gitignored user data, but its .py base + registry are code the brush
+// tools need — seed them at boot (same idiom as config/palette/workflows self-seed).
+require('./brush-scaffold').ensureBrushScaffold();
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 

@@ -13,6 +13,8 @@
 const fs   = require('fs');
 const path = require('path');
 const { callBlender } = require('./blender-ipc');
+const { ensureBrushScaffold } = require('./brush-scaffold');
+ensureBrushScaffold(); // brushes/ is gitignored — seed the .py base + registry on first use
 
 const BRUSHES_DIR   = path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
@@ -47,7 +49,7 @@ const libFwd  = libPath.replace(/\\/g, '/');
 function buildAddFn(slug, display, relPath) {
   // relPath is relative from LIB_DIR — use os.path.join in Python
   return `
-def add_${slug}(x=0, y=0, z=0, name="${display}"):
+def add_${slug}(x=0, y=0, z=0, name=${JSON.stringify(display)}):
     """${display} — Phoenix-generated brush."""
     lib = os.path.join(_LIB_DIR, r"${relPath}")
     result = _load_blend(lib, location=(x, y, z), instance_name=name)
