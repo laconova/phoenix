@@ -1,0 +1,7 @@
+# Normalize line endings across platforms (repo stores LF; checkout per platform default)
+* text=auto
+
+# Never mangle binaries
+*.png binary
+*.ico binary
+*.glb binary
