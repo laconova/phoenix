@@ -92,9 +92,16 @@ function callClaude(systemPrompt, user) {
   return claudeCli.runSync('claude-sonnet-4-6', systemPrompt, user);
 }
 
+// lms lives in ~/.lmstudio/bin, which non-login shells (SSH, spawned servers) often
+// don't have on PATH — resolve the explicit path first, fall back to PATH lookup.
+function lmsBin() {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const cand = path.join(home, '.lmstudio', 'bin', process.platform === 'win32' ? 'lms.exe' : 'lms');
+  return fs.existsSync(cand) ? cand : 'lms';
+}
 function lmsLoad(modelKey) {
   try {
-    const r = spawnSync('lms', ['load', modelKey, '-y'], { encoding: 'utf8', timeout: 120000 });
+    const r = spawnSync(lmsBin(), ['load', modelKey, '-y'], { encoding: 'utf8', timeout: 120000 });
     if (r.error)       { dbg.event('eject', { phase: 'load-error',   model: modelKey, error: r.error.message }); return; }
     if (r.status !== 0){ dbg.event('eject', { phase: 'load-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
     dbg.event('eject', { phase: 'loaded', model: modelKey });
@@ -102,7 +109,7 @@ function lmsLoad(modelKey) {
 }
 function lmsUnload(modelKey) {
   try {
-    const r = spawnSync('lms', ['unload', modelKey], { encoding: 'utf8', timeout: 30000 });
+    const r = spawnSync(lmsBin(), ['unload', modelKey], { encoding: 'utf8', timeout: 30000 });
     if (r.error)       { dbg.event('eject', { phase: 'unload-error',   model: modelKey, error: r.error.message }); return; }
     if (r.status !== 0){ dbg.event('eject', { phase: 'unload-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
     dbg.event('eject', { phase: 'unloaded', model: modelKey });
