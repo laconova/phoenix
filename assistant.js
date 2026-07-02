@@ -97,7 +97,7 @@ Use \\n (escaped) for newlines inside JSON string values. Do NOT wrap in code fe
 TOOLS:
 - generate_image  runs the image generation stage; the system decides whether to continue automatically. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}  Optional: {"prompt":"<exact positive>","negative":"<exact negative>"} to bypass the metaprompter and use an exact prompt.
 - image_to_3d     runs the 3D mesh stage from the last generated image (or a given one); the system decides whether to continue automatically. INPUT: {} or {"image": "path", "description": "..."}  Optional: {"target_face_num": <n>} to regenerate the mesh at a specific face count (e.g. 7500).
-- generate_prop   full pipeline image→3D in ONE shot, STAGES the result (GLB on disk). Does NOT import into the scene. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}
+- generate_prop   full pipeline image→3D in ONE shot, STAGES the result (GLB on disk). Does NOT import into the scene. REJECTED while any approval gate is enabled in Settings — use generate_image then. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}
 - blender_run     runs Python in Blender. INPUT: {"code": "python as single string, \\n for newlines"}
 - read_state      reads session state: sceneObjects (what is LIVE in the Blender scene, kept fresh by the scene-sync module), stagedFiles (GLB FILES on disk in staging/, ready to import), lastTask, sceneUpdatedAt. INPUT: {}
 - list_assets     lists staged GLB FILES on disk (in staging/). These are assets ready to import — they are NOT necessarily in the Blender scene. INPUT: {}
@@ -110,7 +110,7 @@ TOOLS:
 WORKFLOW RULES:
 - Flow control (when to stop for approval between image / 3D / import) is handled automatically by the system based on settings — you do NOT need to tell the user to approve or ask permission between steps. Just call the tool the user's request implies, then relay the tool result. For a 3D prop call generate_image (or image_to_3d to continue from an existing image); for image-only requests use generate_image; never refuse an image-only request.
 - If the user only wants an image (e.g. "an image of a dog"), use generate_image and stop. Do NOT refuse — you can produce images.
-- Use generate_prop only when the user explicitly wants the whole thing done in one go without stopping.
+- Use generate_prop only when the user explicitly wants the whole thing done in one go without stopping — and only while no approval gate is enabled (gated sessions must go through generate_image so the pipeline can pause).
 
 EXAMPLES (follow these exactly):
 
@@ -337,6 +337,12 @@ async function toolImportAsset(input, state, cfg) {
 async function toolGenerateProp(input, state, cfg) {
   const { description, category } = input;
   if (!description) return 'ERROR: description required';
+  // One-shot bypasses the approval gates by construction (spawns --headless) — a gate the
+  // orchestrator can route around is no gate, so hard-reject and steer to the staged path.
+  const _g = (cfg && cfg.gates) || {};
+  if (_g.prompt === true || _g.image === true || _g.mesh === true) {
+    return 'REJECTED: approval gates are enabled in Settings, and generate_prop would skip them. Call generate_image instead — the pipeline pauses at each enabled gate.';
+  }
   const cat = category || 'item';
   state.lastTask = `generate_prop: ${description}`;
 
