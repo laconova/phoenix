@@ -19,5 +19,6 @@ that ONE entry from `entries/`. Keys are exact substrings you'll see in errors, 
 | `dlopen(): error loading libfuse.so.2` · "AppImages require FUSE to run" · `Timed out waiting for LM Studio daemon` · `lms bootstrap` "Cannot find LM Studio installation" · LM Studio won't start on Linux / over SSH · preflight LM Studio absent (Linux) | `entries/lmstudio-linux-appimage.md` |
 | `Got an OOM, unloading all loaded models` (ComfyUI, mesh stage) · GPU ~full at 0% util · `.lmstudio/.internal/utils/node` holding 6–9 GB in `nvidia-smi` | `entries/mesh-oom-local-llm-resident.md` |
 | `Stage error: ENOENT ... scandir '.../ComfyUI/output'` after a mesh run · ComfyUI says `Prompt executed` but Phoenix reports stage failed · `.glb` exists only in ComfyUI's own output/ | `entries/phoenix-comfy-output-path.md` |
+| Installing on **Linux** (any step) · `sudo: a password is required` · `ensurepip is not available` · venv has no pip · no-root install · which Python for image vs mesh (3.11 vs 3.12 split) · Ubuntu setup from scratch | `linux-troubleshoot.md` (umbrella — Linux install recipe + Linux-specific traps) |
 
 **Not here?** It's a new trap → after solving it, add a row above + an entry (keep the entry format).
