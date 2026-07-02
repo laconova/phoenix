@@ -349,6 +349,20 @@ async function runTrellis(session) {
   // model not loaded / lms missing just logs a warning, the gen is never aborted.
   if (!/^claude/i.test(GEMMA_MODEL)) lmsUnload(GEMMA_MODEL);
 
+  if (EJECT_AFTER) {
+    // Same juggle, other direction: on VRAM-poor boxes ComfyUI itself may still hold the
+    // heavy image model (Flux) when the mesh model loads — ask it to free first (official
+    // /free API, best-effort). Gated by ejectAfterUse = the "this box is VRAM-poor" switch,
+    // so big cards keep both models resident.
+    try {
+      await fetch(`${COMFY_BASE}/free`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ unload_models: true, free_memory: true }),
+      });
+      dbg.event('eject', { phase: 'comfy-freed' });
+    } catch (e) { dbg.event('eject', { phase: 'comfy-free-failed', error: (e && e.message) || String(e) }); }
+  }
+
   const wfEntry = getActive('mesh', _cfg);
   const n  = wfEntry.nodes;
   const wf = JSON.parse(fs.readFileSync(wfEntry.file, 'utf8'));
