@@ -21,7 +21,15 @@ const os = require('os');
 const path = require('path');
 
 const CLAUDE_EXE = (() => {
-  if (process.platform !== 'win32') return null;
+  if (process.platform !== 'win32') {
+    // Non-login shells (SSH-started servers, systemd) often lack ~/.local/bin on PATH —
+    // the standard claude install location on Linux. Resolve it explicitly; PATH fallback.
+    try {
+      const cand = path.join(os.homedir(), '.local', 'bin', 'claude');
+      if (fs.existsSync(cand)) return cand;
+    } catch (_) {}
+    return null;
+  }
   try {
     const r = spawnSync('where.exe', ['claude.cmd'], { encoding: 'utf8' });
     const cmdPath = (r.stdout || '').trim().split(/\r?\n/)[0].trim();
