@@ -322,7 +322,7 @@ async function runFlux(session) {
 
   return withProgress('Flux image gen', async () => {
     const promptId = await comfyQueue(wf);
-    const outputs  = await comfyPoll(promptId, 180000);
+    const outputs  = await comfyPoll(promptId, 600000); // 10 min — first run of a heavy image model (Flux) loads GBs before generating
 
     const outNode  = resolveSlot('image', 'output', n.output).node;
     const saveNode = outputs[outNode];
