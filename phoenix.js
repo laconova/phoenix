@@ -29,7 +29,6 @@ const LOCAL_BASE   = process.env.LOCAL_API   || (_cfg.endpoints && _cfg.endpoint
 const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.model) || 'claude-haiku-4-5-20251001';
 const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse);
 const GEMMA_TEMP   = (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.temperature) || 0.7;
-const BLENDER_PORT = 9876;
 
 const COMFY_OUTPUT = (_cfg.apps && _cfg.apps.comfyOutput) ||
   path.join(process.env.USERPROFILE || process.env.HOME || '', 'Documents', 'ComfyUI', 'output');

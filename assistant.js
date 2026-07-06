@@ -29,7 +29,6 @@ require('./brush-scaffold').ensureBrushScaffold();
 
 const CONFIG_FILE   = path.join(__dirname, 'phoenix-config.json');
 const CONFIG_EXAMPLE_FILE = path.join(__dirname, 'phoenix-config.example.json');
-const BLENDER_PORT  = 9876;
 const HISTORY_FILE  = path.join(__dirname, 'session', 'history.json');
 const STATE_FILE    = path.join(__dirname, 'session', 'state.json');
 const HISTORY_KEEP  = 10;
@@ -107,13 +106,19 @@ TOOLS:
 - read_palette    returns the current style palette (each category's style text + params). Use ONLY when the user asks you to help draft or choose a category. INPUT: {}
 - import_asset    imports a staged file into the live Blender scene. INPUT: {"name": "filename.glb", "cleanup": true|false}. cleanup:true = import with auto-smooth shading; omitted/false = raw mesh (DEFAULT = raw).
 - list_brushes    lists brushes. INPUT: {} for all, {"category": "item|furniture|sci_fi|..."} to filter by category, {"search": "keyword"} to search by name. Use filtered calls — avoid listing all when you only need one category.
-- save_as_brush   saves the selected (or named) Blender object as a reusable brush. INPUT: {"name": "slug", "object": "BlenderObjName (optional — omit to use selection)", "category": "item|sci_fi|etc (optional)", "display": "Human label (optional)"}
+- save_as_brush   saves Blender mesh(es) as a reusable brush — ONE brush file that places whole again later. INPUT: {"name": "slug", "collection": "CollectionName (optional — saves ALL meshes in it)", "object": "BlenderObjName (optional — single object)", "category": "item|sci_fi|etc (optional)", "display": "Human label (optional)"}. Omit collection AND object to save ALL currently selected meshes.
 - use_brush       places a brush from the library into the scene at optional coordinates. INPUT: {"name": "slug", "x": 0, "y": 0, "z": 0, "instance_name": "optional"}
 
 WORKFLOW RULES:
 - Flow control (when to stop for approval between image / 3D / import) is handled automatically by the system based on settings — you do NOT need to tell the user to approve or ask permission between steps. Just call the tool the user's request implies, then relay the tool result. For a 3D prop call generate_image (or image_to_3d to continue from an existing image); for image-only requests use generate_image; never refuse an image-only request.
 - If the user only wants an image (e.g. "an image of a dog"), use generate_image and stop. Do NOT refuse — you can produce images.
 - Use generate_prop only when the user explicitly wants the whole thing done in one go without stopping — and only while no approval gate is enabled (gated sessions must go through generate_image so the pipeline can pause).
+- If a tool result contradicts what you expected twice in a row, STOP retrying: diagnose first (read_state or a small blender_run inspection), then act on what you actually find.
+
+BRUSH WORKFLOW (what save_as_brush really does — know this):
+- A brush = ONE .blend library file holding mesh objects + their materials, plus a loader entry. Placing it later (use_brush) appends EVERY object from that file — a multi-part brush comes back whole.
+- What gets saved is decided by the input: "collection" = all meshes in that collection; "object" = that one object; neither = all meshes currently selected in Blender. For "make a brush from the X collection" pass {"collection": "X"} — do NOT pick a single member object.
+- After saving, VERIFY from the tool result: it reports the .blend path and how many meshes went in. If the count does not match what the user meant (e.g. 1 mesh from a 5-object collection), say so instead of declaring success.
 
 EXAMPLES (follow these exactly):
 
@@ -144,6 +149,10 @@ INPUT: {"name": "gravinium_reactor", "category": "sci_fi", "display": "Gravinium
 User: save MyCoil as a brush called my_coil
 TOOL: save_as_brush
 INPUT: {"name": "my_coil", "object": "MyCoil", "category": "sci_fi", "display": "My Coil"}
+
+User: make a brush out of the Campfire collection
+TOOL: save_as_brush
+INPUT: {"name": "campfire", "collection": "Campfire", "display": "Campfire"}
 
 User: use the gravinium coil brush
 TOOL: use_brush
@@ -682,10 +691,11 @@ async function toolListBrushes(input, _state, _cfg) {
 }
 
 async function toolSaveAsBrush(input, _state, _cfg) {
-  const { name, object, category, display } = input;
+  const { name, object, collection, category, display } = input;
   if (!name) return 'ERROR: name required';
 
   const argv = ['--name', name];
+  if (collection) argv.push('--collection', collection);
   if (object)   argv.push('--object',   object);
   if (category) argv.push('--category', category);
   if (display)  argv.push('--display',  display);

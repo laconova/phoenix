@@ -4,10 +4,15 @@
  * save_brush.js — Save a Blender object as a Phoenix brush
  *
  * Usage:
- *   node save_brush.js --name <slug> [--object <blender_obj_name>] [--category <cat>] [--display <label>]
+ *   node save_brush.js --name <slug> [--object <obj>] [--collection <col>] [--category <cat>] [--display <label>]
  *
- * If --object is omitted, uses the currently selected mesh in Blender.
- * Saves a .blend library file, appends add_<name>() to phoenix_brushes.py, registers in registry.json.
+ * Source of meshes (first match wins):
+ *   --collection <name>  ALL mesh objects in that Blender collection
+ *   --object <name>      that single object
+ *   (neither)            ALL currently selected mesh objects
+ * Saves ONE .blend library file with every mesh (+data+materials); the loader
+ * (_load_blend) appends all objects from the lib, so multi-mesh brushes place whole.
+ * Appends add_<name>() to phoenix_brushes.py, registers in registry.json.
  */
 
 const fs   = require('fs');
@@ -28,11 +33,12 @@ const get  = k => { const i = args.indexOf(k); return i >= 0 ? (args[i + 1] || n
 
 const rawName     = get('--name');
 const objName     = get('--object') || '';
+const colName     = get('--collection') || '';
 const category    = (get('--category') || 'item').toLowerCase();
 const displayName = get('--display') || rawName;
 
 if (!rawName) {
-  console.error('Usage: node save_brush.js --name <name> [--object <obj>] [--category <cat>] [--display <label>]');
+  console.error('Usage: node save_brush.js --name <name> [--object <obj>] [--collection <col>] [--category <cat>] [--display <label>]');
   process.exit(1);
 }
 
@@ -63,25 +69,40 @@ def add_${slug}(x=0, y=0, z=0, name=${JSON.stringify(display)}):
 async function main() {
   fs.mkdirSync(path.join(LIB_DIR, category), { recursive: true });
 
-  // Step 1: Save .blend from Blender via IPC
-  const selectExpr = objName
-    ? `bpy.data.objects.get('${objName}')`
-    : `next((o for o in bpy.context.selected_objects if o.type == 'MESH'), None)`;
+  // Step 1: Save .blend from Blender via IPC.
+  // Collection > object > selection; ALWAYS a list — a brush may be many meshes
+  // (the loader appends every object in the lib, so save must be symmetric).
+  // Names go through JSON.stringify: valid Python string literals, apostrophe-safe.
+  const pyStr = s => JSON.stringify(s);
 
   const saveCode = `
 import bpy, os
 lib_path = r'${libFwd}'
-obj = ${selectExpr}
-if not obj:
-    print('ERROR: no object found — pass --object <name> or select one in Blender')
+col_name = ${pyStr(colName)}
+obj_name = ${pyStr(objName)}
+if col_name:
+    col = bpy.data.collections.get(col_name)
+    objs = [o for o in col.all_objects if o.type == 'MESH'] if col else []
+    err = ('ERROR: collection %r not found' % col_name) if not col else ('ERROR: collection %r has no mesh objects' % col_name)
+elif obj_name:
+    o = bpy.data.objects.get(obj_name)
+    objs = [o] if (o and o.type == 'MESH') else []
+    err = 'ERROR: object %r not found or not a mesh' % obj_name
+else:
+    objs = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+    err = 'ERROR: no meshes selected — select them, or pass --object/--collection'
+if not objs:
+    print(err)
 else:
     os.makedirs(os.path.dirname(lib_path), exist_ok=True)
-    blocks = {obj}
-    if obj.data: blocks.add(obj.data)
-    for slot in obj.material_slots:
-        if slot.material: blocks.add(slot.material)
+    blocks = set()
+    for obj in objs:
+        blocks.add(obj)
+        if obj.data: blocks.add(obj.data)
+        for slot in obj.material_slots:
+            if slot.material: blocks.add(slot.material)
     bpy.data.libraries.write(lib_path, blocks, fake_user=True, compress=True)
-    print('SAVED_BRUSH:' + lib_path)
+    print('SAVED_BRUSH:' + lib_path + ' (' + str(len(objs)) + ' mesh(es))')
 `;
 
   process.stdout.write(`  Saving .blend → ${libPath} ... `);

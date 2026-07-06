@@ -75,6 +75,15 @@ With Blender open and the addon enabled, the import stage drops generated props 
 - **Asset library** — staged assets, brushes, materials.
 - **Troubleshooter** — an LLM assistant that checks your local stack (ComfyUI · models · Blender) and helps get missing dependencies running.
 
+### Save your own brushes
+
+A **brush** is a reusable asset saved from your Blender scene — one `.blend` library file that places back **whole**, however many meshes it contains. Two ways to tell Phoenix what goes in:
+
+- **Name a collection:** *"make a brush out of the Campfire collection"* — saves **all** mesh objects in that collection.
+- **Select in Blender:** select the meshes in the viewport, then *"save this as a brush called campfire"* — saves the whole selection (a single selected object works too).
+
+Phoenix reports how many meshes went into the brush — if that's not what you expected, adjust the selection/collection and save again. Place it later with *"use the campfire brush"*.
+
 ### Add your own workflow
 
 Workflows tab → **+ Add workflow** → pick the stage (image / mesh) → upload a ComfyUI workflow exported as **"Save (API Format)"** → **Analyze with Phoenix**. Phoenix proposes the node‑map (which node receives the prompt, seed, steps, output, …) and the required custom nodes / models from the graph. Review the dropdowns, give it a name, and save. Only `positive` + `output` (image) / `image` + `output` (mesh) are required; anything you don't map keeps the workflow's own built‑in value.
