@@ -397,6 +397,23 @@ function deleteCustomWorkflow(id) {
 }
 
 /**
+ * resolveWorkflowFile(entry) → absolute path that exists on THIS machine
+ *
+ * entry.file is an absolute path recorded when the workflow was registered. The same
+ * tree runs on the laptop and on the rig, so a rig-recorded path resolves to
+ * "D:\home\erazz\..." on Windows and the read fails. Fall back to this install's own
+ * workflows/ directory — same portability rule as _LIB_DIR (see dev-notes/phoenix.md).
+ */
+function resolveWorkflowFile(entry) {
+  const p = entry && entry.file;
+  if (!p) throw new Error('workflow entry has no file');
+  if (fs.existsSync(p)) return p;
+  const local = path.join(__dirname, 'workflows', path.basename(p));
+  if (fs.existsSync(local)) return local;
+  throw new Error('workflow file not found: ' + p);
+}
+
+/**
  * updateCustomWorkflow(id, fields) → updated entry
  * fields = { label, nodes, deps } — any may be omitted.
  * Throws an Error with a clear message on any failure.
@@ -408,7 +425,7 @@ function updateCustomWorkflow(id, fields) {
   if (entry.builtin === true) throw new Error('Cannot edit a Verified (builtin) workflow.');
   let obj;
   try {
-    obj = JSON.parse(fs.readFileSync(entry.file, 'utf8'));
+    obj = JSON.parse(fs.readFileSync(resolveWorkflowFile(entry), 'utf8'));
   } catch {
     throw new Error('Saved workflow file is missing or invalid.');
   }
@@ -433,4 +450,5 @@ module.exports = {
   MODEL_INPUT_FIELDS, validateWorkflowJson, stripNonNodeKeys, prepareWorkflowJson,
   collectNodeChoices, collectModelCandidates, missingModelsForWorkflow,
   listClassTypes, validateNodeMap, addCustomWorkflow, deleteCustomWorkflow, updateCustomWorkflow,
+  resolveWorkflowFile,
 };

@@ -19,7 +19,10 @@
   "3": {
     "class_type": "Trellis2PreProcessImage_GGUF",
     "inputs": {
-      "image": ["2", 2],
+      "image": [
+        "2",
+        2
+      ],
       "padding": 0,
       "remove_background": true
     }
@@ -27,8 +30,14 @@
   "4": {
     "class_type": "Trellis2MeshWithVoxelGenerator_GGUF",
     "inputs": {
-      "pipeline": ["1", 0],
-      "image": ["3", 0],
+      "pipeline": [
+        "1",
+        0
+      ],
+      "image": [
+        "3",
+        0
+      ],
       "seed": 12345,
       "pipeline_type": "1024_cascade",
       "sparse_structure_steps": 12,
@@ -44,8 +53,14 @@
   "5": {
     "class_type": "Trellis2PostProcessAndUnWrapAndRasterizer_GGUF",
     "inputs": {
-      "mesh": ["4", 0],
-      "bvh": ["4", 1],
+      "mesh": [
+        "4",
+        0
+      ],
+      "bvh": [
+        "4",
+        1
+      ],
       "mesh_cluster_threshold_cone_half_angle_rad": 60.0,
       "mesh_cluster_refine_iterations": 0,
       "mesh_cluster_global_iterations": 1,
@@ -60,7 +75,7 @@
       "texture_alpha_mode": "OPAQUE",
       "dual_contouring_resolution": "1024",
       "double_side_material": false,
-      "remove_floaters": true,
+      "remove_floaters": false,
       "bake_on_vertices": false,
       "use_custom_normals": false,
       "uv_unwrap_method": "Xatlas",
@@ -70,7 +85,10 @@
   "6": {
     "class_type": "Trellis2ExportMesh_GGUF",
     "inputs": {
-      "trimesh": ["5", 0],
+      "trimesh": [
+        "5",
+        0
+      ],
       "filename_prefix": "phoenix_output",
       "file_format": "glb"
     }

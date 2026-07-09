@@ -9,8 +9,10 @@
  * clone has a dead brush system. Same self-seed idiom as phoenix-config / palette /
  * workflows ("auto-seeded on first run").
  *
- * _LIB_DIR is baked as an absolute path at seed time because the .py is exec()'d
- * as TEXT inside Blender (no __file__ in that context).
+ * _LIB_DIR is normally injected by the caller (use_brush.js) to match the running
+ * machine's install. The seeded value below is only a fallback for standalone exec()
+ * of this file (no __file__ in that context), so a brushes/ tree copied between rig
+ * and laptop still resolves locally.
  */
 
 const fs = require('fs');
@@ -39,7 +41,11 @@ Material palette:
 """
 import bpy, os, re
 
-_LIB_DIR = r"__PHOENIX_LIB_DIR__"
+# Caller (use_brush.js) injects _LIB_DIR after exec(); this is only a standalone fallback.
+try:
+    _LIB_DIR
+except NameError:
+    _LIB_DIR = r"__PHOENIX_LIB_DIR__"
 
 
 # ── Material creators ──────────────────────────────────────────────────────────
@@ -96,18 +102,53 @@ _PHOENIX_PALETTE = {
 }
 
 
+def _load_palette_material(name):
+    """Append a saved procedural/complex material by name from the shared material library
+    (brushes/palette_materials/<name>.blend), renaming the appended block to <name>.
+    Returns None if there is no library file for that name."""
+    pal_dir = os.path.join(os.path.dirname(_LIB_DIR), "palette_materials")
+    path = os.path.join(pal_dir, name + ".blend")
+    if not os.path.exists(path):
+        return None
+    before = set(m.name for m in bpy.data.materials)
+    with bpy.data.libraries.load(path, link=False) as (data_from, data_to):
+        data_to.materials = list(data_from.materials)
+    new = [m for m in bpy.data.materials if m.name not in before]
+    if not new:
+        return bpy.data.materials.get(name)
+    mat = new[0]
+    mat.name = name
+    return mat
+
+
 def _mat(name):
-    """Get existing palette material by name, or create it. Returns None if unknown."""
+    """Resolve a palette material: already in scene → built-in solid preset (_PHOENIX_PALETTE)
+    → saved library material with its real node network → None."""
     existing = bpy.data.materials.get(name)
     if existing:
         return existing
     creator = _PHOENIX_PALETTE.get(name)
-    return creator(name) if creator else None
+    if creator:
+        return creator(name)
+    return _load_palette_material(name)
+
+
+def _palette_library_names():
+    """Names of the procedural materials stored as brushes/palette_materials/<name>.blend.
+    These are NOT _PHOENIX_PALETTE entries — the dict only holds solid-colour lambdas."""
+    pal_dir = os.path.join(os.path.dirname(_LIB_DIR), "palette_materials")
+    try:
+        return sorted(f[:-6] for f in os.listdir(pal_dir) if f.endswith(".blend"))
+    except OSError:
+        return []
 
 
 def setup_phoenix_palette():
-    """Pre-create all palette materials in the current scene. Safe to call multiple times."""
-    for name in _PHOENIX_PALETTE:
+    """Pre-create all palette materials in the current scene. Safe to call multiple times.
+    Covers both the solid presets and the procedural library materials."""
+    names = list(_PHOENIX_PALETTE)
+    names += [n for n in _palette_library_names() if n not in _PHOENIX_PALETTE]
+    for name in names:
         _mat(name)
         print(f"palette: {name}")
     print("setup_phoenix_palette done")
@@ -140,22 +181,110 @@ def _remap_phoenix_materials(objects):
 
 # ── Core loader ────────────────────────────────────────────────────────────────
 
-def _load_blend(lib_path, location=(0, 0, 0), instance_name=None):
-    """Append all objects from a .blend library file, remap materials, link to scene."""
+def _phx_ensure_keep_transform_handler():
+    """Install (once per session) a depsgraph handler so that deleting a brush handle in
+    Blender leaves its meshes where they were last positioned, instead of Blender's native
+    snap-back to the spawn transform. Each tagged child's world is remembered every update;
+    when its handle object disappears, that world is written back and the tag removed."""
+    name = "_phx_keep_transform"
+    for _h in bpy.app.handlers.depsgraph_update_post:
+        if getattr(_h, "__name__", "") == name:
+            return
+    _store = {}
+    def _phx_keep_transform(scene, depsgraph):
+        objs = bpy.data.objects
+        for o in objs:
+            hn = o.get("_phx_handle")
+            if hn and hn in objs:
+                _store[o.name] = (hn, o.matrix_world.copy())
+        for oname in list(_store.keys()):
+            hn, mw = _store[oname]
+            if hn not in objs:
+                o = objs.get(oname)
+                if o is not None:
+                    o.matrix_world = mw
+                    if "_phx_handle" in o.keys():
+                        del o["_phx_handle"]
+                _store.pop(oname, None)
+    _phx_keep_transform.__name__ = name
+    try:
+        _phx_keep_transform = bpy.app.handlers.persistent(_phx_keep_transform)
+        _phx_keep_transform.__name__ = name
+    except Exception:
+        pass
+    bpy.app.handlers.depsgraph_update_post.append(_phx_keep_transform)
+
+
+def _load_blend(lib_path, location=None, instance_name=None):
+    """Append every object from a .blend, keep the meshes' relative layout, and parent
+    them under a grab 'handle' (an Empty) at the target location (default = the 3D cursor). Grab or
+    rotate the handle to move the whole brush as one group. Returns the placed object names."""
+    import mathutils
+    if location is None:
+        location = tuple(bpy.context.scene.cursor.location)
+    target = mathutils.Vector(location)
+
     with bpy.data.libraries.load(lib_path, link=False) as (data_from, data_to):
         data_to.objects = list(data_from.objects)
-    placed_objs = []
-    placed = []
-    for obj in data_to.objects:
-        if obj is not None:
-            bpy.context.scene.collection.objects.link(obj)
-            obj.location = location
-            if instance_name:
-                obj.name = instance_name
-            placed_objs.append(obj)
-            placed.append(obj.name)
+    placed_objs = [o for o in data_to.objects if o is not None]
+    for obj in placed_objs:
+        bpy.context.scene.collection.objects.link(obj)
+    # Refresh the depsgraph so matrix_world reflects each object's authored transform
+    # BEFORE we read it below — without this the just-appended objects report a stale
+    # (identity) matrix and the group collapses to one point.
+    bpy.context.view_layer.update()
     _remap_phoenix_materials(placed_objs)
-    return placed
+
+    # Group anchor = base centre (X/Y centred, min Z) over all objects in world space,
+    # so the brush "drops" onto the target point instead of collapsing to the origin.
+    corners = [obj.matrix_world @ mathutils.Vector(c)
+               for obj in placed_objs for c in obj.bound_box]
+    if corners:
+        xs = [v.x for v in corners]; ys = [v.y for v in corners]; zs = [v.z for v in corners]
+        anchor = mathutils.Vector(((min(xs) + max(xs)) / 2.0,
+                                   (min(ys) + max(ys)) / 2.0, min(zs)))
+    else:
+        anchor = mathutils.Vector((0.0, 0.0, 0.0))
+    offset = target - anchor
+
+    # Shift the whole group by one offset — relative positions of the meshes are preserved.
+    for obj in placed_objs:
+        m = obj.matrix_world.copy()
+        m.translation = m.translation + offset
+        obj.matrix_world = m
+
+    # Grab handle: a small visible sphere Empty floating just in front (-Y) of the group's
+    # base, so it's easy to click without hitting the geometry. Parent every object to it,
+    # keeping each object's world transform (parent-inverse = inverse of the handle position).
+    if corners:
+        span_x = max(xs) - min(xs); span_y = max(ys) - min(ys); span_z = max(zs) - min(zs)
+    else:
+        span_x = span_y = span_z = 1.0
+    gap = max(0.3, 0.6 * span_y)
+    handle_loc = target + mathutils.Vector((0.0, -gap, 0.0))
+    handle = bpy.data.objects.new(instance_name or "Brush Handle", None)
+    handle.empty_display_type = 'SPHERE'
+    handle.empty_display_size = max(0.2, 0.15 * max(span_x, span_y, span_z))
+    bpy.context.scene.collection.objects.link(handle)
+    handle.location = handle_loc
+    parent_inverse = mathutils.Matrix.Translation(-handle_loc)
+    for obj in placed_objs:
+        obj.parent = handle
+        obj.matrix_parent_inverse = parent_inverse
+
+    # Keep the meshes in place when the handle is later deleted in Blender: tag each child
+    # with its handle and install the session handler (native parent-delete snaps them back).
+    _phx_ensure_keep_transform_handler()
+    for obj in placed_objs:
+        obj["_phx_handle"] = handle.name
+
+    # Select the handle so the user immediately grabs/rotates the whole brush.
+    for o in list(bpy.context.selected_objects):
+        o.select_set(False)
+    handle.select_set(True)
+    bpy.context.view_layer.objects.active = handle
+
+    return [o.name for o in placed_objs]
 
 
 # ── Brushes (appended by save_brush.js) ──────────────────────────────────────

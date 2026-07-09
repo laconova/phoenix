@@ -104,6 +104,8 @@ TOOLS:
 - read_state      reads session state: sceneObjects (what is LIVE in the Blender scene, kept fresh by the scene-sync module), stagedFiles (GLB FILES on disk in staging/, ready to import), lastTask, sceneUpdatedAt. INPUT: {}
 - list_assets     lists staged GLB FILES on disk (in staging/). These are assets ready to import — they are NOT necessarily in the Blender scene. INPUT: {}
 - read_palette    returns the current style palette (each category's style text + params). Use ONLY when the user asks you to help draft or choose a category. INPUT: {}
+- list_materials   lists the shared MATERIAL palette (reusable materials that brushes share) — NOT the style palette above. INPUT: {}
+- delete_material  removes a material from the shared MATERIAL palette by name (palette registry only; the open Blender scene is untouched). Use when the user says e.g. "delete material X from the palette". INPUT: {"name": "MaterialName"}
 - import_asset    imports a staged file into the live Blender scene. INPUT: {"name": "filename.glb", "cleanup": true|false}. cleanup:true = import with auto-smooth shading; omitted/false = raw mesh (DEFAULT = raw).
 - list_brushes    lists brushes. INPUT: {} for all, {"category": "item|furniture|sci_fi|..."} to filter by category, {"search": "keyword"} to search by name. Use filtered calls — avoid listing all when you only need one category.
 - save_as_brush   saves Blender mesh(es) as a reusable brush — ONE brush file that places whole again later. INPUT: {"name": "slug", "collection": "CollectionName (optional — saves ALL meshes in it)", "object": "BlenderObjName (optional — single object)", "category": "item|sci_fi|etc (optional)", "display": "Human label (optional)"}. Omit collection AND object to save ALL currently selected meshes.
@@ -277,19 +279,38 @@ function listBrushesData() {
 }
 
 function listMaterialsData() {
-  const PY = path.join(__dirname, 'brushes', 'phoenix_brushes.py');
+  const PY      = path.join(__dirname, 'brushes', 'phoenix_brushes.py');
+  const PAL_DIR = path.join(__dirname, 'brushes', 'palette_materials');
+  const out = [];
+
+  // Solid presets: _PHOENIX_PALETTE lambdas. Scoped to the dict body so the
+  // docstring's "M_YourMat" example can never be matched as a real entry.
   try {
-    const src = fs.readFileSync(PY, 'utf8');
-    const re = /"(M_[A-Za-z0-9_]+)"\s*:\s*lambda[^:]*:\s*_make_\w+\(\s*n\s*,\s*\(([^)]*)\)/g;
-    const out = []; let m;
-    while ((m = re.exec(src)) !== null) {
-      const name = m[1];
-      const nums = m[2].split(',').map(s => parseFloat(s.trim())).filter(n => Number.isFinite(n));
-      const color = nums.length >= 3 ? [nums[0], nums[1], nums[2]] : null;
-      out.push({ name, color });
+    const src   = fs.readFileSync(PY, 'utf8');
+    const open  = src.indexOf('_PHOENIX_PALETTE = {');
+    const close = open >= 0 ? src.indexOf('\n}', open) : -1;
+    const body  = (open >= 0 && close >= 0) ? src.slice(open, close) : '';
+    const re = /"([^"]+)"\s*:\s*lambda[^:]*:\s*_make_\w+\(([^\n]*)/g;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const tuple = m[2].match(/\(([^)]*)\)/);
+      let color = null;
+      if (tuple) {
+        const nums = tuple[1].split(',').map(s => parseFloat(s.trim())).filter(n => Number.isFinite(n));
+        if (nums.length >= 3) color = [nums[0], nums[1], nums[2]];
+      }
+      out.push({ name: m[1], color });
     }
-    return out;
-  } catch { return []; }
+  } catch (_) {}
+
+  // Procedural materials live as per-material .blend files, not as dict entries.
+  try {
+    for (const f of fs.readdirSync(PAL_DIR)) {
+      if (f.endsWith('.blend')) out.push({ name: f.slice(0, -6), color: null });
+    }
+  } catch (_) {}
+
+  return out;
 }
 
 async function toolListAssets(_input, _state, _cfg) {
@@ -468,7 +489,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
   try {
     const _wfEntry = workflows.getActive('image', cfg);
     let _wfObj = null;
-    try { _wfObj = JSON.parse(fs.readFileSync(_wfEntry.file, 'utf8')); } catch { /* file unreadable — skip */ }
+    try { _wfObj = JSON.parse(fs.readFileSync(workflows.resolveWorkflowFile(_wfEntry), 'utf8')); } catch { /* file unreadable — skip */ }
     if (_wfObj) {
       const _base = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8000';
       const _oiRes = await fetch(_base + '/object_info', { signal: AbortSignal.timeout(8000) });
@@ -586,7 +607,7 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
   try {
     const _wfEntry = workflows.getActive('mesh', cfg);
     let _wfObj = null;
-    try { _wfObj = JSON.parse(fs.readFileSync(_wfEntry.file, 'utf8')); } catch { /* file unreadable — skip */ }
+    try { _wfObj = JSON.parse(fs.readFileSync(workflows.resolveWorkflowFile(_wfEntry), 'utf8')); } catch { /* file unreadable — skip */ }
     if (_wfObj) {
       const _base = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8000';
       const _oiRes = await fetch(_base + '/object_info', { signal: AbortSignal.timeout(8000) });
@@ -661,6 +682,17 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
 }
 
 const BRUSHES_REGISTRY = path.join(__dirname, 'brushes', 'registry.json');
+
+// registry.json trug frueher den absoluten Pfad der Maschine, auf der der Brush
+// gespeichert wurde — auf dem Rig zeigten die Eintraege auf D:\phoenix\... Seit
+// 2026-07-09 schreibt save_brush.js relativ zu brushes/lib; Alt-Eintraege werden
+// hier noch aufgeloest, damit bestehende Registries weiterlaufen.
+function resolveBrushLib(lib) {
+  if (!lib) return null;
+  const libDir = path.join(__dirname, 'brushes', 'lib');
+  const m = String(lib).replace(/\\/g, '/').match(/(?:^|\/)brushes\/lib\/(.+)$/);
+  return path.join(libDir, m ? m[1] : String(lib).replace(/\\/g, '/'));
+}
 
 async function toolListBrushes(input, _state, _cfg) {
   if (!fs.existsSync(BRUSHES_REGISTRY)) return 'No brush registry found. Save a brush first.';
@@ -803,7 +835,8 @@ async function toolDeleteBrush(input) {
     const b = reg.brushes && reg.brushes[slug];
     if (!b) return 'ERROR: brush not found: ' + slug;
     if (b.type === 'phoenix') {
-      if (b.lib) { try { if (fs.existsSync(b.lib)) fs.unlinkSync(b.lib); } catch (_) {} }
+      const libFile = resolveBrushLib(b.lib);
+      if (libFile) { try { if (fs.existsSync(libFile)) fs.unlinkSync(libFile); } catch (_) {} }
       try {
         let src = fs.readFileSync(PY, 'utf8');
         const marker = '\ndef add_' + slug + '(';
@@ -819,6 +852,26 @@ async function toolDeleteBrush(input) {
     fs.writeFileSync(REG, JSON.stringify(reg, null, 2));
     return 'Deleted brush ' + slug;
   } catch (e) { return 'ERROR: ' + e.message; }
+}
+
+async function toolListPalette() {
+  const r = spawnSync('node', [path.join(__dirname, 'manage_palette.js'), '--list'], {
+    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 15000,
+  });
+  if (r.error)        return `ERROR: ${r.error.message}`;
+  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  return (r.stdout || '').trim() || '(palette empty)';
+}
+
+async function toolDeleteMaterial(input) {
+  const name = input && input.name;
+  if (!name) return 'ERROR: name required';
+  const r = spawnSync('node', [path.join(__dirname, 'manage_palette.js'), '--delete', name], {
+    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 15000,
+  });
+  if (r.error)        return `ERROR: ${r.error.message}`;
+  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  return (r.stdout || '').trim() || `deleted ${name}`;
 }
 
 const TOOLS = {
@@ -838,6 +891,8 @@ const TOOLS = {
   rename_brush:   toolRenameBrush,
   delete_asset:   toolDeleteAsset,
   delete_brush:   toolDeleteBrush,
+  list_materials: toolListPalette,
+  delete_material: toolDeleteMaterial,
 };
 
 // ─── Claude CLI call ──────────────────────────────────────────────────────────

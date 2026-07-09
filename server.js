@@ -449,7 +449,7 @@ async function handler(req, res) {
 
     const { action, input } = body || {};
 
-    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush'];
+    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material'];
     if (!ALLOWED.includes(action)) {
       sendJSON(res, 400, { error: 'unknown action' });
       return;
@@ -1275,7 +1275,7 @@ async function handler(req, res) {
     }
     let jsonText, obj;
     try {
-      jsonText = require('fs').readFileSync(entry.file, 'utf8');
+      jsonText = require('fs').readFileSync(workflows.resolveWorkflowFile(entry), 'utf8');
       obj = JSON.parse(jsonText);
     } catch (e) {
       sendJSON(res, 400, { error: 'Saved workflow file is missing or invalid: ' + entry.file });

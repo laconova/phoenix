@@ -19,7 +19,7 @@ function loadConfig() {
 }
 
 const { loadPalette } = require('./palette');
-const { getActive, resolveSlot } = require('./workflows');
+const { getActive, resolveSlot, resolveWorkflowFile } = require('./workflows');
 
 const _cfg     = loadConfig();
 const _palette = loadPalette();
@@ -310,7 +310,7 @@ async function callClaudeMeta(systemPrompt, user, model) {
 async function runFlux(session) {
   const wfEntry = getActive('image', _cfg);
   const n  = wfEntry.nodes;
-  const wf = JSON.parse(fs.readFileSync(wfEntry.file, 'utf8'));
+  const wf = JSON.parse(fs.readFileSync(resolveWorkflowFile(wfEntry), 'utf8'));
 
   const set = (slot, value) => { if (n[slot] == null) return; const r = resolveSlot('image', slot, n[slot]); wf[r.node].inputs[r.field] = value; };
   set('positive', session.imagePrompt);
@@ -364,7 +364,7 @@ async function runTrellis(session) {
 
   const wfEntry = getActive('mesh', _cfg);
   const n  = wfEntry.nodes;
-  const wf = JSON.parse(fs.readFileSync(wfEntry.file, 'utf8'));
+  const wf = JSON.parse(fs.readFileSync(resolveWorkflowFile(wfEntry), 'utf8'));
 
   return withProgress('Trellis 3D gen', async () => {
     const uploadedName = await comfyUploadImage(session.imagePath);
@@ -387,8 +387,9 @@ async function runTrellis(session) {
       glbPath = Array.isArray(expNode.glb_path) ? expNode.glb_path[0] : expNode.glb_path;
     }
 
-    // Fallback: scan ComfyUI output dir for newest matching GLB
-    if (!glbPath || !fs.existsSync(glbPath)) {
+    // Fallback: scan ComfyUI output dir for newest matching GLB — only meaningful when
+    // ComfyUI runs on this machine. Over a tunnel the directory does not exist here.
+    if ((!glbPath || !fs.existsSync(glbPath)) && COMFY_OUTPUT && fs.existsSync(COMFY_OUTPUT)) {
       const files = fs.readdirSync(COMFY_OUTPUT)
         .filter(f => f.startsWith(prefix) && f.endsWith('.glb'))
         .map(f => ({ f, mt: fs.statSync(path.join(COMFY_OUTPUT, f)).mtimeMs }))
@@ -396,14 +397,30 @@ async function runTrellis(session) {
       if (files.length) glbPath = path.join(COMFY_OUTPUT, files[0].f);
     }
 
-    if (!glbPath || !fs.existsSync(glbPath))
-      throw new Error(`GLB not found after Trellis run (prefix: ${prefix})`);
-
     const outDir  = path.join(OUTPUT_BASE, session.category);
     fs.mkdirSync(outDir, { recursive: true });
     const outPath = path.join(outDir, `${prefix}.glb`);
-    fs.copyFileSync(glbPath, outPath);
-    return outPath;
+
+    if (glbPath && fs.existsSync(glbPath)) {
+      fs.copyFileSync(glbPath, outPath);
+      return outPath;
+    }
+
+    // ComfyUI may be remote (tunnel) — fetch the GLB over HTTP like the image stage does.
+    // Trellis' ExportMesh reports nothing into /history, so the name ComfyUI assigned has
+    // to be reconstructed: <prefix>_0000N_.glb, N only counting up on a name collision.
+    const tried = [];
+    if (glbPath) tried.push(path.basename(glbPath));
+    for (let i = 1; i <= 5; i++) tried.push(`${prefix}_${String(i).padStart(5, '0')}_.glb`);
+
+    for (const name of tried) {
+      try {
+        fs.writeFileSync(outPath, await comfyDownload(name));
+        return outPath;
+      } catch { /* not this name — try the next */ }
+    }
+
+    throw new Error(`GLB not found after Trellis run (prefix: ${prefix}) — neither on disk nor via ComfyUI /view (tried: ${tried.join(', ')})`);
   });
 }
 
