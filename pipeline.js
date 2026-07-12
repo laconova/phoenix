@@ -4,6 +4,7 @@ const path   = require('path');
 const { spawn } = require('child_process');
 const fs     = require('fs');
 const dbg    = require('./debug-log');
+const palette = require('./palette');
 const { callBlender } = require('./blender-ipc');
 
 // ─── Stage list ───────────────────────────────────────────────────────────────
@@ -169,7 +170,7 @@ async function runImportStage(ctx) {
 
   // Resolve relative name to staging path
   if (assetPath && !path.isAbsolute(assetPath)) {
-    const categories = ['flat', 'furniture', 'item', 'architecture', 'flora', 'fauna'];
+    const categories = Object.keys(palette.loadPalette().categories);
     let found = null;
     for (const cat of categories) {
       const candidate = path.join(STAGING_BASE, cat, assetPath.endsWith('.glb') ? assetPath : assetPath + '.glb');

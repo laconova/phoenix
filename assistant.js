@@ -811,7 +811,7 @@ async function toolRenameBrush(input) {
 
 async function toolDeleteAsset(input) {
   const { category, name } = input || {};
-  const CATS = ['flat','furniture','item','architecture','flora','fauna'];
+  const CATS = Object.keys(palette.loadPalette().categories);
   if (!category || !name || !CATS.includes(category)) return 'ERROR: valid category and name required';
   const safe = path.basename(name);
   if (safe !== name || !safe.endsWith('.glb')) return 'ERROR: invalid asset name';

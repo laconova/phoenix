@@ -861,8 +861,17 @@
           : '';
       }
 
-      // mirrors phoenix.js CATEGORIES target_face_num (UI hint only; keep in sync)
-      const FACE_DEFAULTS = { flat:3500, furniture:12000, item:7500, architecture:18000, flora:30000, fauna:40000 };
+      // Filled from /palette — the server's palette is the only place a category exists.
+      // This used to be a hardcoded copy ("keep in sync"), so every category added after
+      // it was written (leaf, branch) silently got no face-count prefill.
+      const FACE_DEFAULTS = {};
+      async function refreshFaceDefaults(categories) {
+        try {
+          const cats = categories || (await (await fetch('/palette')).json()).categories || {};
+          Object.entries(cats).forEach(([k, v]) => { FACE_DEFAULTS[k] = v.target_face_num; });
+        } catch (e) { /* prefill is a convenience; the server default still applies */ }
+      }
+      refreshFaceDefaults();
       const meshFacesEl = document.getElementById('mesh-faces');
 
       function parsePromptText(t) {
@@ -2086,6 +2095,7 @@
           const res = await fetch('/palette');
           const data = await res.json();
           const categories = data.categories || {};
+          refreshFaceDefaults(categories);
           libPaletteBody.innerHTML = '';
 
           // "+ Add category" button at the top

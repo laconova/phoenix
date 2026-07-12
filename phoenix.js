@@ -30,6 +30,20 @@ const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metapr
 const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse);
 const GEMMA_TEMP   = (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.temperature) || 0.7;
 
+// ─── VRAM ─────────────────────────────────────────────────────────────────────
+// Freeing ComfyUI's models before the mesh step is what keeps Flux and Trellis from
+// fighting over a 10GB card. It used to be gated by `seats.metaprompter.ejectAfterUse`
+// — which is a flag about the *metaprompter*, and that seat is a cloud model now. The
+// coupling was accidental: flip that flag for a good reason and the eject vanishes
+// silently, and every mesh OOMs. It gets its own switch.
+//   vram.freeComfyBeforeMesh: true|false   (default: true — safe for VRAM-poor boxes)
+const _vram = _cfg.vram || {};
+const FREE_COMFY_BEFORE_MESH = (_vram.freeComfyBeforeMesh !== undefined)
+  ? !!_vram.freeComfyBeforeMesh
+  : (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse !== undefined
+      ? !!_cfg.seats.metaprompter.ejectAfterUse   // legacy config: keep old behaviour
+      : true);                                    // nothing configured: assume the card is small
+
 const COMFY_OUTPUT = (_cfg.apps && _cfg.apps.comfyOutput) ||
   path.join(process.env.USERPROFILE || process.env.HOME || '', 'Documents', 'ComfyUI', 'output');
 // Active image/3D workflow files + node-maps now come from the registry (workflows.js)
@@ -44,7 +58,10 @@ const CATEGORIES = Object.fromEntries(
   Object.entries(_palette.categories).map(([k, v]) => [k, { target_face_num: v.target_face_num, cfg: v.cfg, steps: v.steps }])
 );
 
-const CATEGORY_LABELS = {
+// Every category in the palette gets a label — a hand-written one where we have it,
+// the palette's own hint otherwise. Hardcoding the list here is what made `leaf` and
+// `branch` print "undefined": palette.json is the only place a category is declared.
+const CATEGORY_LABEL_OVERRIDES = {
   flat:         'flat prop  (plank / panel / floor)',
   furniture:    'furniture  (chair / table / shelf)',
   item:         'item       (tool / weapon / container)',
@@ -52,6 +69,10 @@ const CATEGORY_LABELS = {
   flora:        'flora  (tree / plant / shrub)',
   fauna:        'fauna / monster  (static)',
 };
+
+const CATEGORY_LABELS = Object.fromEntries(
+  Object.keys(_palette.categories).map(k => [k, CATEGORY_LABEL_OVERRIDES[k] || _palette.categories[k].hint || k])
+);
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -197,6 +218,7 @@ async function comfyQueue(workflow) {
 async function comfyPoll(promptId, timeoutMs = 600000) {
   const deadline = Date.now() + timeoutMs;
   let consecFails = 0;
+  let fatal = null;   // a job ComfyUI reported as failed — thrown AFTER the try/catch (see note below)
   const MAX_CONSEC_FAILS = 5; // ~15s of consecutive unreachable polls ⇒ ComfyUI is gone, not a blip
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
@@ -207,6 +229,39 @@ async function comfyPoll(promptId, timeoutMs = 600000) {
       const hist  = await res.json();
       const entry = hist[promptId];
       if (!entry) continue;
+
+      // ── Zombie-proofing ────────────────────────────────────────────────────
+      // A failed ComfyUI job (CUDA OOM, bad node, cancelled) lands in /history with
+      // status_str 'error' and NO outputs. The old code only asked "is it done?", so a
+      // failure fell through to `continue` and we polled a dead job until the deadline —
+      // 30 MINUTES for the mesh step, then a meaningless "timed out" error. That is the
+      // hang that blocks the queue and would kill a take on camera. ComfyUI tells us
+      // exactly what went wrong; we just never read it.
+      // NOTE: do NOT throw from inside this try — the catch below treats any throw as a
+      // network blip and swallows it, and because consecFails resets on every successful
+      // fetch it never reaches the bail-out. That turns a detected failure into an endless
+      // poll: the exact hang this code exists to prevent. Hand it out via `fatal` instead.
+      const st   = entry.status || {};
+      const msgs = Array.isArray(st.messages) ? st.messages : [];
+      const errM = msgs.find(m => Array.isArray(m) &&
+                                  (m[0] === 'execution_error' || m[0] === 'execution_interrupted'));
+      if (errM || st.status_str === 'error') {
+        const d      = (errM && errM[1]) || {};
+        const detail = d.exception_message || d.exception_type || st.status_str || 'unknown error';
+        const where  = d.node_type ? ` in node ${d.node_type}${d.node_id != null ? ` (#${d.node_id})` : ''}` : '';
+        const oom    = /out of memory|outofmemory|cuda error|cudamalloc/i.test(String(detail));
+        dbg.event('comfy', { phase: 'job-failed', promptId, oom, detail: String(detail).slice(0, 400), node: d.node_type });
+        fatal = new Error(
+          `ComfyUI job failed${where}: ${String(detail).trim()}` +
+          (oom ? '\n  → CUDA out of memory. The card could not hold this step. Lower dual_contouring_resolution '
+               + '(workflows/trellis_phoenix.json), or free VRAM (gemma / other models) and retry.'
+               : '')
+        );
+        fatal.oom  = oom;            // lets callers retry on OOM specifically — runTrellis does
+        fatal.node = d.node_type;
+        break;
+      }
+
       const done = (entry.status && entry.status.completed) ||
                    (entry.outputs && Object.keys(entry.outputs).length > 0);
       if (done) return entry.outputs || {};
@@ -219,6 +274,10 @@ async function comfyPoll(promptId, timeoutMs = 600000) {
       }
     }
   }
+  // `break` above jumps clear out of the while, so this check must live OUTSIDE it —
+  // inside the loop body it would be skipped and we'd report a bogus "timed out" instead
+  // of the real cause.
+  if (fatal) throw fatal;   // ComfyUI said the job failed: stop now, don't poll a corpse
   throw new Error(`ComfyUI timed out after ${timeoutMs / 60000} min — check the UI`);
 }
 
@@ -319,6 +378,10 @@ async function runFlux(session) {
   set('steps', session.params.steps);
   set('seed', session.fluxSeed);
 
+  // fluxSeed is drawn at random and is the ONLY thing that makes an image reproducible —
+  // the `seed:` printed elsewhere is the Trellis seed. Log it, or the image is gone for good.
+  console.log(`  flux seed: ${session.fluxSeed}  |  cfg: ${session.params.cfg}  |  steps: ${session.params.steps}`);
+
   return withProgress('Flux image gen', async () => {
     const promptId = await comfyQueue(wf);
     const outputs  = await comfyPoll(promptId, 600000); // 10 min — first run of a heavy image model (Flux) loads GBs before generating
@@ -348,11 +411,11 @@ async function runTrellis(session) {
   // model not loaded / lms missing just logs a warning, the gen is never aborted.
   if (!/^claude/i.test(GEMMA_MODEL)) lmsUnload(GEMMA_MODEL);
 
-  if (EJECT_AFTER) {
+  if (FREE_COMFY_BEFORE_MESH) {
     // Same juggle, other direction: on VRAM-poor boxes ComfyUI itself may still hold the
     // heavy image model (Flux) when the mesh model loads — ask it to free first (official
-    // /free API, best-effort). Gated by ejectAfterUse = the "this box is VRAM-poor" switch,
-    // so big cards keep both models resident.
+    // /free API, best-effort). Own switch (vram.freeComfyBeforeMesh), NOT the metaprompter's
+    // eject flag — see the config block up top. Big cards can set it false to keep both resident.
     try {
       await fetch(`${COMFY_BASE}/free`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -376,8 +439,53 @@ async function runTrellis(session) {
     set('target_face_num', session.params.target_face_num);
     set('output_prefix', prefix);
 
-    const promptId = await comfyQueue(wf);
-    const outputs  = await comfyPoll(promptId, 1800000); // 30 min — first mesh run may download several GB of Trellis models before generating
+    // ── OOM self-rescue ────────────────────────────────────────────────────────
+    // The memory peak of the mesh step is the dual-contouring GRID, and it grows with the
+    // cube of its resolution: halving it cuts the peak ~8x. A card that cannot hold DC 1024
+    // can almost always hold 512. Since a CUDA OOM is now reported cleanly (err.oom), we no
+    // longer have to die on it — we retry one rung lower instead of losing the job (or, on a
+    // shoot, the take). The mesh comes out coarser; that is stated, not hidden.
+    // Only the in-memory workflow is changed — the file on disk is never touched.
+    const dcNode = Object.keys(wf).find(id => wf[id] && wf[id].inputs &&
+                                              wf[id].inputs.dual_contouring_resolution !== undefined);
+    const dcNow  = dcNode ? parseInt(wf[dcNode].inputs.dual_contouring_resolution, 10) : NaN;
+    // ONE retry, not a staircase. Measured 12.07.: the case that recovers (2048 -> 1024) needs
+    // exactly one rung; the case that cannot be saved (oak-d: OOM at 512, 256 AND 128 — its memory
+    // peak is NOT the DC grid) just OOMs on every rung. A 3-rung ladder turned a 5-minute failure
+    // into a 14-minute one — on a shoot that is worse than failing fast. Rungs are configurable.
+    const rungs  = Math.max(1, (_vram.oomRetryRungs != null ? _vram.oomRetryRungs : 2));
+    const ladder = Number.isFinite(dcNow)
+      ? [...new Set(Array.from({ length: rungs }, (_, k) => Math.floor(dcNow / Math.pow(2, k))))].filter(v => v >= 128)
+      : [null];   // no DC knob in this workflow ⇒ single attempt, no retry
+
+    let outputs = null;
+    for (let i = 0; i < ladder.length; i++) {
+      if (dcNode && ladder[i] != null) wf[dcNode].inputs.dual_contouring_resolution = String(ladder[i]);
+      try {
+        const promptId = await comfyQueue(wf);
+        outputs = await comfyPoll(promptId, 1800000); // 30 min — a first mesh run may pull GBs of Trellis models
+        if (i > 0) {
+          process.stdout.write(`\n  ✓ recovered at dual_contouring_resolution ${ladder[i]} (mesh is coarser than at ${ladder[0]})\n`);
+          dbg.event('mesh', { phase: 'oom-recovered', dc: ladder[i], startedAt: ladder[0] });
+        }
+        break;
+      } catch (e) {
+        const last = (i === ladder.length - 1);
+        if (!e.oom || last) {
+          if (e.oom) dbg.event('mesh', { phase: 'oom-exhausted', tried: ladder.slice(0, i + 1) });
+          throw e;
+        }
+        // Newline first: withProgress is mid-`\r` ticker, otherwise the message gets eaten.
+        process.stdout.write(`\n  ⚠ CUDA OOM at dual_contouring_resolution ${ladder[i]} — retrying at ${ladder[i + 1]}\n`);
+        dbg.event('mesh', { phase: 'oom-retry', from: ladder[i], to: ladder[i + 1], node: e.node });
+        try {   // hand the card back before the next attempt, or it OOMs again on the same leftovers
+          await fetch(`${COMFY_BASE}/free`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ unload_models: true, free_memory: true }),
+          });
+        } catch { /* best effort */ }
+      }
+    }
 
     // ExportMesh returns glb_path as STRING output
     let glbPath = null;
