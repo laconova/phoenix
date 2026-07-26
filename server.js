@@ -9,6 +9,9 @@ const dbg       = require('./debug-log.js');
 const lock      = require('./lock');
 const palette   = require('./palette');
 const workflows = require('./workflows');
+const animLib   = require('./animate_human');
+const customRig = require('./custom_rig');
+const characters = require('./characters');
 
 // ─── Working dir (used for /file security checks) ─────────────────────────────
 
@@ -36,6 +39,11 @@ function broadcast(obj) {
     }
   }
 }
+
+// In-flight guard for the one action that deliberately does NOT take the Blender lock while it
+// works (hy_motion — see the /action route). Module-level because the route is re-entered per
+// request; a single boolean is enough, since exactly one action defers.
+let deferredInFlight = false;
 
 // ─── Pipeline artifact parser (Phase 2b) ──────────────────────────────────────
 // Pure, exported-for-test function. Maintains module-level state between calls
@@ -189,6 +197,8 @@ function extToMime(ext) {
     case '.png':  return 'image/png';
     case '.jpg':
     case '.jpeg': return 'image/jpeg';
+    case '.mp4':  return 'video/mp4';
+    case '.webp': return 'image/webp';
     default:      return 'application/octet-stream';
   }
 }
@@ -416,7 +426,21 @@ async function handler(req, res) {
       try {
         broadcast({ kind: 'user', text: message });
 
-        const { text, messages } = await a.runTurn(message, history, state, cfg, { blenderOnly: !!(body && body.noTool), background: true });
+        // holdsLock: this route took the lock above and holds it for the whole turn. Tools that
+        // would otherwise acquire it themselves (hy_motion) must not, or they deadlock against us.
+        // onArtifact: the chat path's route to the artifact tabs. inspect_render and the
+        // render-vision gate produce a picture mid-turn; without this hook the render was
+        // taken and judged but never shown (the /action route had it, the chat path did not).
+        const { text, messages } = await a.runTurn(message, history, state, cfg, {
+          blenderOnly: !!(body && body.noTool), background: true, holdsLock: true,
+          onArtifact: (art) => {
+            try {
+              if (!art || !art.rel) return;
+              broadcast({ kind: 'artifact', slot: art.slot || 'image',
+                url: '/file?p=' + encodeURIComponent(art.rel) + '&t=' + Date.now() });
+            } catch (_) { /* a broadcast must never break the turn */ }
+          },
+        });
 
         // Mirror CLI post-turn persistence exactly
         history.push({ role: 'user', content: message });
@@ -449,15 +473,33 @@ async function handler(req, res) {
 
     const { action, input } = body || {};
 
-    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material'];
+    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'save_mesh', 'hy_motion',
+      'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render'];
     if (!ALLOWED.includes(action)) {
       sendJSON(res, 400, { error: 'unknown action' });
       return;
     }
 
-    if (!lock.tryAcquire()) {
+    // hy_motion spends most of its ~4 minutes generating in ComfyUI and does not touch
+    // Blender until it applies the result. Holding the lock for all of it would freeze
+    // Phoenix for the whole wait, so this action takes the lock late, itself, and only
+    // for the Blender part (see toolHyMotion in assistant.js).
+    const defersLock = action === 'hy_motion';
+    if (!defersLock && !lock.tryAcquire()) {
       sendJSON(res, 409, { error: 'busy' });
       return;
+    }
+    // ...but "does not hold the lock" must not mean "may run twice". Because it takes no lock
+    // and does not go through the single-slot job registry, nothing else stops a second click
+    // during the four-minute wait from starting a second GPU generation. The UI used to prevent
+    // that only by accident, by greying itself out — and that accident disappeared the moment the
+    // UI stopped lying about staying usable. So the guard lives here, where it belongs.
+    if (defersLock) {
+      if (deferredInFlight) {
+        sendJSON(res, 409, { error: 'a text→motion generation is already running — it takes about four minutes' });
+        return;
+      }
+      deferredInFlight = true;
     }
 
     cfg = a.loadConfig();
@@ -468,16 +510,155 @@ async function handler(req, res) {
         const inp = (input && typeof input === 'object') ? input : {};
         if (action === 'generate_image' && !inp.description) inp.description = state.lastImageDesc;
         broadcast({ kind: 'user', text: '⏷ ' + action });
+        const t0 = Date.now();
         const result = await a.TOOLS[action](inp, state, cfg, { background: true });
         a.saveState(state);
-        broadcast({ kind: 'reply', text: typeof result === 'string' ? result : JSON.stringify(result) });
+        // make_human renders a face preview to output/human-preview.png — surface it in the Human tab
+        // (only if it was (re)written by THIS call, so a stale file from a failed render isn't shown).
+        if (action === 'make_human') {
+          try {
+            const previewAbs = path.join(workingDir, 'output', 'human-preview.png');
+            const st = fs.statSync(previewAbs);
+            if (st.mtimeMs >= t0 - 1000) {
+              broadcast({ kind: 'artifact', slot: 'human', url: '/file?p=' + encodeURIComponent('output/human-preview.png') + '&t=' + Date.now() });
+            }
+          } catch (_) { /* no preview file — skip */ }
+        }
+        // inspect_render renders the current scene to output/render-check.png — surface it in the Image tab
+        // (only if (re)written by THIS call, so a stale render isn't shown).
+        if (action === 'inspect_render') {
+          try {
+            const rcAbs = path.join(workingDir, 'output', 'render-check.png');
+            const st = fs.statSync(rcAbs);
+            if (st.mtimeMs >= t0 - 1000) {
+              broadcast({ kind: 'artifact', slot: 'image', url: '/file?p=' + encodeURIComponent('output/render-check.png') + '&t=' + Date.now() });
+            }
+          } catch (_) { /* no render file — skip */ }
+        }
+        // The action name travels with the reply so the UI can react to WHAT finished instead of
+        // sniffing the reply text. Text sniffing misfires on chat turns that happen to echo the
+        // same wording, and it silently rots the moment a message is reworded.
+        broadcast({ kind: 'reply', action, text: typeof result === 'string' ? result : JSON.stringify(result) });
       } catch (err) {
-        broadcast({ kind: 'error', message: String(err.message || err) });
+        broadcast({ kind: 'error', action, message: String(err.message || err) });
       } finally {
-        lock.release();
+        if (!defersLock) lock.release();
+        else deferredInFlight = false;
       }
     })();
 
+    return;
+  }
+
+  // ── GET /animations ────────────────────────────────────────────────────────
+  // List the FBX animation files available for animate_human (Human tab dropdown).
+  if (method === 'GET' && urlPath === '/animations') {
+    sendJSON(res, 200, { animations: animLib.listAnimations() });
+    return;
+  }
+
+  // ── GET /custom-rigs ───────────────────────────────────────────────────────
+  // List the custom-rig folders + their state (skeleton assigned? variants? clips?).
+  if (method === 'GET' && urlPath === '/custom-rigs') {
+    sendJSON(res, 200, { folders: customRig.listFolders() });
+    return;
+  }
+
+  // ── POST /custom-rig-create  {name} ────────────────────────────────────────
+  // Create a new (locked, skeleton-less) folder. Pure filesystem — no Blender, no lock.
+  if (method === 'POST' && urlPath === '/custom-rig-create') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = customRig.createFolder(body && body.name);
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, { ok: true, folder: r.folder, folders: customRig.listFolders() });
+    return;
+  }
+
+  // ── POST /custom-rig-rename  {from, to} ────────────────────────────────────
+  if (method === 'POST' && urlPath === '/custom-rig-rename') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = customRig.renameFolder(body && body.from, body && body.to);
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, { ok: true, folder: r.folder, folders: customRig.listFolders() });
+    return;
+  }
+
+  // ── POST /custom-rig-delete  {name} ────────────────────────────────────────
+  if (method === 'POST' && urlPath === '/custom-rig-delete') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = customRig.deleteFolder(body && body.name);
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, { ok: true, folders: customRig.listFolders() });
+    return;
+  }
+
+  // ── GET /characters ────────────────────────────────────────────────────────
+  // List the saved (Mixamo-rigged) characters for the Human tab's Character dropdown.
+  // They share the animations/ library — there is nothing per-character to list here.
+  if (method === 'GET' && urlPath === '/characters') {
+    sendJSON(res, 200, { characters: characters.listCharacters() });
+    return;
+  }
+
+  // ── POST /character-rename  {from, to} ─────────────────────────────────────
+  // Pure filesystem (rename the .blend + sidecar) — no Blender, no lock, like the
+  // custom-rig folder routes.
+  if (method === 'POST' && urlPath === '/character-rename') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = characters.renameCharacter(body && body.from, body && body.to);
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, { ok: true, character: r.character, characters: characters.listCharacters() });
+    return;
+  }
+
+  // ── POST /character-delete  {name} ─────────────────────────────────────────
+  if (method === 'POST' && urlPath === '/character-delete') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = characters.deleteCharacter(body && body.name);
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, { ok: true, characters: characters.listCharacters() });
+    return;
+  }
+
+  // ── POST /upload-animation?name=foo.fbx ────────────────────────────────────
+  // Drop a Mixamo FBX into the animations/ folder from the Human tab.
+  if (method === 'POST' && urlPath === '/upload-animation') {
+    const name = parsedUrl.searchParams.get('name');
+    if (!name) {
+      sendJSON(res, 400, { error: 'name query param required' });
+      return;
+    }
+    const safe = path.basename(name).replace(/[^a-zA-Z0-9._ -]/g, '_');
+    if (path.extname(safe).toLowerCase() !== '.fbx') {
+      sendJSON(res, 400, { error: 'only .fbx files' });
+      return;
+    }
+    try {
+      const buf = await readRawBody(req);
+      if (buf.length === 0) {
+        sendJSON(res, 400, { error: 'empty upload' });
+        return;
+      }
+      if (buf.length > 100 * 1024 * 1024) {
+        sendJSON(res, 413, { error: 'file too large (max 100MB)' });
+        return;
+      }
+      const dir = animLib.ensureAnimDir();
+      fs.writeFileSync(path.join(dir, safe), buf);
+      // An upload replacing a previously generated clip must not inherit its HY sidecar: that
+      // marker tells animate_human to "fix" HY conventions, which on a normal Mixamo FBX means
+      // laying the character on its back and dividing the hip translation by 100.
+      try { fs.unlinkSync(path.join(dir, safe + '.hy.json')); } catch (_) { /* none — fine */ }
+      broadcast({ kind: 'reply', text: 'Added animation: ' + safe + ' — pick it in the Human tab and press Animate.' });
+      sendJSON(res, 200, { ok: true, name: safe, animations: animLib.listAnimations() });
+    } catch (e) {
+      sendJSON(res, 500, { error: String(e.message || e) });
+    }
     return;
   }
 
@@ -556,7 +737,12 @@ async function handler(req, res) {
     let assets = [];
     try {
       const labels = (a.loadLibraryLabels && a.loadLibraryLabels().assets) || {};
-      assets = a.listStagedFiles().map(({ name, category }) => ({ name, category, label: labels[category + '/' + name] || null }));
+      // Sort by the DISPLAYED text (label falls back to filename) — sorting by filename
+      // alone leaves renamed assets looking unsorted in the library.
+      // orphaned reicht bis in die UI durch: sonst sieht der Operator eine Datei in einer
+      // Kategorie, die es in der Palette gar nicht mehr gibt, ohne Hinweis warum.
+      assets = a.listStagedFiles().map(({ name, category, orphaned }) => ({ name, category, orphaned: !!orphaned, label: labels[category + '/' + name] || null }))
+        .sort((x, y) => (x.label || x.name).localeCompare(y.label || y.name, undefined, { numeric: true, sensitivity: 'base' }));
     } catch (_) {}
     sendJSON(res, 200, { assets });
     return;
@@ -606,7 +792,11 @@ async function handler(req, res) {
       '=== Debug log tail (last ~40 lines) ===',
       logTail,
     ].join('\n');
-    sendJSON(res, 200, { report });
+    // Tell the dialog whether direct sending is even possible, so it can hide a button that
+    // could only ever fail. Without an endpoint configured, "Copy bug report" is the whole feature.
+    let canSend = false;
+    try { canSend = !!(a.loadConfig().feedback || {}).endpointUrl; } catch (_) {}
+    sendJSON(res, 200, { report, canSend });
     return;
   }
 
@@ -685,9 +875,18 @@ async function handler(req, res) {
       pChild.on('close', () => { clearTimeout(pTimer); pFinish(); });
     });
 
+    // The Blender bridge has ONE command slot. While an operation is running (a human build, a
+    // bake), the addon is busy and preflight's probe cannot be answered inside its timeout — it
+    // then prints "Blender IPC — NOT REACHABLE", which is false AND becomes the premise the
+    // troubleshooter reasons from. Say what was actually going on rather than let it guess.
+    const busyNote = lock.isHeld()
+      ? '\n[NOTE] A Blender operation was in progress during this check — a failing Blender IPC line ' +
+        'above is expected in that situation and does NOT mean Blender is unreachable.'
+      : '';
+
     try {
       cfg = a.loadConfig();
-      const result = await a.runTroubleshootTurn(messages, cfg, preflightOutput);
+      const result = await a.runTroubleshootTurn(messages, cfg, preflightOutput + busyNote);
       sendJSON(res, 200, { text: result.text, messages: result.messages });
     } catch (err) {
       sendJSON(res, 500, { error: String(err.message || err) });
@@ -751,6 +950,16 @@ async function handler(req, res) {
     if (hasGates) {
       for (const k of ['prompt', 'image', 'mesh']) {
         if (k in body.gates) staged.gates[k] = !!body.gates[k];
+      }
+      // vision is a MODE, not a checkbox — off | focused | full. Validated here so a
+      // typo can't silently land in the config and get read back as the default.
+      if ('vision' in body.gates) {
+        const v = String(body.gates.vision);
+        if (!['off', 'focused', 'full'].includes(v)) {
+          sendJSON(res, 400, { error: 'Render vision must be off, focused or full.', field: 'vision' });
+          return;
+        }
+        staged.gates.vision = v;
       }
     }
 
@@ -925,6 +1134,29 @@ async function handler(req, res) {
       }
     }
 
+    // Refuse to delete a category that still has staged GLBs. listStagedFiles() walks the
+    // PALETTE's categories, not the staging folder — so dropping a category does not delete
+    // its files, it makes them invisible: gone from list_assets, from read_state and from the
+    // import flow, while still sitting on disk. Same stance as the brush-name collision: refuse
+    // and say what to do, rather than silently taking something away.
+    const stagingBase = path.join(workingDir, 'staging');
+    const removed = Object.keys(palette.loadPalette().categories).filter(k => !(k in body.categories));
+    for (const key of removed) {
+      let glbs = [];
+      try {
+        glbs = fs.readdirSync(path.join(stagingBase, key)).filter(f => f.toLowerCase().endsWith('.glb'));
+      } catch (_) { /* no folder = nothing staged = safe to remove */ }
+      if (glbs.length) {
+        sendJSON(res, 400, {
+          error: 'Category "' + key + '" still holds ' + glbs.length + ' staged file(s) (' +
+                 glbs.slice(0, 3).join(', ') + (glbs.length > 3 ? ', …' : '') + '). Deleting it would hide them ' +
+                 'from the asset list while leaving them on disk in staging/' + key + '. Import or delete them first.',
+          field: key,
+        });
+        return;
+      }
+    }
+
     // Validate each entry
     for (const [key, cat] of Object.entries(body.categories)) {
       const result = palette.validateCategory(key, cat);
@@ -1062,7 +1294,14 @@ async function handler(req, res) {
       return;
     }
 
-    if (!require('fs').existsSync(entry.file)) {
+    // resolveWorkflowFile, not a bare existsSync: entry.file is the absolute path recorded when
+    // the workflow was registered, and it goes stale the moment the tree moves or a registry is
+    // restored elsewhere. The resolver falls back to this install's own workflows/ — without it,
+    // reading and editing such a workflow works while ACTIVATING it fails, which is a confusing
+    // half-broken state (and the exact case entries/phoenix-workflow-stale-path.md documents).
+    try {
+      workflows.resolveWorkflowFile(entry);
+    } catch (_) {
       sendJSON(res, 400, { error: 'workflow file not found: ' + entry.file, field: 'file' });
       return;
     }
@@ -1092,7 +1331,7 @@ async function handler(req, res) {
   // unreachable so the UI can render a graceful "offline" badge.
   if (method === 'GET' && urlPath === '/workflows/deps') {
     const localCfg = a.loadConfig();
-    const base = (localCfg.endpoints && localCfg.endpoints.comfyui) || 'http://localhost:8000';
+    const base = (localCfg.endpoints && localCfg.endpoints.comfyui) || 'http://localhost:8188';
     let info;
     try {
       const r = await fetch(base + '/object_info', { signal: AbortSignal.timeout(8000) });

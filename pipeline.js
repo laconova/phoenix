@@ -6,6 +6,7 @@ const fs     = require('fs');
 const dbg    = require('./debug-log');
 const palette = require('./palette');
 const { callBlender } = require('./blender-ipc');
+const { demetalPy } = require('./mesh-import-fix');
 
 // ─── Stage list ───────────────────────────────────────────────────────────────
 
@@ -170,6 +171,9 @@ async function runImportStage(ctx) {
 
   // Resolve relative name to staging path
   if (assetPath && !path.isAbsolute(assetPath)) {
+    // Reject path traversal in the caller-supplied name — the legit forms are "file.glb" and
+    // "cat/file.glb"; a "../.." must not let an import escape the staging tree.
+    if (assetPath.includes('..')) return { ok: false, stage: 'import', error: `invalid asset name: ${assetPath}` };
     const categories = Object.keys(palette.loadPalette().categories);
     let found = null;
     for (const cat of categories) {
@@ -192,8 +196,14 @@ async function runImportStage(ctx) {
 
   let code;
   if (!cleanup) {
-    // RAW import — default; no shading applied
-    code = `import bpy\nbpy.ops.import_scene.gltf(filepath=${JSON.stringify(fwd)})\nprint("IMPORT_OK:" + ${JSON.stringify(basename)})`;
+    // RAW import — default; no shading applied (aber entmetallisiert: siehe mesh-import-fix.js)
+    code = [
+      'import bpy',
+      `bpy.ops.import_scene.gltf(filepath=${JSON.stringify(fwd)})`,
+      'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
+      ...demetalPy('imported'),
+      `print("IMPORT_OK:" + ${JSON.stringify(basename)})`,
+    ].join('\n');
   } else {
     // CLEANED import — mirrors blenderCleanup logic in phoenix.js
     code = [
@@ -211,12 +221,23 @@ async function runImportStage(ctx) {
       '            bpy.ops.object.shade_smooth_by_angle(angle=0.523599)',
       '        except Exception:',
       '            bpy.ops.object.shade_smooth()',
+      ...demetalPy('imported'),
       `print("IMPORT_OK:" + ${JSON.stringify(basename)})`,
     ].join('\n');
   }
 
   try {
     const result = await callBlender(code);
+    // callBlender RESOLVES with {status:'error'} on a Python failure (it only REJECTS on a transport
+    // timeout, caught below) — so a corrupt/unimportable GLB or an importer exception would otherwise
+    // be reported as a successful import and poison the scene cache. Require the IMPORT_OK marker,
+    // which both import branches print as their LAST statement (only after the import actually ran).
+    const out = String((result && (result.stdout || result.output)) || '');
+    if (!result || result.status === 'error' || !out.includes('IMPORT_OK:')) {
+      const tb = (out.match(/Traceback[\s\S]*/) || [''])[0].trim().slice(0, 400);
+      const msg = (result && result.message) || '';
+      return { ok: false, stage: 'import', error: 'import failed in Blender' + (tb ? ': ' + tb : (msg ? ': ' + msg : '')) };
+    }
     const name = path.basename(assetPath, '.glb');
     // Update scene cache (mirrors assistant.js toolImportAsset L312–317; keep pipeline.js self-contained)
     try {

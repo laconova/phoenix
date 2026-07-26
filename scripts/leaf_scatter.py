@@ -1,39 +1,39 @@
-# leaf_scatter.py — Blätter als Instanzen auf Baumkronen streuen (Blender 5.x)
+# leaf_scatter.py — scatter leaves as instances over tree canopies (Blender 5.x)
 #
-# WARUM ES DAS GIBT (Befunde der Nacht 11./12.07.2026):
-#   Trellis liefert ~27k Polys für einen GANZEN Baum. Auf Szenengröße skaliert ist jedes
-#   "Blatt" im Mesh eine Facette von ~0,5–1 m -> im Gegenlicht Bruchglas. Kein Prompt
-#   repariert das: es ist Polygon-Budget ÷ Baumgröße.
-#   Trellis kann aber KOMPAKTE, MASSIVE Körper hervorragend (Reh, Steine, Stämme —
-#   und EINZELNE BLÄTTER). Also: Blatt einzeln generieren, dezimieren, und per
-#   Geometry Nodes tausendfach auf die Krone instanzieren. Damit wird die Blattgröße
-#   zu einem REGLER statt einer Eigenschaft des Meshes.
+# WHY THIS EXISTS
+#   An image-to-3D mesher gives you roughly 27k polygons for a WHOLE tree. Scaled to scene
+#   size, every "leaf" in that mesh is a facet 0.5-1 m across — backlit, it reads as broken
+#   glass. No prompt fixes that: it is polygon budget divided by tree size.
+#   What the mesher IS good at is compact, solid bodies — animals, rocks, trunks, and SINGLE
+#   LEAVES. So: generate one leaf, decimate it, and instance it thousands of times over the
+#   canopy with Geometry Nodes. Leaf size becomes a DIAL instead of a property baked into
+#   the mesh.
 #
-# WAS DAS SKRIPT FÜR DICH ERLEDIGT (zwei Fallen, in die wir reingelaufen sind):
-#   1) Blattgröße wird in WELT-Einheiten angegeben. Die Instanz-Skala in Geometry Nodes
-#      liegt im OBJEKTRAUM und wird von der Objekt-Skalierung des Baums (oft ~26x!)
-#      multipliziert. Das Skript rechnet das selbst um.
-#   2) INSTANZ-WÄCHTER: die Instanzzahl wird VORHER exakt aus der Emitter-Fläche
-#      bestimmt. Über Budget -> Abbruch mit Meldung, statt Blender per OOM zu killen.
-#      (Genau so ist Blender am 12.07. gestorben: Dichte 55000 x 15 Bäume.)
+# WHAT THIS SCRIPT HANDLES FOR YOU (two traps that cost real time)
+#   1) Leaf size is given in WORLD units. The instance scale inside Geometry Nodes lives in
+#      OBJECT space and gets multiplied by the tree's own object scale, which after an import
+#      is often ~26x. The script converts for you.
+#   2) INSTANCE GUARD: the instance count is computed exactly, from the emitter area, BEFORE
+#      anything is applied. Over budget means it stops and tells you, instead of letting
+#      Blender die of OOM. (That failure is why the guard exists: density 55000 x 15 trees.)
 #
-# BENUTZUNG (in Blender, z.B. über die Phoenix-IPC):
+# USAGE (inside Blender — e.g. through the Phoenix IPC bridge):
 #
-#   import sys; sys.path.append(r"D:\phoenix\scripts")
+#   import sys; sys.path.append(r"<path to this repo>/scripts")
 #   import leaf_scatter, importlib; importlib.reload(leaf_scatter)
 #
-#   # 1) Blatt vorbereiten (GLB importieren + auf instanz-taugliche Polyzahl dezimieren)
-#   leaf = leaf_scatter.prepare_leaf(r"D:\phoenix\staging\leaf\phoenix_oak_leaf_XXXX.glb",
+#   # 1) prepare the leaf (import the GLB, decimate to an instance-friendly poly count)
+#   leaf = leaf_scatter.prepare_leaf(r"<repo>/staging/leaf/my_oak_leaf.glb",
 #                                    target_polys=400, name="LEAF_oak")
 #
-#   # 2) Trockenlauf: rechnet nur, ändert NICHTS
-#   leaf_scatter.scatter(["TREE_D1_oak"], leaf, leaf_size=0.30, dry_run=True)
+#   # 2) dry run: computes only, changes NOTHING
+#   leaf_scatter.scatter(["TREE_oak"], leaf, leaf_size=0.30, dry_run=True)
 #
-#   # 3) Wenn die Zahlen passen: anwenden
-#   leaf_scatter.scatter(["TREE_D1_oak"], leaf, leaf_size=0.30)
+#   # 3) numbers look right? apply
+#   leaf_scatter.scatter(["TREE_oak"], leaf, leaf_size=0.30)
 #
-#   # wieder entfernen
-#   leaf_scatter.clear(["TREE_D1_oak"])
+#   # remove again
+#   leaf_scatter.clear(["TREE_oak"])
 
 import bpy
 import bmesh
@@ -41,21 +41,21 @@ import math
 from mathutils import Vector, Matrix
 
 # ─── Budget ──────────────────────────────────────────────────────────────────
-# Erfahrungswert 16-GB-Laptop: darüber wird EEVEE beim Rendern instabil.
+# Measured on a 16 GB laptop: beyond this EEVEE turns unstable while rendering.
 MAX_TOTAL_INSTANCES = 600_000
 MAX_TOTAL_TRIS      = 200_000_000
 
-NODE_GROUP = "LeafScatter"   # Praefix; die echte Gruppe heisst LeafScatter_<quelle>
+NODE_GROUP = "LeafScatter"   # prefix; the actual group is named LeafScatter_<source>
 
 
 def _group_name(leaf):
     return "%s_%s" % (NODE_GROUP, leaf.name)
 
 
-# ─── Blatt vorbereiten ───────────────────────────────────────────────────────
+# ─── Preparing the leaf ──────────────────────────────────────────────────────
 def prepare_leaf(glb_path, target_polys=400, name="LEAF"):
-    """GLB importieren, Import-Empties wegwerfen, auf target_polys dezimieren.
-    Gibt das fertige Blatt-Objekt zurück (liegt in der Collection 'LeafLib')."""
+    """Import a GLB, drop the import empties, decimate to target_polys.
+    Returns the finished leaf object (it lives in the 'LeafLib' collection)."""
     coll = bpy.data.collections.get("LeafLib")
     if coll is None:
         coll = bpy.data.collections.new("LeafLib")
@@ -66,7 +66,7 @@ def prepare_leaf(glb_path, target_polys=400, name="LEAF"):
     added = [o for o in bpy.data.objects if o not in before]
     meshes = [o for o in added if o.type == 'MESH']
     if not meshes:
-        raise RuntimeError("Kein Mesh im GLB: " + glb_path)
+        raise RuntimeError("no mesh in the GLB: " + glb_path)
 
     ob = meshes[0]
     ob.parent = None
@@ -85,20 +85,20 @@ def prepare_leaf(glb_path, target_polys=400, name="LEAF"):
         bpy.context.view_layer.objects.active = ob
         bpy.ops.object.modifier_apply(modifier="dec")
 
-    # aus dem Weg und unsichtbar im Render — die Instanzen rendern trotzdem
+    # Park it out of the way and out of the render — the instances still render.
     ob.matrix_world = Matrix.Translation(Vector((0.0, 0.0, -500.0)))
     ob.hide_render = True
 
     d = ob.dimensions
-    print("[leaf] %s: %d -> %d Polys | Eigenmass %.3f x %.3f x %.3f"
+    print("[leaf] %s: %d -> %d polys | own size %.3f x %.3f x %.3f"
           % (name, n, len(ob.data.polygons), d.x, d.y, d.z))
     return ob
 
 
-# ─── Messen (der Wächter) ────────────────────────────────────────────────────
+# ─── Measuring (the guard) ───────────────────────────────────────────────────
 def _canopy_area_objspace(tree, canopy_frac):
-    """Oberflaeche der Krone IM OBJEKTRAUM (das ist die Groesse, mit der
-    DistributePointsOnFaces rechnet) + Kronenhoehe in Weltmass."""
+    """Canopy surface area in OBJECT space (that is the size
+    DistributePointsOnFaces works with) plus the canopy cut height."""
     me = tree.data
     zs = [v.co.z for v in me.vertices]
     lo, hi = min(zs), max(zs)
@@ -120,7 +120,7 @@ def _obj_scale(tree):
 
 
 def _leaf_polys(leaf):
-    """Polyzahl der Instanz-Quelle — funktioniert fuer ein Objekt UND fuer ein Blatt-Set."""
+    """Poly count of the instance source — works for a single object AND for a leaf set."""
     if isinstance(leaf, bpy.types.Collection):
         objs = [o for o in leaf.objects if o.type == 'MESH']
         if not objs:
@@ -134,14 +134,14 @@ def _leaf_name(leaf):
 
 
 def plan(tree_names, leaf, leaf_size=0.30, per_tree=None, density=None, canopy_frac=0.28):
-    """Rechnet durch, ohne etwas zu aendern. Gibt (rows, total_inst, total_tris) zurueck."""
+    """Compute without changing anything. Returns (rows, total_inst, total_tris)."""
     leaf_polys = _leaf_polys(leaf)
     rows = []
     total_inst = 0
     for name in tree_names:
         t = bpy.data.objects.get(name)
         if not t or t.type != 'MESH':
-            rows.append((name, 0, 0, 0.0, 0.0, "FEHLT"))
+            rows.append((name, 0, 0, 0.0, 0.0, "MISSING"))
             continue
         area, _ = _canopy_area_objspace(t, canopy_frac)
         sc = _obj_scale(t)
@@ -151,30 +151,30 @@ def plan(tree_names, leaf, leaf_size=0.30, per_tree=None, density=None, canopy_f
         else:
             dens = density if density else 9000.0
             inst = int(dens * area)
-        obj_leaf = leaf_size / max(sc, 1e-9)     # Welt -> Objektraum
+        obj_leaf = leaf_size / max(sc, 1e-9)     # world -> object space
         total_inst += inst
         rows.append((name, inst, int(dens), sc, obj_leaf, "ok"))
     return rows, total_inst, total_inst * leaf_polys
 
 
 def _report(rows, total_inst, total_tris, leaf):
-    print("%-18s %10s %9s %8s %10s" % ("baum", "instanzen", "dichte", "objskala", "blatt_obj"))
+    print("%-18s %10s %9s %8s %10s" % ("tree", "instances", "density", "objscale", "leaf_obj"))
     for name, inst, dens, sc, obj_leaf, st in rows:
         if st != "ok":
             print("%-18s  %s" % (name, st))
             continue
         print("%-18s %10d %9d %8.1f %10.4f" % (name, inst, dens, sc, obj_leaf))
     print("-" * 62)
-    print("GESAMT: %d Instanzen x %d Polys = %.1f Mio Dreiecke"
+    print("TOTAL: %d instances x %d polys = %.1f M triangles"
           % (total_inst, _leaf_polys(leaf), total_tris / 1e6))
-    print("Budget: %d Instanzen / %.0f Mio Dreiecke"
+    print("Budget: %d instances / %.0f M triangles"
           % (MAX_TOTAL_INSTANCES, MAX_TOTAL_TRIS / 1e6))
 
 
-# ─── Node-Group ──────────────────────────────────────────────────────────────
+# ─── Node group ──────────────────────────────────────────────────────────────
 def make_leaf_set(glb_paths, name, target_polys=400):
-    """Mehrere Blätter in EINE Collection -> gemischte Krone (nicht 1000x dasselbe Blatt).
-    Gibt die Collection zurück; an scatter(leaf=...) übergeben."""
+    """Several leaves in ONE collection -> a mixed canopy (not the same leaf 1000 times).
+    Returns the collection; pass it to scatter(leaf=...)."""
     cname = "LeafSet_" + name
     c = bpy.data.collections.get(cname)
     if c:
@@ -182,18 +182,18 @@ def make_leaf_set(glb_paths, name, target_polys=400):
             bpy.data.objects.remove(o, do_unlink=True)
         bpy.data.collections.remove(c)
     c = bpy.data.collections.new(cname)
-    # NICHT in die Szene linken — die Collection dient nur als Instanz-Quelle
+    # Deliberately NOT linked into the scene — the collection is only an instance source.
     for i, p in enumerate(glb_paths):
         ob = prepare_leaf(p, target_polys=target_polys, name="%s_leaf%d" % (name, i))
-        # ⚠️ WICHTIG: CollectionInfo uebernimmt die Objekt-Transformation IN JEDE INSTANZ.
-        # prepare_leaf parkt das Blatt bei z=-500 -> jede Instanz bekaeme diesen Versatz mit
-        # (bei ObjectInfo passiert das NICHT, deshalb faellt es beim Einzelblatt nicht auf).
-        # Set-Blaetter muessen also auf dem URSPRUNG stehen.
+        # WARNING: CollectionInfo carries the source object's transform INTO EVERY INSTANCE.
+        # prepare_leaf parks the leaf at z=-500, so every instance would inherit that offset
+        # (ObjectInfo does NOT do this, which is why a single leaf never shows the problem).
+        # Leaves in a set therefore have to sit at the origin.
         ob.matrix_world = Matrix.Identity(4)
         for cc in list(ob.users_collection):
             cc.objects.unlink(ob)
         c.objects.link(ob)
-    print("[leaf] Blatt-Set '%s': %d Sorten" % (cname, len(c.objects)))
+    print("[leaf] leaf set '%s': %d varieties" % (cname, len(c.objects)))
     return c
 
 
@@ -210,8 +210,8 @@ def _build_group(leaf, canopy_frac, obj_leaf_min, obj_leaf_max, density, seed):
     n_in  = nd.new("NodeGroupInput");  n_in.location  = (-1200, 0)
     n_out = nd.new("NodeGroupOutput"); n_out.location = (800, 0)
 
-    # Kronen-Schwelle PRO OBJEKT relativ (nicht fest verdrahten — sonst greift sie
-    # nur bei genau einem Baum; genau dieser Fehler hat uns Stunden gekostet)
+    # The canopy threshold is computed PER OBJECT, relatively. Hard-wiring it makes the group
+    # work for exactly one tree and quietly misbehave on every other one.
     n_bb  = nd.new("GeometryNodeBoundBox");  n_bb.location  = (-1020, -560)
     n_smi = nd.new("ShaderNodeSeparateXYZ"); n_smi.location = (-860, -640)
     n_sma = nd.new("ShaderNodeSeparateXYZ"); n_sma.location = (-860, -780)
@@ -230,12 +230,12 @@ def _build_group(leaf, canopy_frac, obj_leaf_min, obj_leaf_max, density, seed):
     n_dist.inputs[4].default_value = float(density)   # [4] = Density
     n_dist.inputs[6].default_value = int(seed)        # [6] = Seed
 
-    # Instanz-Quelle: EIN Objekt (ObjectInfo) ODER eine Collection (CollectionInfo + Pick Instance)
+    # Instance source: ONE object (ObjectInfo) OR a collection (CollectionInfo + Pick Instance)
     is_set = isinstance(leaf, bpy.types.Collection)
     if is_set:
         n_obj = nd.new("GeometryNodeCollectionInfo"); n_obj.location = (-40, -520)
         n_obj.inputs[0].default_value = leaf
-        n_obj.inputs[1].default_value = True      # Separate Children -> je Blattsorte eine Instanz
+        n_obj.inputs[1].default_value = True      # Separate Children -> one instance per variety
         n_obj.transform_space = 'ORIGINAL'
         n_pick = nd.new("FunctionNodeRandomValue"); n_pick.location = (200, -760)
         n_pick.data_type = 'INT'
@@ -265,7 +265,7 @@ def _build_group(leaf, canopy_frac, obj_leaf_min, obj_leaf_max, density, seed):
     n_del.domain = 'FACE'; n_del.mode = 'ALL'
     n_join = nd.new("GeometryNodeJoinGeometry");    n_join.location = (640, 140)
 
-    # ⚠️ Sockets über INDEX — die Namen weichen in Blender 5.1 ab ('Rotation' ist ein eigener Typ)
+    # Sockets are wired BY INDEX — the names differ in Blender 5.1 ('Rotation' is its own type).
     lk.new(n_in.outputs[0],   n_bb.inputs[0])
     lk.new(n_bb.outputs[1],   n_smi.inputs[0])      # Min
     lk.new(n_bb.outputs[2],   n_sma.inputs[0])      # Max
@@ -274,59 +274,60 @@ def _build_group(leaf, canopy_frac, obj_leaf_min, obj_leaf_max, density, seed):
     lk.new(n_sub.outputs[0],  n_mul.inputs[0])
     lk.new(n_mul.outputs[0],  n_add.inputs[0])
     lk.new(n_smi.outputs[2],  n_add.inputs[1])
-    lk.new(n_add.outputs[0],  n_gt.inputs[1])       # Schwelle
+    lk.new(n_add.outputs[0],  n_gt.inputs[1])       # threshold
 
     lk.new(n_pos.outputs[0],  n_sep.inputs[0])
     lk.new(n_sep.outputs[2],  n_gt.inputs[0])       # z
     lk.new(n_in.outputs[0],   n_dist.inputs[0])
-    lk.new(n_gt.outputs[0],   n_dist.inputs[1])     # Selection = Krone
+    lk.new(n_gt.outputs[0],   n_dist.inputs[1])     # Selection = canopy
     lk.new(n_dist.outputs[0], n_iop.inputs[0])
     if is_set:
         lk.new(n_obj.outputs[0], n_iop.inputs[2])   # CollectionInfo -> Instances
         n_iop.inputs[3].default_value = True        # Pick Instance
-        lk.new(n_pick.outputs[2], n_iop.inputs[4])  # Instance Index (INT random)
+        lk.new(n_pick.outputs[2], n_iop.inputs[4])  # Instance Index (random INT)
     else:
         lk.new(n_obj.outputs[4], n_iop.inputs[2])   # ObjectInfo -> Geometry
     lk.new(n_rot.outputs[0],  n_iop.inputs[5])      # Rotation
     lk.new(n_scl.outputs[1],  n_iop.inputs[6])      # Scale
 
     lk.new(n_in.outputs[0],   n_del.inputs[0])
-    lk.new(n_gt.outputs[0],   n_del.inputs[1])      # Kronenflaechen weg, Stamm bleibt
+    lk.new(n_gt.outputs[0],   n_del.inputs[1])      # canopy faces go, the trunk stays
     lk.new(n_del.outputs[0],  n_join.inputs[0])
     lk.new(n_iop.outputs[0],  n_join.inputs[0])
     lk.new(n_join.outputs[0], n_out.inputs[0])
     return ng
 
 
-# ─── Anwenden ────────────────────────────────────────────────────────────────
+# ─── Applying ────────────────────────────────────────────────────────────────
 def scatter(tree_names, leaf, leaf_size=0.30, size_var=0.35, per_tree=None,
             density=None, canopy_frac=0.28, seed=3, dry_run=False, force=False):
-    """leaf_size = Blattgröße in WELT-Einheiten (z.B. 0.30 ≈ 30 cm bei 1 Einheit = 1 m).
-    Entweder per_tree (Zielzahl Instanzen je Baum) ODER density angeben.
-    dry_run=True rechnet nur. force=True überschreibt den Wächter (auf eigenes Risiko)."""
+    """leaf_size = leaf size in WORLD units (e.g. 0.30 is about 30 cm when 1 unit = 1 m).
+    Give either per_tree (target instance count per tree) OR density.
+    dry_run=True only computes. force=True overrides the guard (at your own risk)."""
     if isinstance(leaf, str):
         leaf = bpy.data.collections.get(leaf) or bpy.data.objects[leaf]
+    _assert_clean_sources(leaf)
     rows, total_inst, total_tris = plan(tree_names, leaf, leaf_size, per_tree, density, canopy_frac)
     _report(rows, total_inst, total_tris, leaf)
 
     over = (total_inst > MAX_TOTAL_INSTANCES) or (total_tris > MAX_TOTAL_TRIS)
     if over and not force:
-        print("\n🛑 ABBRUCH — über Budget. NICHTS wurde geändert.")
-        print("   Gegenmittel: kleinere Zielzahl (per_tree), gröberes Blatt (weniger Polys),")
-        print("   oder feine Blätter NUR auf die Vordergrundbäume und grobe auf den Rest.")
-        print("   (force=True überschreibt — genau so ist Blender am 12.07. gestorben.)")
+        print("\nSTOPPED — over budget. NOTHING was changed.")
+        print("   Remedies: a smaller target count (per_tree), a coarser leaf (fewer polys),")
+        print("   or fine leaves ONLY on the foreground trees and coarse ones on the rest.")
+        print("   (force=True overrides this — that is exactly how Blender got killed once.)")
         return None
     if dry_run:
-        print("\n(Trockenlauf — nichts geändert.)")
+        print("\n(Dry run — nothing changed.)")
         return None
 
     ok = [r for r in rows if r[5] == "ok"]
     if not ok:
-        print("Keine gültigen Bäume.")
+        print("No valid trees.")
         return None
 
-    # Skala/Dichte am ersten Baum ausrichten; bei stark unterschiedlicher Objektskalierung
-    # die Bäume in Gruppen getrennt aufrufen.
+    # Scale and density are aligned to the first tree; if object scales differ a lot,
+    # call this in separate groups of trees.
     obj_leaf = ok[0][4]
     dens = ok[0][2]
     ng = _build_group(leaf, canopy_frac,
@@ -345,13 +346,13 @@ def scatter(tree_names, leaf, leaf_size=0.30, size_var=0.35, per_tree=None,
     bpy.context.view_layer.update()
     dg = bpy.context.evaluated_depsgraph_get()
     real = sum(1 for i in dg.object_instances if i.is_instance)
-    print("\n✅ angewandt auf %d Bäume | Instanzen im Depsgraph: %d (geschätzt: %d)"
+    print("\nApplied to %d trees | instances in the depsgraph: %d (estimated: %d)"
           % (len(ok), real, total_inst))
     return ng
 
 
 def clear(tree_names):
-    """Modifier wieder abnehmen — die Original-Kronen kommen zurück."""
+    """Take the modifiers off again — the original canopies come back."""
     n = 0
     for name in tree_names:
         t = bpy.data.objects.get(name)
@@ -362,26 +363,26 @@ def clear(tree_names):
                 t.modifiers.remove(m)
                 n += 1
     bpy.context.view_layer.update()
-    print("[leaf] %d Modifier entfernt" % n)
+    print("[leaf] %d modifiers removed" % n)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# EMITTER-MODUS (12.07., nach user-Befund „die Blätter wachsen aus der Luft")
+# EMITTER MODE  (added after the finding "the leaves grow out of thin air")
 #
-# PROBLEM des Kronen-Schnitt-Modus oben: `canopy_frac` löscht ALLES oberhalb der
-# Schwelle — also nicht nur die Scherben-Krone, sondern auch das ASTWERK. Übrig
-# bleibt ein Stammstumpf, das Laub schwebt daneben. Ein reiner Höhenschnitt KANN
-# das nicht lösen: auf derselben Höhe sitzen Äste (behalten) und Kronen-Facetten
-# (löschen), er kann sie nicht unterscheiden.
+# THE PROBLEM with the canopy-cut mode above: `canopy_frac` deletes EVERYTHING above the
+# threshold — not only the shard-like canopy but the BRANCHES too. What is left is a trunk
+# stump with foliage hovering beside it. A pure height cut CANNOT solve this: at the same
+# height you find branches (keep) and canopy facets (delete), and it cannot tell them apart.
 #
-# LÖSUNG: Sichtbarer Stamm (mit vollem Astwerk) und Emitter sind ZWEI Objekte.
-#   - Der Stamm bleibt komplett unangetastet.
-#   - Der Modifier sitzt auf dem EMITTER und gibt NUR Instanzen aus — die
-#     Emitter-Geometrie landet nie im Ausgang und verschwindet dadurch von selbst.
-#     Kein Löschen, kein Schnitt, kein Astwerk-Verlust.
+# THE FIX: the visible trunk (with all its branches) and the emitter are TWO objects.
+#   - The trunk is left completely untouched.
+#   - The modifier sits on the EMITTER and outputs ONLY instances — the emitter geometry
+#     never reaches the output and therefore disappears on its own.
+#     No deleting, no cutting, no lost branches.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_emitter_group(leaf, obj_leaf_min, obj_leaf_max, density, seed, canopy_frac=0.0):
-    """Node-Tree fuer den Emitter-Modus: Ausgang = NUR Instanzen."""
+def _build_emitter_group(leaf, obj_leaf_min, obj_leaf_max, density, seed, canopy_frac=0.0,
+                         poisson_dist=0.0, depth=0.0, out_frac=0.15):
+    """Node tree for emitter mode: the output is NOTHING BUT instances."""
     gname = "LeafEmit_" + leaf.name
     ng = bpy.data.node_groups.get(gname)
     if ng:
@@ -395,12 +396,22 @@ def _build_emitter_group(leaf, obj_leaf_min, obj_leaf_max, density, seed, canopy
     n_out = nd.new("NodeGroupOutput"); n_out.location = (600, 0)
 
     n_dist = nd.new("GeometryNodeDistributePointsOnFaces"); n_dist.location = (-450, 0)
-    n_dist.distribute_method = 'RANDOM'
-    n_dist.inputs[4].default_value = float(density)
-    n_dist.inputs[6].default_value = int(seed)
+    # RANDOM clumps: leaves land on top of each other while gaps open up next to them. You then
+    # raise the count to close the gaps and end up with a solid mass. POISSON keeps a minimum
+    # distance instead: even coverage with far fewer leaves.
+    if poisson_dist > 0.0:
+        n_dist.distribute_method = 'POISSON'
+        n_dist.inputs[2].default_value = float(poisson_dist)   # Distance Min (object space)
+        n_dist.inputs[3].default_value = float(density)        # Density Max
+        n_dist.inputs[6].default_value = int(seed)
+    else:
+        n_dist.distribute_method = 'RANDOM'
+        n_dist.inputs[4].default_value = float(density)
+        n_dist.inputs[6].default_value = int(seed)
 
-    # Spender-Baeume haben selbst einen Stamm -> daraus duerfen keine Blaetter wachsen.
-    # Schwelle relativ zur EIGENEN BBox des Emitters (canopy_frac=0 -> ganze Flaeche emittiert).
+    # A donor tree used as an emitter has a trunk of its own, and no leaves should grow from it.
+    # The threshold is relative to the emitter's OWN bounding box (canopy_frac=0 -> the whole
+    # surface emits).
     if canopy_frac > 0.0:
         n_bb  = nd.new("GeometryNodeBoundBox");  n_bb.location  = (-700, -240)
         n_smi = nd.new("ShaderNodeSeparateXYZ"); n_smi.location = (-560, -300)
@@ -458,8 +469,33 @@ def _build_emitter_group(leaf, obj_leaf_min, obj_leaf_max, density, seed, canopy
 
     n_iop = nd.new("GeometryNodeInstanceOnPoints"); n_iop.location = (200, 0)
 
-    lk.new(n_in.outputs[0],   n_dist.inputs[0])
-    lk.new(n_dist.outputs[0], n_iop.inputs[0])
+    lk.new(n_in.outputs[0], n_dist.inputs[0])
+
+    # ─── DEPTH: pull leaves off the emitter SKIN and into its VOLUME ──────────
+    # WHY: DistributePointsOnFaces puts points exactly ON the surface, so the foliage sits on
+    # a shell — you do not see a canopy, you see the emitter's OUTLINE ("monotonous, like
+    # bubbles"). Whatever shape the emitter has shows through, no matter how many leaves you
+    # add. Fix: displace each point randomly along its NORMAL — mostly INWARDS (negative), with
+    # a small share outwards (out_frac) to fray the silhouette. The result is a filled volume
+    # instead of a skin, and the emitter shape stops being visible.
+    if depth > 0.0:
+        n_sp  = nd.new("GeometryNodeSetPosition");    n_sp.location  = (0, 160)
+        n_rd  = nd.new("FunctionNodeRandomValue");    n_rd.location  = (-200, 300)
+        n_rd.data_type = 'FLOAT'
+        n_rd.inputs[2].default_value = -float(depth)                   # inwards
+        n_rd.inputs[3].default_value = float(depth) * float(out_frac)  # a little outwards
+        n_rd.inputs[8].default_value = int(seed) + 7
+        n_vs  = nd.new("ShaderNodeVectorMath");       n_vs.location  = (-40, 300)
+        n_vs.operation = 'SCALE'
+
+        lk.new(n_dist.outputs[1], n_vs.inputs[0])     # the point's normal
+        lk.new(n_rd.outputs[1],   n_vs.inputs[3])     # random amount (FLOAT -> Scale)
+        lk.new(n_dist.outputs[0], n_sp.inputs[0])     # points in
+        lk.new(n_vs.outputs[0],   n_sp.inputs[3])     # offset = normal * amount
+        lk.new(n_sp.outputs[0],   n_iop.inputs[0])    # displaced points -> instances
+    else:
+        lk.new(n_dist.outputs[0], n_iop.inputs[0])
+
     if is_set:
         lk.new(n_src.outputs[0], n_iop.inputs[2])
         n_iop.inputs[3].default_value = True          # Pick Instance
@@ -468,14 +504,14 @@ def _build_emitter_group(leaf, obj_leaf_min, obj_leaf_max, density, seed, canopy
         lk.new(n_src.outputs[4], n_iop.inputs[2])
     lk.new(n_rot.outputs[0], n_iop.inputs[5])
     lk.new(n_scl.outputs[1], n_iop.inputs[6])
-    lk.new(n_iop.outputs[0], n_out.inputs[0])         # NUR Instanzen -> Emitter-Mesh verschwindet
+    lk.new(n_iop.outputs[0], n_out.inputs[0])         # ONLY instances -> the emitter mesh vanishes
     return ng
 
 
 def fit_emitter(emitter, trunk, overlap=0.25, width=1.0):
-    """Emitter auf die Krone des Stamms setzen: Unterkante taucht `overlap` (Anteil der
-    Emitter-Hoehe) in das Astwerk ein, damit das Laub die Aeste umschliesst statt darueber
-    zu schweben. `width` skaliert die Kronenbreite relativ zur Astwerk-Spannweite."""
+    """Place the emitter over the trunk's canopy: its lower edge sinks `overlap` (a fraction of
+    the emitter height) into the branches, so the foliage wraps around them instead of floating
+    above. `width` scales the canopy width relative to the span of the branches."""
     def wbb(o):
         cs = [o.matrix_world @ Vector(c) for c in o.bound_box]
         lo = Vector((min(c.x for c in cs), min(c.y for c in cs), min(c.z for c in cs)))
@@ -483,10 +519,10 @@ def fit_emitter(emitter, trunk, overlap=0.25, width=1.0):
         return lo, hi
 
     tlo, thi = wbb(trunk)
-    span = max(thi.x - tlo.x, thi.y - tlo.y)      # Spannweite des Astwerks
+    span = max(thi.x - tlo.x, thi.y - tlo.y)      # span of the branches
     th = thi.z - tlo.z
 
-    # lokale Masse des Emitters
+    # the emitter's local dimensions
     bb = [Vector(c) for c in emitter.bound_box]
     elo = Vector((min(v.x for v in bb), min(v.y for v in bb), min(v.z for v in bb)))
     ehi = Vector((max(v.x for v in bb), max(v.y for v in bb), max(v.z for v in bb)))
@@ -496,33 +532,62 @@ def fit_emitter(emitter, trunk, overlap=0.25, width=1.0):
     s = target_w / max(ed.x, ed.y)
     eh = ed.z * s
 
-    # Unterkante = Kronenansatz (dort wo die Aeste beginnen), minus Ueberlappung
+    # lower edge = where the crown starts (where the branches begin), minus the overlap
     crown_base = tlo.z + th * 0.55
     z0 = crown_base - eh * overlap
     cx, cy = (tlo.x + thi.x) / 2.0, (tlo.y + thi.y) / 2.0
 
-    # ⚠️ In x/y ZENTRIEREN (nicht die BBox-Ecke auf die Stammmitte setzen — sonst haengt
-    #    die Krone seitlich neben dem Stamm). Nur z sitzt auf der Unterkante.
+    # Centre in x/y — do NOT put the bbox corner on the trunk centre, or the canopy hangs off
+    # to one side. Only z sits on the lower edge.
     anchor = Vector(((elo.x + ehi.x) / 2.0, (elo.y + ehi.y) / 2.0, elo.z))
     emitter.matrix_world = (Matrix.Translation(Vector((cx, cy, z0)))
                             @ Matrix.Diagonal((s, s, s, 1.0))
                             @ Matrix.Translation(-anchor))
     bpy.context.view_layer.update()
-    print("[emit] %s auf %s gesetzt: Breite %.1f, Hoehe %.1f, Unterkante z=%.1f"
+    print("[emit] %s placed on %s: width %.1f, height %.1f, lower edge z=%.1f"
           % (emitter.name, trunk.name, target_w, eh, z0))
     return emitter
 
 
+def _assert_clean_sources(leaf):
+    """Instance sources MUST be parentless and sit at the origin.
+
+    WHY: CollectionInfo carries the source object's transform into EVERY instance. A leaf still
+    parented to its glTF import empty travels with that empty — move the tree and all foliage of
+    that variety jumps with it. The failure is SILENT: the foliage merely looks "somehow badly
+    placed". A third of a finished tree once slipped out of position that way, with no message
+    anywhere. So this does not warn — it STRAIGHTENS the sources out, and says so.
+    """
+    objs = list(leaf.objects) if hasattr(leaf, "objects") else [leaf]
+    bad = [o for o in objs if o.parent is not None or o.matrix_world != Matrix.Identity(4)]
+    for o in bad:
+        print("WARNING: source '%s' was not clean (parent=%s) -> reset"
+              % (o.name, o.parent.name if o.parent else "-"))
+        o.parent = None
+        o.matrix_world = Matrix.Identity(4)
+    if bad:
+        bpy.context.view_layer.update()
+    return len(bad)
+
+
 def scatter_emitter(emitter, leaf, leaf_size=0.30, size_var=0.35, count=70000,
-                    seed=3, canopy_frac=0.0, dry_run=False, force=False):
-    """Blaetter aus einem separaten EMITTER — der sichtbare Stamm bleibt UNANGETASTET.
-    Der Emitter selbst verschwindet (sein Mesh landet nicht im Ausgang)."""
+                    seed=3, canopy_frac=0.0, dry_run=False, force=False, poisson=0.0,
+                    depth=0.0, out_frac=0.15):
+    """Leaves from a separate EMITTER — the visible trunk is left UNTOUCHED.
+    The emitter itself disappears (its mesh never reaches the output).
+
+    poisson: minimum distance between leaves in WORLD metres (0 = the old RANDOM distribution).
+             Rule of thumb: leaf_size * 0.5 — leaves touch but do not clump.
+             count then acts as an UPPER LIMIT: Poisson places as many points as the minimum
+             distance allows, but never more than count."""
     if isinstance(emitter, str):
         emitter = bpy.data.objects[emitter]
     if isinstance(leaf, str):
         leaf = bpy.data.collections.get(leaf) or bpy.data.objects[leaf]
 
-    # Flaeche des GANZEN Emitters (kein Kronen-Schnitt noetig)
+    _assert_clean_sources(leaf)
+
+    # area of the WHOLE emitter (no canopy cut needed here)
     if canopy_frac > 0.0:
         area, _ = _canopy_area_objspace(emitter, canopy_frac)
     else:
@@ -534,26 +599,97 @@ def scatter_emitter(emitter, leaf, leaf_size=0.30, size_var=0.35, count=70000,
     polys = _leaf_polys(leaf)
     tris = count * polys
 
-    print("emitter=%s  flaeche=%.3f  objskala=%.1f" % (emitter.name, area, sc))
-    print("  Blatt %.2f Welt -> %.4f Objektraum | Dichte %d" % (leaf_size, obj_leaf, dens))
-    print("  %d Instanzen x %d Polys = %.1f Mio Dreiecke (Budget %.0f Mio)"
+    print("emitter=%s  area=%.3f  objscale=%.1f" % (emitter.name, area, sc))
+    print("  leaf %.2f world -> %.4f object space | density %d" % (leaf_size, obj_leaf, dens))
+    print("  %d instances x %d polys = %.1f M triangles (budget %.0f M)"
           % (count, polys, tris / 1e6, MAX_TOTAL_TRIS / 1e6))
     if (count > MAX_TOTAL_INSTANCES or tris > MAX_TOTAL_TRIS) and not force:
         print("")
-        print("🛑 ABBRUCH — ueber Budget. NICHTS geaendert.")
+        print("STOPPED — over budget. NOTHING changed.")
         return None
     if dry_run:
-        print("(Trockenlauf — nichts geaendert.)")
+        print("(Dry run — nothing changed.)")
         return None
 
     for m in list(emitter.modifiers):
         if m.type == 'NODES':
             emitter.modifiers.remove(m)
-    ng = _build_emitter_group(leaf, obj_leaf * (1 - size_var), obj_leaf * (1 + size_var), dens, seed, canopy_frac)
+    obj_poisson = (poisson / max(sc, 1e-9)) if poisson > 0.0 else 0.0   # world -> object space
+    obj_depth   = (depth / max(sc, 1e-9)) if depth > 0.0 else 0.0
+    ng = _build_emitter_group(leaf, obj_leaf * (1 - size_var), obj_leaf * (1 + size_var), dens, seed,
+                              canopy_frac, obj_poisson, obj_depth, out_frac)
     m = emitter.modifiers.new("LeafEmit", 'NODES')
     m.node_group = ng
     bpy.context.view_layer.update()
     dg = bpy.context.evaluated_depsgraph_get()
     real = sum(1 for i in dg.object_instances if i.is_instance)
-    print("✅ Emitter bestueckt | Instanzen in der Szene: %d" % real)
+    print("Emitter populated | instances in the scene: %d" % real)
     return ng
+
+
+# ─── Cluster emitter ─────────────────────────────────────────────────────────
+# WHY: a single sphere as an emitter gives a SPHERE silhouette, at any density. Real canopies
+# are clumped and frayed. So: place several small spheres at the BRANCH ENDS and merge them
+# into ONE emitter. Side effect: on short branches, `spread` carries the clusters outwards and
+# the canopy still fills out.
+def make_cluster_emitter(trunk, n=10, radius=0.55, crown_from=0.5, spread=1.0,
+                         squash=0.75, seed=7, name="EMITTER"):
+    """Cluster emitter built from the trunk's branches.
+      n          number of clusters
+      radius     cluster radius, as a FRACTION of the branch span
+      crown_from the relative trunk height above which clusters may sit (0..1)
+      spread     >1 carries the clusters outwards (short branches -> still a wide canopy)
+      squash     vertical squash of the clusters (canopies are wider than they are tall)
+    """
+    import random
+    if isinstance(trunk, str):
+        trunk = bpy.data.objects[trunk]
+    rnd = random.Random(seed)
+
+    old = bpy.data.objects.get(name)
+    if old:
+        bpy.data.objects.remove(old, do_unlink=True)
+
+    # branch vertices in WORLD coordinates
+    verts = [trunk.matrix_world @ v.co for v in trunk.data.vertices]
+    zs = [v.z for v in verts]
+    zlo, zhi = min(zs), max(zs)
+    cut = zlo + (zhi - zlo) * crown_from
+    cand = [v for v in verts if v.z >= cut]
+    if len(cand) < n:
+        cand = verts
+    xs = [v.x for v in verts]; ys = [v.y for v in verts]
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    cx, cy = (max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0
+
+    # Farthest-point sampling: clusters as FAR APART as possible rather than random
+    # (random puts several clusters in the same clump of branches and leaves the rest bare).
+    picks = [max(cand, key=lambda v: (v.x - cx) ** 2 + (v.y - cy) ** 2 + (v.z - cut) ** 2)]
+    while len(picks) < n:
+        nxt = max(cand, key=lambda v: min((v - p).length_squared for p in picks))
+        picks.append(nxt)
+
+    r = max(span * radius, 1e-4)
+    parts = []
+    for i, p in enumerate(picks):
+        # spread: carry the cluster radially outwards from the trunk centre
+        off = Vector((p.x - cx, p.y - cy, 0.0)) * (spread - 1.0)
+        loc = p + off
+        bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=r, location=loc)
+        ob = bpy.context.active_object
+        jitter = 1.0 + rnd.uniform(-0.30, 0.30)         # no two clusters the same size
+        ob.scale = (jitter, jitter, jitter * squash)
+        parts.append(ob)
+
+    bpy.ops.object.select_all(action='DESELECT')
+    for ob in parts:
+        ob.select_set(True)
+    bpy.context.view_layer.objects.active = parts[0]
+    bpy.ops.object.join()
+    emit = bpy.context.active_object
+    emit.name = name
+    emit.hide_render = True
+    bpy.context.view_layer.update()
+    print("[emit] %s: %d clusters, r=%.2f, span %.1f, spread=%.2f"
+          % (name, n, r, span, spread))
+    return emit

@@ -36,6 +36,22 @@ function ipcDir(cfg) {
          DEFAULT_DIR;
 }
 
+// ⚠ HALF-WIRED BY DESIGN OF THE ADDON, not by oversight: this side honours
+// apps.blenderIpcDir, but blender-addon/phoenix_blender_ipc.py can only read
+// PHOENIX_BLENDER_IPC_DIR (it has no way to find phoenix-config.json — Blender copies the
+// addon into its own scripts dir, away from the install). So a config value alone makes
+// Phoenix write into a folder the addon never watches, and every call dies in a mute
+// timeout. We cannot repair that from here, but we can stop it from being mute.
+function ipcDirMismatchHint(cfg) {
+  const configured = cfg && cfg.apps && cfg.apps.blenderIpcDir;
+  if (!configured) return '';
+  if (process.env.PHOENIX_BLENDER_IPC_DIR === configured) return '';   // both sides agree
+  return '\n⚠ apps.blenderIpcDir is set to "' + configured + '", but the Blender addon only reads the ' +
+         'PHOENIX_BLENDER_IPC_DIR environment variable — it is almost certainly watching "' + DEFAULT_DIR +
+         '" instead. Either start Blender with PHOENIX_BLENDER_IPC_DIR set to the same path, or remove ' +
+         'apps.blenderIpcDir from the config so both sides use the default.';
+}
+
 // Run `code` in Blender and resolve the parsed response object.
 // opts: { cfg, timeoutMs } — both optional.
 function callBlender(code, opts = {}) {
@@ -61,7 +77,7 @@ function callBlender(code, opts = {}) {
       if (Date.now() > deadline) {
         return reject(new Error(
           'Blender not responding (' + Math.round(timeoutMs / 1000) + 's) — is Blender open with the ' +
-          'Phoenix IPC addon enabled? Watch dir: ' + dir));
+          'Phoenix IPC addon enabled? Watch dir: ' + dir + ipcDirMismatchHint(opts.cfg)));
       }
       let raw;
       try { raw = fs.readFileSync(resFile, 'utf8'); }

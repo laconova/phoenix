@@ -73,7 +73,7 @@
       "simplify_method": "Cumesh",
       "fill_holes": true,
       "texture_alpha_mode": "OPAQUE",
-      "dual_contouring_resolution": "1024",
+      "dual_contouring_resolution": "512",
       "double_side_material": false,
       "remove_floaters": false,
       "bake_on_vertices": false,

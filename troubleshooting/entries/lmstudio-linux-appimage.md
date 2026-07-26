@@ -12,7 +12,7 @@ installation" · Phoenix preflight says LM Studio is absent on a Linux machine w
 3. Ubuntu 24.04's **AppArmor blocks unprivileged user namespaces** → the Chromium sandbox crashes
    unless the app runs with `--no-sandbox`.
 
-## Fix — do it for me (proven live 2026-07-02 on the rig; NO sudo needed)
+## Fix — do it for me (proven live; NO sudo needed)
 
 1. **Extract instead of FUSE-mounting** (kills trap 1 without installing anything):
    ```bash
@@ -53,7 +53,7 @@ returns a model list (the bundled `text-embedding-nomic-embed-text-v1.5` counts 
   The "Timed out waiting for LM Studio daemon" error is trap 2+3 wearing a different costume.
 - The app+server pair must survive the session: `nohup` (above) covers logout; after a reboot re-run
   steps 2–3, or wrap them in a systemd **user** service for boot persistence.
-- Set the models directory to the shared models home (e.g. `/data/_shared/models`) in-app — weights
+- Set the models directory to wherever you keep model weights (e.g. a shared models folder) in-app —
   never belong on the system disk.
 - SSH trap while debugging: `pkill -f lm-studio` kills **your own SSH shell** (the pattern matches the
   remote command line). Use `pkill -x lm-studio`.
@@ -64,4 +64,4 @@ returns a model list (the bundled `text-embedding-nomic-embed-text-v1.5` counts 
 - **The running instance only indexes the models dir at startup** — a model downloaded/copied in while
   it runs won't show in `lms ls`. Restart the app (pkill -x → relaunch → `lms server start`).
 - Models dir on a data disk without touching the GUI: symlink it —
-  `ln -s /data/_shared/models/lmstudio ~/.lmstudio/models` (proven working incl. GPU load).
+  `ln -s /path/to/your/models/lmstudio ~/.lmstudio/models` (proven working incl. GPU load).

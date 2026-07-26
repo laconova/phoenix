@@ -6,6 +6,7 @@ const fs   = require('fs');
 const path = require('path');
 const net  = require('net');
 const { runPreflight } = require('./preflight');
+const { demetalPy } = require('./mesh-import-fix');
 const dbg = require('./debug-log');
 const blenderIpc = require('./blender-ipc');
 
@@ -24,7 +25,7 @@ const { getActive, resolveSlot, resolveWorkflowFile } = require('./workflows');
 const _cfg     = loadConfig();
 const _palette = loadPalette();
 
-const COMFY_BASE   = (_cfg.endpoints && _cfg.endpoints.comfyui) || 'http://localhost:8000';
+const COMFY_BASE   = (_cfg.endpoints && _cfg.endpoints.comfyui) || 'http://localhost:8188';
 const LOCAL_BASE   = process.env.LOCAL_API   || (_cfg.endpoints && _cfg.endpoints.local) || 'http://localhost:1234/v1';
 const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.model) || 'claude-haiku-4-5-20251001';
 const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse);
@@ -560,6 +561,7 @@ async function blenderCleanup(session) {
     '            bpy.ops.object.shade_smooth()',
     '            print("SMOOTH:fallback " + str(_e))',
     `    obj.name = ${JSON.stringify(assetName)}`,
+    ...demetalPy('imported'),
     'print("CLEANUP_DONE:" + str(len(imported)))',
   ].join('\n');
 
@@ -576,6 +578,7 @@ async function importRaw(session) {
     'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
     'for obj in imported:',
     `    obj.name = ${JSON.stringify(assetName)}`,
+    ...demetalPy('imported'),
     'print("IMPORT_RAW_DONE:" + str(len(imported)))',
   ].join('\n');
 

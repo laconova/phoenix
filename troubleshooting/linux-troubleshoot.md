@@ -1,9 +1,12 @@
 # Phoenix on Linux — setup & troubleshooting (umbrella)
 
 The rest of this library was written against the **Windows** portable (WinError 127, `win_amd64`
-wheels, `python_embeded`, drive letters). This file is the **Linux** counterpart: a from-scratch,
-**no-root** install recipe plus the traps that are specific to Linux. Verified on **Ubuntu 24.04.4**,
-**RTX 3080 (10 GB)**, driver **595.71.05**, no `sudo` rights.
+wheels, `python_embeded`, drive letters). This file is the **Linux** counterpart: a from-scratch
+install recipe plus the traps that are specific to Linux.
+
+It assumes **no root**, because that is the harder case — everything here also works with root, where
+you can simply use your package manager instead of the portable installs. Verified on Ubuntu 24.04
+with an NVIDIA GPU and no `sudo` rights.
 
 **Applies to:** comfyui · blender · lmstudio · install · linux
 **Golden rule discovered here:** the **image** stack (SD 1.5 / Flux 2 Klein) and the **mesh** stack
@@ -13,7 +16,7 @@ fact on Linux.
 
 ---
 
-## 0. Environment constraints on this box
+## 0. Working without root (skip if you have sudo)
 
 **Symptoms:** `sudo: a password is required` · `No module named pip` · venv creation dies with
 `ensurepip is not available ... install python3.12-venv`.
@@ -39,13 +42,13 @@ fact on Linux.
 
 ---
 
-## 1. What's installed on this machine (reproducible recipe)
+## 1. The install, component by component (reproducible recipe)
 
 All under `~` — nothing needs root.
 
 | Component | Version | Location | Launch |
 |---|---|---|---|
-| ComfyUI | 0.27.0 | `~/ComfyUI` (venv `~/ComfyUI/venv`) | `~/ComfyUI/venv/bin/python ~/ComfyUI/main.py --port 8000` |
+| ComfyUI | 0.27.0 | `~/ComfyUI` (venv `~/ComfyUI/venv`) | `~/ComfyUI/venv/bin/python ~/ComfyUI/main.py --port 8188` |
 | Blender | 5.1.2 | `~/apps/blender/` | `~/apps/blender/blender` |
 | LM Studio | 0.4.18 | `~/apps/LM-Studio.AppImage` | `~/apps/LM-Studio.AppImage` |
 
@@ -59,13 +62,18 @@ All under `~` — nothing needs root.
 
 ---
 
-## 2. ComfyUI must listen on :8000, not :8188
+## 2. Phoenix and ComfyUI must agree on the port
 
-**Symptoms:** Phoenix "can't reach ComfyUI"; `curl :8000/system_stats` refused while ComfyUI is up.
-**Root cause:** ComfyUI defaults to **8188**; Phoenix's `endpoints.comfyui` defaults to **8000**.
-**Fix:** launch ComfyUI with `--port 8000` (what we do), *or* set `endpoints.comfyui` to `:8188`.
-Keep them equal. `see also: comfyui-port-8188.md` (the Windows twin of this trap).
-**Verify:** `curl http://127.0.0.1:8000/system_stats` → HTTP 200, then `node preflight.js` shows
+**Symptoms:** Phoenix "can't reach ComfyUI" while ComfyUI is clearly running; `curl` against the port
+in `endpoints.comfyui` is refused.
+**Root cause:** `endpoints.comfyui` names a different port than the one ComfyUI listens on.
+**Fix:** ComfyUI prints its port at startup (`To see the GUI go to: http://127.0.0.1:8188`). Put that
+exact URL in `endpoints.comfyui`. Phoenix ships pointing at **8188**, ComfyUI's own default, so
+leaving both alone is usually right — the mismatch shows up when you start ComfyUI with `--port`, or
+carry a config over from an older Phoenix. This recipe uses 8188 throughout; if you run a second
+ComfyUI, give it a different port and point the relevant setting at that one.
+`see also: comfyui-port-8188.md` (the same trap from the Windows side).
+**Verify:** `curl http://127.0.0.1:8188/system_stats` → HTTP 200, then `node preflight.js` shows
 `[PASS] ComfyUI`.
 
 ---
@@ -95,7 +103,7 @@ All three files live in ONE **open** Comfy-Org repo (the ComfyUI split mirror �
 Flux 2 uses **native** ComfyUI nodes (`EmptyFlux2LatentImage`, `Flux2Scheduler`, `CFGGuider`) — no
 custom node needed, just a recent ComfyUI (0.27.0 is fine). Runs on the current venv.
 
-**Verify:** in ComfyUI `curl :8000/object_info` lists the loaders; a Phoenix image gen produces a PNG.
+**Verify:** in ComfyUI `curl :8188/object_info` lists the loaders; a Phoenix image gen produces a PNG.
 
 ---
 
@@ -143,9 +151,9 @@ Canonical node: **`https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF`** (ships `i
 `requirements.txt`). Best written Linux walkthrough: `github.com/LsM97/comfyui-trellis2-gguf-guide`.
 The exact combo that worked here: **Python 3.11.15 · torch 2.5.1+cu124 · triton 3.2.0 · cp311
 manylinux prebuilt wheels** from the `pozzettiandrea.github.io/cuda-wheels/` index. All prebuilt —
-**no `nvcc`/compiler needed** (which matters: we can't `apt install` a CUDA toolkit).
+**no `nvcc`/compiler needed** (which matters when you have no root: you cannot `apt install` a CUDA toolkit).
 
-Build it as a **second, isolated** ComfyUI (`~/ComfyUI-trellis`) that becomes THE ComfyUI on :8000
+Build it as a **second, isolated** ComfyUI (`~/ComfyUI-trellis`) that becomes THE ComfyUI on :8188
 (it also serves SD/Flux images — see §6.4). Steps in the order that actually worked:
 
 ```bash
@@ -189,7 +197,7 @@ git clone https://github.com/city96/ComfyUI-GGUF.git custom_nodes/ComfyUI-GGUF &
 #   → 2.5.1+cu124 OK
 
 # 6.8  launch on Phoenix's port (expandable_segments helps the 10 GB card avoid OOM)
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./venv/bin/python main.py --port 8000
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ./venv/bin/python main.py --port 8188
 ```
 
 **Golden rule for this whole section:** after *every* `pip install` that isn't torch itself,
@@ -198,9 +206,9 @@ assume something may have moved torch. Re-pin (6.4) and re-run the import check 
 ### 6.a  Share the image models (don't re-download SD/Flux)
 Drop `~/ComfyUI-trellis/extra_model_paths.yaml` pointing `base_path` at `~/ComfyUI/models`
 (checkpoints / diffusion_models / text_encoders / vae / …). Verified: SD 1.5, `flux-2-klein-base-4b`,
-`flux2-vae` then appear in this instance's `/object_info`. So ONE ComfyUI on :8000 does image **and**
+`flux2-vae` then appear in this instance's `/object_info`. So ONE ComfyUI on :8188 does image **and**
 mesh — which is what Phoenix expects. Stop the old py3.12 ComfyUI first (`pkill -f "ComfyUI/main.py"`)
-so :8000 is free.
+so :8188 is free.
 
 ### 6.b  Verified result
 Boot log shows `1.5 seconds: .../ComfyUI-Trellis2-GGUF` (NOT `IMPORT FAILED`) and
@@ -212,7 +220,7 @@ Boot log shows `1.5 seconds: .../ComfyUI-Trellis2-GGUF` (NOT `IMPORT FAILED`) an
 - **Auto:** the node's ModelManager downloads the TRELLIS.2-4B GGUF set on the **first mesh gen**
   (`[ModelManager] Downloading shape/...gguf`, ~752 MB / 904 MB / …, ~2.5 GB total). The first gen
   therefore looks like a hang — it's the download. `see also: trellis-first-mesh-timeout.md`.
-- **Manual (pre-warm, what we did):** `Aero-Ex/Trellis2-GGUF` holds the whole Q4_K_M set — `shape/`,
+- **Manual (pre-warm, recommended):** `Aero-Ex/Trellis2-GGUF` holds the whole Q4_K_M set — `shape/`,
   `texture/`, `refiner/` (`*_Q4_K_M.gguf`), `encoders/`, `decoders/` (`*_fp16.safetensors`), plus
   `Vision/dinov3-vitl16-pretrain-lvd1689m.safetensors`, `pipeline.json`, `texturing_pipeline.json`.
   Pull it preserving structure into the node's model dir:
@@ -240,7 +248,7 @@ Boot log shows `1.5 seconds: .../ComfyUI-Trellis2-GGUF` (NOT `IMPORT FAILED`) an
 
 **Verify:** `import cumesh,o_voxel,flex_gemm,nvdiffrast,nvdiffrec_render,flash_attn` all OK; ComfyUI log
 shows `N seconds: ...Trellis2-GGUF` (not IMPORT FAILED); `Trellis2*_GGUF` in `/object_info`; a mesh gen
-writes a `.glb`. **Confirmed on this box up to node-load + object_info; a full mesh gen is the last
+writes a `.glb`. **Confirmed up to node-load + object_info; a full mesh gen is the last
 unrun step (pending the model download + an input image).**
 
 ---
@@ -257,25 +265,25 @@ the viewport for the Phoenix tab. IPC dir defaults to `/tmp/phoenix-blender-ipc`
 
 ---
 
-## 8. Config changes made on this box
+## 8. Config changes this recipe implies
 
 `phoenix-config.json` (auto-created from the example on first `node server.js`) was edited:
 - `apps.blender` → `~/apps/blender/blender` (was the Windows default path).
 - `preflight.expected.pytorch` → `2.12` (silences the drift WARN for the current image venv). Note:
   if/when you build the Trellis venv on torch 2.6/cu124, this "expected" block no longer matches that
-  env — it only describes whichever ComfyUI is actually serving :8000.
+  env — it only describes whichever ComfyUI is actually serving :8188.
 - `workflows.image` → `sd15` (default image workflow; sd15 works on the current venv today).
 
 ---
 
 ## Notes / status
-- **Two ComfyUI installs on this box:**
+- **If you keep two ComfyUI installs (image and mesh stacks separated):**
   - `~/ComfyUI` — original image-only (py3.12 / torch2.12 / cu130). Kept as a fallback; **not** the one
     to run for the full pipeline.
   - `~/ComfyUI-trellis` — **the real one**: py3.11 / torch2.5.1 / cu124 / triton3.2.0, Trellis2-GGUF +
     RMBG + GGUF nodes, `extra_model_paths.yaml` sharing `~/ComfyUI/models`. Serves image **and** mesh
-    on :8000. Launch: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ~/ComfyUI-trellis/venv/bin/python ~/ComfyUI-trellis/main.py --port 8000`.
-    **Run only one at a time** (both bind :8000).
+    on :8188. Launch: `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True ~/ComfyUI-trellis/venv/bin/python ~/ComfyUI-trellis/main.py --port 8188`.
+    **Run only one at a time** (both bind :8188).
 - **Verified working:** SD 1.5 + Flux 2 Klein downloaded; the Trellis node loads (`1.5s`, not IMPORT
   FAILED) and its nodes appear in `/object_info`; image models visible via the shared path. Claude CLI
   + Blender exe path green.
@@ -283,7 +291,7 @@ the viewport for the Phoenix tab. IPC dir defaults to `/tmp/phoenix-blender-ipc`
   image). Then wire Phoenix's `mesh` gate and generate end-to-end.
 - **One-time downloads:** ~2 GB SD · ~16 GB Flux · ~3 GB torch per venv · ~8–10 GB Trellis Q4_K_M set
   · ~1.7 GB DINOv3 on first mesh gen.
-- Since :8000 is now the py3.11/cu124 env, `preflight.expected` (python 3.12 / pytorch 2.12 / cu130 in
+- Since :8188 is now the py3.11/cu124 env, `preflight.expected` (python 3.12 / pytorch 2.12 / cu130 in
   config) will show drift WARNs — cosmetic. Update it to `3.11 / 2.5 / cu124` if you retire `~/ComfyUI`.
 - If you resolve a new Linux-only trap, add a row to `INDEX.md` and either a flat `entries/<slug>.md`
   or a section here.

@@ -399,10 +399,10 @@ function deleteCustomWorkflow(id) {
 /**
  * resolveWorkflowFile(entry) → absolute path that exists on THIS machine
  *
- * entry.file is an absolute path recorded when the workflow was registered. The same
- * tree runs on the laptop and on the rig, so a rig-recorded path resolves to
- * "D:\home\erazz\..." on Windows and the read fails. Fall back to this install's own
- * workflows/ directory — same portability rule as _LIB_DIR (see dev-notes/phoenix.md).
+ * entry.file is an absolute path recorded when the workflow was registered, and it is only valid
+ * on the machine and in the location it was registered from: move the tree, restore a backup, or
+ * share a registry, and the read fails. Fall back to this install's own workflows/ directory —
+ * the same portability rule the brush library applies to _LIB_DIR.
  */
 function resolveWorkflowFile(entry) {
   const p = entry && entry.file;

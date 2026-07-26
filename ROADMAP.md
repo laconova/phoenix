@@ -19,15 +19,38 @@ The core text → 3D prop pipeline, driven from one browser UI:
 - **First-run onboarding wizard** — detects prerequisites, links to fixes, walks you to your first prop.
 - **Troubleshooter** — an LLM assistant that checks your local stack and helps get deps running.
 
+New in **1.6.0** — characters and animation, alongside the prop pipeline:
+
+- **Human tab** — parametric people built straight into your open Blender scene through MPFB2
+  (MakeHuman's engine): body and face sliders, skin/hair/clothes, preview before you commit.
+  Guide: [`human-tab-guide.md`](human-tab-guide.md).
+- **Character library** — save a finished rigged figure (meshes, packed textures, skeleton) and
+  spawn it back later. Stores the real geometry, so your own edits survive; works equally for a
+  character you rigged yourself at mixamo.com.
+- **Animation** — retarget Mixamo FBX clips onto any rigged character, chain them into sequences
+  blended at the seams, and save the result as a reusable clip. One shared clip library: every clip
+  fits every character.
+- **Text → motion** *(optional)* — describe a movement and get a clip back, via HY-Motion in ComfyUI.
+- **Custom Rig tab** — skeleton-bound animation for everything that is *not* a standard humanoid:
+  creatures, animals, machines. A folder binds one skeleton to its clips and mesh variants, so the
+  same animations play on every variant. Includes **rig-to-mesh**: voxel-remesh a generated mesh and
+  bind it with automatic weights, with the result measured rather than assumed.
+
 ## Near future
 
+- **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf
+  (a compact body — what the mesher is good at), then instance it thousands of times over a trunk.
+  Leaf size becomes a **dial** instead of a property baked into the mesh. This exists today as a
+  script beside Phoenix; the next update brings it *into* Phoenix as a first-class step.
 - **PBR material generator** — generate physically-based material sets, not just meshes.
-- **MakeHuman connection** — bring in MakeHuman character base meshes.
 - **Unreal Engine connection** — export / hand assets straight into Unreal.
 - **Client access** — a thin client that connects to a remote Phoenix server (run the heavy
   stack on one machine, drive it from another).
-- **Mesh rigging** — turn generated meshes into animation-ready, rigged assets.
-- **Remesh** — clean retopology / remeshing of generated meshes.
+- **Rigid binding for machines** — robots, vehicles and other hard-surface rigs want each part
+  parented to a bone, not weighted deformation. The folder model already carries them; the binding
+  step is manual for now.
+- **Clean retopology** — 1.6.0 ships a *voxel* remesh, which is what automatic weights need but is
+  not a quality retopo. Proper retopology (and baking detail back onto it) is the next step.
 
 ## Middle future
 

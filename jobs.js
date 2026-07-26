@@ -9,6 +9,10 @@ const dbg = require('./debug-log');
 let current = null;
 let counter = 0;
 
+// Outcomes are announced to the user by server.js, which subscribes to the debug log and turns
+// every cat:'job' event into an SSE notice. That is why the dbg.event calls below carry the
+// status/error text rather than just a marker — they are the message, not only a log line.
+
 /**
  * start(meta, work) — attempt to launch a background job.
  *
@@ -39,23 +43,15 @@ function start(meta, work) {
   dbg.event('job', { phase: 'start', id, label: current.label });
 
   // Run detached — intentionally NOT awaited.
+  const label0 = current.label;
+
   Promise.resolve()
     .then(() => work(id))
     .then(status => {
-      dbg.event('job', {
-        phase:  'done',
-        id,
-        label:  current ? current.label : '',
-        status: typeof status === 'string' ? status : '',
-      });
+      dbg.event('job', { phase: 'done', id, label: label0, status: typeof status === 'string' ? status : '' });
     })
     .catch(err => {
-      dbg.event('job', {
-        phase: 'error',
-        id,
-        label: current ? current.label : '',
-        error: String((err && err.message) || err),
-      });
+      dbg.event('job', { phase: 'error', id, label: label0, error: String((err && err.message) || err) });
     })
     .finally(() => {
       current = null;

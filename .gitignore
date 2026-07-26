@@ -1,3 +1,7 @@
+# secrets — never commit.
+.secrets/
+*.env
+
 # runtime / user data (auto-seeded on first run)
 phoenix-config.json
 workflows.json
@@ -10,6 +14,18 @@ staging/
 session/
 logs/
 brushes/
+animations/
+custom-rigs/
+characters/
+
+# Blender working files. Scenes, rescues and WIP saves are hundreds of MB and belong to the
+# artist, not to the project. No .blend ships: the addon is .py, the workflows are .json.
+scenes/
+*.blend
+*.blend1
+
+# One-off session scratch under scripts/ (shipped helpers live in scripts/<topic>/)
+scripts/session-*
 
 # OS / editor / node
 .DS_Store
@@ -23,6 +39,10 @@ __pycache__/
 # Troubleshooting live state (ship the template, not per-issue state files)
 troubleshooting/active/*
 !troubleshooting/active/_TEMPLATE.md
+
+# Editor/session backups
+*.bak
+*.bak-*
 
 # Claude working instructions (references the local dev tree — machine path, never ships)
 CLAUDE.md

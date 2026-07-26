@@ -36,12 +36,12 @@ Every entry carries both. The assistant offers the user the choice per issue:
 - **Explain it** — assistant narrates what & why; user runs it / just learns.
 Default to **explain-first for anything irreversible or heavy**; offer do-it-for-me as the opt-in.
 
-## Active-issue state (survives a server restart)
-Many fixes need a **`server.bat` restart + browser refresh**, which **ends the troubleshooter's chat
-session**. So when a fix spans a restart, the assistant writes a small state file in `active/` (copy
-`active/_TEMPLATE.md`). After the restart, a fresh troubleshooter reads `active/*` FIRST and resumes
-mid-fix instead of re-diagnosing. Delete the file when the issue is resolved. This is the project
-`state.md`/`changelog` pattern, scoped to one live troubleshooting session.
+## Active-issue state — planned, not yet wired
+Many fixes need a **server restart + browser refresh**, which ends the troubleshooter's chat session,
+so a fix that spans a restart currently has to be re-explained afterwards. The intended mechanism is a
+small state file in `active/` (from `active/_TEMPLATE.md`) that a fresh troubleshooter reads first and
+resumes from. **The template is here, the reading side is not built yet** — nothing in the shipped code
+writes or reads `active/` today. Documented so the folder is not mistaken for a live feature.
 
 > Ships with the app (the troubleshooter reads it). Distinct from `SUSPECTED-ISSUES.md`, which is
 > dev-only speculation and must never ship.

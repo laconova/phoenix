@@ -6,6 +6,7 @@ that ONE entry from `entries/`. Keys are exact substrings you'll see in errors, 
 | Symptom / error string (match on any) | Entry |
 |---|---|
 | Phoenix "Can't reach ComfyUI" · connection refused :8000 · port 8188 vs 8000 mismatch · gen never starts · image tab empty | `entries/comfyui-port-8188.md` |
+| `No module named 'sqlalchemy'` at ComfyUI startup · ComfyUI exits immediately after an update · Phoenix "Can't reach ComfyUI" although nothing in Phoenix changed · all mesh generation dead at once | `entries/comfyui-missing-sqlalchemy.md` |
 | `No module named 'cumesh'` · `No module named 'triton'` · Trellis nodes missing from the menu · `IMPORT FAILED ...Trellis2-GGUF` | `entries/trellis-torch-too-new.md` |
 | `install.py` picked a `manylinux`/`...linux_x86_64.whl` · "wheel not supported on this platform" · cumesh imports but node fails on load | `entries/trellis-linux-wheel-on-windows.md` |
 | `include file 'Python.h' not found` · triton `tcc.exe ... returned non-zero exit status 1` · `import flex_gemm`/`o_voxel` fails on compile | `entries/trellis-triton-python-h.md` |
@@ -19,6 +20,11 @@ that ONE entry from `entries/`. Keys are exact substrings you'll see in errors, 
 | `dlopen(): error loading libfuse.so.2` · "AppImages require FUSE to run" · `Timed out waiting for LM Studio daemon` · `lms bootstrap` "Cannot find LM Studio installation" · LM Studio won't start on Linux / over SSH · preflight LM Studio absent (Linux) | `entries/lmstudio-linux-appimage.md` |
 | `Got an OOM, unloading all loaded models` (ComfyUI, mesh stage) · GPU ~full at 0% util · `.lmstudio/.internal/utils/node` holding 6–9 GB in `nvidia-smi` | `entries/mesh-oom-local-llm-resident.md` |
 | `Stage error: ENOENT ... scandir '.../ComfyUI/output'` after a mesh run · ComfyUI says `Prompt executed` but Phoenix reports stage failed · `.glb` exists only in ComfyUI's own output/ | `entries/phoenix-comfy-output-path.md` |
+| Generated motion plays but the figure is **hunched** · shoulders rolled forward, forearms bent in front of the chest · every prompt looks like that · replaced the template FBX and nothing changed | `entries/hymotion-hunched-tpose.md` |
+| `has no HY-Motion nodes` · job rejected naming `HYMotionGenerate` / `HYMotionLoadNetwork` · `[WARN] HY-Motion (text→motion) ... NOT REACHABLE` · "Describe a new motion…" fails at once while image/mesh generation is fine | `entries/hymotion-endpoint-no-nodes.md` |
+| `ANIM_ERR:no mixamo-rigged character in scene` · Animate does nothing although a figure is in the scene · Save character refused: *"no mixamorig:Hips bone"* · text→motion generates but cannot be applied | `entries/human-tab-no-mixamo-rig.md` |
+| Human tab generates nothing · `mpfb` in the Blender console · figure arrives grey/bald with no skin, hair or clothes · Skin/Hair/Clothes dropdowns empty or stuck on *Procedural* | `entries/human-tab-mpfb-missing.md` |
+| `Bone Heat Weighting: failed to find solution` · Bind reports vertices that `carry NO weight` · parts stay behind when the rig moves · *"the rig carries N posed bone(s)"* · *"is not this folder's skeleton"* · rigid/robot parts bend like rubber · Blender frozen ~2 min saving a heavy rig | `entries/custom-rig-bind-fails.md` |
 | Installing on **Linux** (any step) · `sudo: a password is required` · `ensurepip is not available` · venv has no pip · no-root install · which Python for image vs mesh (3.11 vs 3.12 split) · Ubuntu setup from scratch | `linux-troubleshoot.md` (umbrella — Linux install recipe + Linux-specific traps) |
 
 **Not here?** It's a new trap → after solving it, add a row above + an entry (keep the entry format).

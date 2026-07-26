@@ -12,7 +12,7 @@
 // (or just closing this window) stops the sync. The manual `refresh` command in
 // the assistant remains as an "update right now" fallback.
 //
-// Run:  scene-sync.bat   (or: node scene-sync.js)
+// Run:  node scene-sync.js   (a separate, optional process — the server does not start it)
 // Requiring assistant.js is safe — it is require.main-guarded (no readline boot).
 
 const { callBlender, saveSceneCache, loadConfig } = require('./assistant');

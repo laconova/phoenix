@@ -275,10 +275,20 @@
       background: var(--panel);
       border-top: 1px solid var(--outline);
       flex-shrink: 0;
+      align-items: flex-end;      /* Send stays on the last line as the field grows */
     }
 
+    /* Multi-line on purpose: a single-line input scrolls long text sideways out of view.
+       This grows downwards with the text (JS sets the height) and starts scrolling once
+       it hits max-height, so the message list never gets squeezed away. */
     #user-input {
       flex: 1;
+      min-width: 0;
+      resize: none;
+      overflow-y: auto;
+      max-height: 40vh;
+      line-height: 1.45;
+      font-family: inherit;
       padding: 9px 12px;
       border-radius: 8px;
       border: 1px solid var(--border-soft);
@@ -637,6 +647,15 @@
     <label class="gate-row"><input type="checkbox" id="gate-image"> Image gate</label>
     <label class="gate-row"><input type="checkbox" id="gate-mesh"> Mesh gate</label>
     <div class="settings-hint">On = stop for your approval after this stage. Off = auto-continue with no LLM between steps.</div>
+    <label class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+      <span>Render vision</span>
+      <select id="gate-vision" style="margin-left:auto;">
+        <option value="off">off</option>
+        <option value="focused">focused</option>
+        <option value="full">full</option>
+      </select>
+    </label>
+    <div class="settings-hint">The assistant looks at a render of the scene before it claims anything visual. <b>focused</b> = after animation, rig/mesh binding, brush placement and spawns (plus whenever you ask). <b>full</b> = after every step that changes the look, including raw bpy. Each check costs one extra vision call (~10&ndash;15&nbsp;s).</div>
     <label class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;"><input type="checkbox" id="gate-notool"> Blender-only mode</label>
     <div class="settings-hint">On = model directly in Blender (bpy), image/3D generation tools disabled. (Same as /notool.)</div>
   </div>
@@ -661,12 +680,12 @@
     <div id="chat-wrap">
       <div id="messages"></div>
       <div id="input-row">
-        <input
-          type="text"
+        <textarea
           id="user-input"
-          placeholder="Message Phoenix…"
+          placeholder="Message Phoenix…   (Enter sends · Shift+Enter = new line)"
+          rows="1"
           autocomplete="off"
-        />
+        ></textarea>
         <button id="send-btn">Send</button>
       </div>
     </div>
@@ -677,6 +696,8 @@
         <button class="art-tab-btn active" data-tab="prompt">Prompt</button>
         <button class="art-tab-btn"        data-tab="image">Image</button>
         <button class="art-tab-btn"        data-tab="mesh">Mesh</button>
+        <button class="art-tab-btn"        data-tab="human">Human</button>
+        <button class="art-tab-btn"        data-tab="customrig">Custom Rig</button>
       </div>
       <div id="art-panels">
 
@@ -711,6 +732,7 @@
             id="artMesh"
             camera-controls
             auto-rotate
+            interaction-prompt="none"
             style="width:100%;height:100%"
           ></model-viewer>
           <div class="art-actions" id="mesh-actions">
@@ -721,6 +743,250 @@
             <button class="art-btn" data-action="import-cleaned">Import cleaned</button>
             <button class="art-btn" data-action="regen-mesh">Regenerate mesh</button>
             <button class="art-btn" data-action="save-brush">Save as brush</button>
+          </div>
+        </div>
+
+        <!-- Human panel (MakeHuman / MPFB2) -->
+        <style>
+          #panel-human { padding: 0; }
+          #hu-split { display: flex; height: 100%; gap: 0; }
+          #hu-preview-pane { flex: 1 1 50%; min-width: 0; display: flex; align-items: center; justify-content: center; background: var(--panel); border-right: 1px solid var(--border-soft); padding: 12px; }
+          #hu-controls { flex: 1 1 50%; min-width: 0; overflow-y: auto; padding: 12px 14px; }
+          #hu-wrap { display: flex; flex-direction: column; gap: 9px; }
+          .hu-actions { display: flex; gap: 8px; margin-top: 6px; }
+          .hu-section { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 8px 0 2px; border-bottom: 1px solid var(--border-soft); padding-bottom: 3px; }
+          .hu-row { display: flex; align-items: center; gap: 8px; }
+          .hu-row > label { flex: 0 0 92px; font-size: 12px; color: var(--text); }
+          /* min-width:0 — a flex item defaults to min-width:auto, so a <select> holding a
+             long filename refuses to shrink and pushes the row out of the panel instead of
+             staying inside it. text-overflow keeps the label readable when it is clipped. */
+          .hu-row select, .hu-text { flex: 1; min-width: 0; text-overflow: ellipsis; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); outline: none; }
+          .hu-slider { display: grid; grid-template-columns: 92px 14px 1fr 14px 34px; align-items: center; gap: 6px; font-size: 12px; }
+          .hu-slider > label { color: var(--text); }
+          .hu-slider .hu-end { color: var(--muted); font-size: 12px; text-align: center; }
+          .hu-slider input[type=range] { width: 100%; accent-color: var(--accent); }
+          .hu-slider output { font-size: 11px; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+          .hu-toggles { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 4px; }
+          .hu-toggles label { font-size: 12px; color: var(--text); display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+          #hu-status { font-size: 12px; color: var(--muted); min-height: 16px; margin-top: 4px; overflow-wrap: anywhere; }
+          #hu-preview-box { width: 100%; height: 100%; min-height: 200px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+          #hu-preview { display: none; max-width: 100%; max-height: 100%; border-radius: 6px; }
+          #hu-preview.loaded { display: block; }
+          #hu-preview-ph { font-size: 12px; color: var(--muted); padding: 20px; text-align: center; }
+          #hu-place[disabled] { opacity: 0.5; cursor: default; }
+          #hu-anim { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+          #hu-anim .hu-actions { margin-top: 6px; }
+          #hu-chars { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+          #hu-chars .hu-actions { margin-top: 6px; }
+          .hu-anim-hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4; }
+          .hu-rigsel select { margin-left: 4px; }
+          .hu-playlist { list-style: decimal inside; margin: 6px 0; padding: 0 0 0 4px; font-size: 12px; color: var(--text); max-height: 150px; overflow-y: auto; }
+          .hu-playlist li { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+          .hu-playlist li .hu-pl-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .hu-playlist li button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 4px; }
+          .hu-playlist:empty::after { content: "empty — pick a clip and press ＋ to playlist"; color: var(--muted); font-size: 11px; }
+          .hu-seq-params { flex-wrap: wrap; gap: 6px; }
+          .hu-seq-params input[type=number] { width: 56px; padding: 4px 6px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--panel); color: var(--text); }
+          .hu-seq-params .hu-inline { flex: 0 0 auto; margin-left: 10px; }
+          .hu-seq-params .hu-unit, .cr-row .hu-unit { color: var(--muted); font-size: 11px; }
+          .hu-adv { margin-top: 8px; border-top: 1px solid var(--border-soft); padding-top: 6px; }
+          .hu-adv > summary { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); cursor: pointer; padding: 3px 0; }
+          .hu-adv[open] > summary { margin-bottom: 8px; }
+          .hu-adv .hu-fslider { display: grid; grid-template-columns: 100px 12px 1fr 12px; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 3px; }
+          .hu-adv .hu-fslider > label { color: var(--text); }
+          .hu-adv .hu-fslider .hu-end { color: var(--muted); text-align: center; }
+          .hu-adv .hu-fslider input[type=range] { width: 100%; accent-color: var(--accent); }
+          .hu-face-reset { font-size: 11px; color: var(--muted); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 5px 0 0; }
+          /* Custom Rig tab */
+          .cr-wrap { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+          .cr-row { display: flex; align-items: center; gap: 8px; }
+          .cr-row > label { flex: 0 0 56px; font-size: 12px; color: var(--text); }
+          .cr-row select { flex: 1; min-width: 0; text-overflow: ellipsis; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); }
+          .cr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+          .cr-note { font-size: 11px; color: var(--muted); line-height: 1.45; margin: 2px 0; }
+          .cr-info { font-size: 12px; color: var(--text); background: var(--panel); border: 1px solid var(--border-soft); border-radius: 8px; padding: 8px 10px; line-height: 1.5; }
+          .cr-info b { color: var(--accent); }
+          .cr-listhead { justify-content: space-between; }
+          .cr-listtitle { font-size: 12px; color: var(--muted); }
+          .cr-folderlist { display: flex; flex-direction: column; gap: 4px; max-height: 190px; overflow-y: auto; }
+          .cr-folderrow { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); cursor: pointer; }
+          .cr-folderrow:hover { border-color: var(--accent); }
+          .cr-folderrow.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+          .cr-fname { flex: 1; min-width: 0; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .cr-fbadge { font-size: 10px; color: var(--muted); white-space: nowrap; }
+          .cr-fbadge.locked { color: var(--warn, #d09030); }
+          .cr-bindrow { margin-top: 8px; flex-wrap: wrap; }
+          .cr-bindrow input[type="number"] { flex: 0 0 76px; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); outline: none; }
+          .cr-bindrow .cr-inline { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text); }
+          .cr-ficon { flex: 0 0 auto; border: none; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 4px; border-radius: 6px; line-height: 1; }
+          .cr-ficon:hover { color: var(--text); background: var(--border-soft); }
+          .cr-folderempty { font-size: 11px; color: var(--muted); padding: 8px 2px; }
+        </style>
+        <div class="art-panel" id="panel-human">
+          <div id="hu-split">
+            <div id="hu-preview-pane">
+              <div id="hu-preview-box">
+                <span id="hu-preview-ph">no preview yet — press Generate</span>
+                <img id="hu-preview" alt="Preview" />
+              </div>
+            </div>
+            <div id="hu-controls">
+              <div id="hu-wrap">
+                <div class="hu-row"><label>Name</label><input id="hu-name" class="hu-text" placeholder="Human" /></div>
+
+            <div class="hu-section">Body</div>
+            <div class="hu-slider"><label>Gender</label><span class="hu-end">&#9792;</span><input type="range" id="hu-gender" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">&#9794;</span><output id="hu-gender-v">0.50</output></div>
+            <div class="hu-slider"><label>Age</label><span class="hu-end">1</span><input type="range" id="hu-age" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">90</span><output id="hu-age-v">25 y</output></div>
+            <div class="hu-slider"><label>Muscle</label><span class="hu-end">&#8722;</span><input type="range" id="hu-muscle" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-muscle-v">0.50</output></div>
+            <div class="hu-slider"><label>Weight</label><span class="hu-end">&#8722;</span><input type="range" id="hu-weight" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-weight-v">0.50</output></div>
+            <div class="hu-slider"><label>Height</label><span class="hu-end">&#8722;</span><input type="range" id="hu-height" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-height-v">1.66 m</output></div>
+            <div class="hu-slider"><label>Proportions</label><span class="hu-end">&#8722;</span><input type="range" id="hu-proportions" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-proportions-v">0.50</output></div>
+            <div class="hu-slider"><label>Cup size</label><span class="hu-end">&#8722;</span><input type="range" id="hu-cupsize" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-cupsize-v">0.50</output></div>
+            <div class="hu-slider"><label>Firmness</label><span class="hu-end">&#8722;</span><input type="range" id="hu-firmness" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span><output id="hu-firmness-v">0.50</output></div>
+            <div class="hu-row"><label>Race</label><select id="hu-race"><option value="caucasian">Caucasian</option><option value="asian">Asian</option><option value="african">African</option></select></div>
+
+            <div class="hu-section">Appearance</div>
+            <div class="hu-row"><label>Skin</label><select id="hu-skin"><option value="auto">Auto (match gender/age/race)</option><option value="procedural">Procedural (no textures)</option></select></div>
+            <div class="hu-row"><label>Eye color</label><select id="hu-eyecolor"><option value="">Default</option><option value="brown">Brown</option><option value="brownlight">Brown (light)</option><option value="blue">Blue</option><option value="lightblue">Blue (light)</option><option value="deepblue">Blue (deep)</option><option value="bluegreen">Blue-green</option><option value="green">Green</option><option value="grey">Grey</option><option value="ice">Ice</option></select></div>
+            <div class="hu-row"><label>Hair</label><select id="hu-hair"><option value="">None</option><option value="short01">Short 1</option><option value="short02">Short 2</option><option value="long01">Long</option><option value="bob01">Bob 1</option><option value="bob02">Bob 2</option><option value="braid01">Braid</option><option value="ponytail01">Ponytail</option><option value="afro01">Afro</option></select></div>
+            <div class="hu-row"><label>Clothes</label><select id="hu-clothes"><option value="">None</option><option value="male_casualsuit01">Male casual suit 1</option><option value="male_casualsuit02">Male casual suit 2</option><option value="female_casualsuit01">Female casual suit 1</option><option value="female_casualsuit02">Female casual suit 2</option><option value="female_elegantsuit01">Female elegant suit</option><option value="female_sportsuit01">Female sport suit</option><option value="fedora01">Fedora</option></select></div>
+            <div class="hu-toggles">
+              <label><input type="checkbox" id="hu-eyes" checked> Eyes</label>
+              <label><input type="checkbox" id="hu-teeth" checked> Teeth</label>
+              <label><input type="checkbox" id="hu-brows" checked> Brows</label>
+              <label><input type="checkbox" id="hu-lashes" checked> Lashes</label>
+              <label class="hu-rigsel">Rig <select id="hu-rig"><option value="">None</option><option value="default">Standard</option><option value="mixamo">Mixamo (animatable)</option></select></label>
+            </div>
+
+            <details class="hu-adv">
+              <summary>Face — advanced (optional)</summary>
+              <div class="hu-fslider"><label>Head width</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-head-width" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Face length</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-head-length" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Nose size</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-nose-size" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Nose width</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-nose-width" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Nose length</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-nose-length" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Nose bridge</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-nose-bridge" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Mouth width</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-mouth-width" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Lip fullness</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-lip-fullness" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Mouth height</label><span class="hu-end">&#8595;</span><input type="range" id="hu-face-mouth-height" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">&#8593;</span></div>
+              <div class="hu-fslider"><label>Chin height</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-chin-height" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Chin forward</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-chin-prom" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Cheeks</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-cheeks" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <div class="hu-fslider"><label>Eye spacing</label><span class="hu-end">&#8722;</span><input type="range" id="hu-face-eye-spacing" min="0" max="1" step="0.01" value="0.5"><span class="hu-end">+</span></div>
+              <button type="button" class="hu-face-reset" id="hu-face-reset">reset face</button>
+            </details>
+
+            <div class="hu-actions">
+              <button class="art-btn" id="hu-generate">Generate &#129485;</button>
+              <button class="art-btn" id="hu-place" disabled>Place in scene &#10003;</button>
+            </div>
+            <div id="hu-status">Generate builds a hidden preview — Place drops it into the scene.</div>
+
+            <div id="hu-chars">
+              <div class="hu-section">Characters (saved skins)</div>
+              <div class="hu-row">
+                <label>Character</label>
+                <select id="hu-char-sel"><option value="">MakeHuman (use Generate above)</option></select>
+                <button class="cr-ficon" id="hu-char-rename" type="button" title="Rename" disabled>&#9998;</button>
+                <button class="cr-ficon" id="hu-char-del" type="button" title="Delete" disabled>&#128465;</button>
+              </div>
+              <div class="hu-actions">
+                <button class="art-btn" id="hu-char-spawn" type="button" disabled>Spawn &#129485;</button>
+                <button class="art-btn" id="hu-char-save" type="button" title="Store the rigged character in the scene as a reusable skin">&#128190; Save character</button>
+              </div>
+              <div class="hu-anim-hint"><b>Save character</b> stores the rigged human standing in your scene &mdash; every mesh, its textures and its skeleton &mdash; as a reusable skin. <b>Spawn</b> drops a saved one back in, already selected. Saved characters <b>share the animation list below</b>: every clip works on every character, because they all wear the same Mixamo skeleton. That also covers a character you rigged yourself at <b>mixamo.com</b> &mdash; import it, save it here once, and it animates like a MakeHuman figure. Creature rigs (deer, monsters) are refused here on purpose &mdash; they belong in the <b>Custom Rig</b> tab.</div>
+            </div>
+
+            <div id="hu-anim">
+              <div class="hu-row"><label>Animation</label><select id="hu-anim-sel"><option value="">— no animations —</option></select></div>
+              <div class="hu-actions">
+                <button class="art-btn" id="hu-anim-add" type="button">&#43; Add FBX</button>
+                <button class="art-btn" id="hu-anim-save" type="button" title="Save the animation currently on the selected character as a reusable clip">&#128190; Save FBX</button>
+                <button class="art-btn" id="hu-animate" type="button">Animate &#127939;</button>
+                <button class="art-btn" id="hu-anim-append" type="button">Append &#9654;</button>
+                <input type="file" id="hu-anim-file" accept=".fbx" style="display:none">
+              </div>
+
+              <div class="hu-section">Sequence (playlist)</div>
+              <div class="hu-row"><button class="art-btn" id="hu-pl-add" type="button">&#43; to playlist</button><button class="art-btn" id="hu-pl-clear" type="button">Clear</button></div>
+              <ol id="hu-playlist" class="hu-playlist"></ol>
+              <div class="hu-row hu-seq-params">
+                <label>Blend</label><input type="number" id="hu-blend" min="0" max="60" step="1" value="8"><span class="hu-unit">f</span>
+                <label class="hu-inline">Extra drift</label><input type="number" id="hu-speed" step="0.01" value="0" title="Only for Mixamo &quot;In Place&quot; clips that carry no root motion. Leave at 0 for normal clips — the real travel comes from the clip itself."><span class="hu-unit">m/f</span>
+              </div>
+              <div class="hu-actions"><button class="art-btn" id="hu-sequence" type="button">Sequence &#127916;</button></div>
+
+              <div class="hu-anim-hint">Needs Rig = <b>Mixamo</b>. <b>Animate</b> = one clip (replaces). Pick <b>&#10024; Describe a new motion…</b> in the list to generate one from text instead — that runs on your GPU (roughly <b>4 min</b> for 6 s) and Phoenix stays usable while it does. Generated clips stay in the list, so reusing one is free. <b>Append</b> = add the selected clip to the end. <b>Playlist → Sequence</b> = build the whole chain, blended at the seams — each clip carries its <b>own real travel</b> and picks up where the previous one stood. <b>Extra drift</b> = leave at <b>0</b> for normal clips; only Mixamo "In Place" clips (no root motion of their own) need a value here.</div>
+            </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="art-panel" id="panel-customrig">
+          <div class="cr-wrap">
+            <!-- main view: every folder visible at once -->
+            <div id="cr-mainview">
+              <div class="cr-row cr-listhead">
+                <span class="cr-listtitle">Rig folders</span>
+                <button class="art-btn" id="cr-new" type="button">&#43; New folder</button>
+              </div>
+              <div id="cr-folderlist" class="cr-folderlist"></div>
+            </div>
+
+            <!-- opened view: one folder in focus, the rest tucked into a switcher -->
+            <div id="cr-openhead" class="cr-row" style="display:none">
+              <button class="art-btn" id="cr-back" type="button">&#8592; Back</button>
+              <select id="cr-switch"></select>
+            </div>
+
+            <!-- locked: no skeleton yet -->
+            <div id="cr-locked" style="display:none">
+              <p class="cr-note">This folder has <b>no skeleton</b> yet. Select an armature in the scene (a rigged creature, a custom rig), then assign it. Every clip and mesh in this folder gets <b>bound</b> to that skeleton — that's what makes animations reusable here.</p>
+              <div class="cr-actions"><button class="art-btn" id="cr-assign" type="button">&#129460; Assign selected skeleton</button></div>
+            </div>
+
+            <!-- unlocked: skeleton assigned -->
+            <div id="cr-unlocked" style="display:none">
+              <div class="cr-info" id="cr-info"></div>
+              <div class="cr-row">
+                <label>Spawn</label>
+                <select id="cr-variant"><option value="rig">bare rig</option></select>
+                <button class="art-btn" id="cr-spawn" type="button">Spawn &#129460;</button>
+              </div>
+              <div class="cr-row">
+                <label>Animate</label>
+                <select id="cr-clip"><option value="">— no clips yet —</option></select>
+                <button class="art-btn" id="cr-animate" type="button">Animate &#9654;</button>
+                <button class="art-btn" id="cr-append" type="button">Append &#9654;</button>
+              </div>
+              <div class="cr-row">
+                <label>Sequence</label>
+                <button class="art-btn" id="cr-pl-add" type="button">&#43; to playlist</button>
+                <button class="art-btn" id="cr-pl-clear" type="button">Clear</button>
+              </div>
+              <ol id="cr-playlist" class="hu-playlist"></ol>
+              <div class="cr-row">
+                <label>Blend</label>
+                <input type="number" id="cr-blend" min="0" max="60" step="1" value="8" title="Crossfade in frames between two clips. 0 = hard cut.">
+                <span class="hu-unit">f</span>
+                <button class="art-btn" id="cr-sequence" type="button">Sequence &#127916;</button>
+              </div>
+              <div class="cr-actions">
+                <button class="art-btn" id="cr-save" type="button">&#128190; Save FBX</button>
+                <button class="art-btn" id="cr-savemesh" type="button">&#129513; Save Mesh</button>
+                <button class="art-btn" id="cr-reassign" type="button">Re-assign skeleton</button>
+              </div>
+              <div class="cr-row cr-bindrow">
+                <label>Rig to mesh</label>
+                <input type="number" id="cr-voxel" min="0" step="0.001" value="0" title="Voxel size for the remesh. 0 = derive it from the mesh's own size (its bounding box), which is what you want unless you are correcting a result.">
+                <label class="cr-inline"><input type="checkbox" id="cr-remesh" checked> Remesh</label>
+                <button class="art-btn" id="cr-prepare" type="button">Prepare &#9881;</button>
+                <button class="art-btn" id="cr-bind" type="button">Bind &#129460;</button>
+              </div>
+              <p class="cr-note"><b>Rig to mesh</b> binds a <i>bare</i> mesh to this folder's skeleton, in two steps with your own work in between. <b>Prepare</b> joins the selected mesh pieces and voxel-remeshes them into one closed piece &mdash; that is what makes automatic weights work at all on generated meshes. Then check the rig actually sits inside the mesh: fit bones in <b>Edit mode</b> (that <i>is</i> the rest pose &mdash; posing in Pose mode looks right and collapses on the first animation). Then select mesh + rig and <b>Bind</b>, which reports how many vertices really got weighted. ⚠️ <b>Remesh is destructive</b> (UVs and materials go, texture comes back via a bake) &mdash; turn it <b>off</b> for hard-surface meshes and anything already clean. Same skeleton, different tissue = the clips in this folder all still fit.</p>
+              <p class="cr-note"><b>Spawn</b> the rig, keyframe your animation, then <b>Save FBX</b> to store the clip. <b>Animate</b> re-applies a saved clip onto the rig selected in the scene. <b>Append</b> hangs the selected clip onto the end of what is already playing; <b>playlist → Sequence</b> builds the whole chain at once, blended at the seams — each clip picks up where the previous one stood and faces the way it was heading, and the creature stays where you put it. The playlist is per folder and clears when you switch. <b>Save Mesh</b> stores every mesh bound to this skeleton as a spawnable variant (rig + full creature). Everything binds to this folder's skeleton — no cross-rig retarget needed.</p>
+            </div>
           </div>
         </div>
 
@@ -890,6 +1156,8 @@
         prompt: document.getElementById('panel-prompt'),
         image:  document.getElementById('panel-image'),
         mesh:   document.getElementById('panel-mesh'),
+        human:  document.getElementById('panel-human'),
+        customrig: document.getElementById('panel-customrig'),
       };
 
       function switchTab(tab) {
@@ -904,6 +1172,636 @@
       tabBtns.forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
       });
+
+      // ── Human (MakeHuman / MPFB2) panel ──────────────────────────────────────
+      (function wireHumanPanel() {
+        const panel = document.getElementById('panel-human');
+        if (!panel) return;
+        const byId = id => document.getElementById(id);
+        // live slider readouts — gender plain 0..1, age in years, height in meters.
+        // Age anchors from MPFB age.json (1yr@0, 25yr@0.5, 90yr@1). Height curve + age/gender
+        // factors measured empirically off the generated mesh (neutral adult baseline).
+        const lerpPts = (pts, x) => {
+          if (x <= pts[0][0]) return pts[0][1];
+          for (let i = 1; i < pts.length; i++) {
+            if (x <= pts[i][0]) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i]; return y0 + (y1 - y0) * (x - x0) / (x1 - x0); }
+          }
+          return pts[pts.length - 1][1];
+        };
+        const H_CURVE = [[0, 1.30], [0.25, 1.48], [0.5, 1.66], [0.75, 2.01], [1.0, 2.37]];
+        const G_FAC   = [[0, 0.959], [0.5, 1.0], [1, 1.042]];
+        const A_FAC   = [[0, 0.402], [0.5, 1.0], [1, 0.987]];
+        const ageYears = a => (a < 0.5 ? Math.round(1 + 48 * a) : Math.round(25 + 130 * (a - 0.5)));
+        const heightM  = () => lerpPts(H_CURVE, +byId('hu-height').value)
+                             * lerpPts(A_FAC, +byId('hu-age').value)
+                             * lerpPts(G_FAC, +byId('hu-gender').value);
+        const FMT = {
+          'hu-age':    () => ageYears(+byId('hu-age').value) + ' y',
+          'hu-height': () => heightM().toFixed(2) + ' m',
+        };
+        const refreshReadout = id => {
+          const out = byId(id + '-v'); if (!out) return;
+          out.textContent = FMT[id] ? FMT[id]() : (+byId(id).value).toFixed(2);
+        };
+        panel.querySelectorAll('input[type=range]').forEach(r => {
+          r.addEventListener('input', () => {
+            refreshReadout(r.id);
+            if (r.id === 'hu-age' || r.id === 'hu-gender') refreshReadout('hu-height'); // both shift height
+          });
+          refreshReadout(r.id);
+        });
+        const SLIDERS = ['gender', 'age', 'muscle', 'weight', 'height', 'proportions', 'cupsize', 'firmness'];
+        // Face detail sliders → verified MakeHuman targets. Bidirectional: 0.5 = neutral,
+        // >0.5 drives the first target list, <0.5 the second; magnitude 0..1.
+        const FACE_TARGETS = {
+          'head-width':   [['head/head-scale-horiz-incr'], ['head/head-scale-horiz-decr']],
+          'head-length':  [['head/head-scale-vert-incr'], ['head/head-scale-vert-decr']],
+          'nose-size':    [['nose/nose-volume-incr'], ['nose/nose-volume-decr']],
+          'nose-width':   [['nose/nose-scale-horiz-incr'], ['nose/nose-scale-horiz-decr']],
+          'nose-length':  [['nose/nose-scale-vert-incr'], ['nose/nose-scale-vert-decr']],
+          'nose-bridge':  [['nose/nose-hump-incr'], ['nose/nose-hump-decr']],
+          'mouth-width':  [['mouth/mouth-scale-horiz-incr'], ['mouth/mouth-scale-horiz-decr']],
+          'lip-fullness': [['mouth/mouth-scale-vert-incr'], ['mouth/mouth-scale-vert-decr']],
+          'mouth-height': [['mouth/mouth-trans-up'], ['mouth/mouth-trans-down']],
+          'chin-height':  [['chin/chin-height-incr'], ['chin/chin-height-decr']],
+          'chin-prom':    [['chin/chin-prominent-incr'], ['chin/chin-prominent-decr']],
+          'cheeks':       [['cheek/l-cheek-volume-incr', 'cheek/r-cheek-volume-incr'], ['cheek/l-cheek-volume-decr', 'cheek/r-cheek-volume-decr']],
+          'eye-spacing':  [['eyes/l-eye-trans-out', 'eyes/r-eye-trans-out'], ['eyes/l-eye-trans-in', 'eyes/r-eye-trans-in']],
+        };
+        const FACE_KEYS = Object.keys(FACE_TARGETS);
+        const buildFaceTargets = () => {
+          const t = {};
+          FACE_KEYS.forEach(key => {
+            const el = byId('hu-face-' + key);
+            if (!el) return;
+            const d = parseFloat(el.value) - 0.5;
+            if (Math.abs(d) < 0.02) return; // near-center = neutral, skip
+            const mag = Math.min(1, Math.abs(d) * 2);
+            (d > 0 ? FACE_TARGETS[key][0] : FACE_TARGETS[key][1]).forEach(n => { t[n] = mag; });
+          });
+          return t;
+        };
+        const genBtn = byId('hu-generate');
+        genBtn.addEventListener('click', () => {
+          const input = {};
+          SLIDERS.forEach(k => { input[k] = parseFloat(byId('hu-' + k).value); });
+          input.race = { [byId('hu-race').value]: 1 };
+          const name = byId('hu-name').value.trim();
+          if (name) input.name = name;
+          if (byId('hu-skin').value === 'procedural') input.skin = false; // "auto" = default → omit
+          const ec = byId('hu-eyecolor').value; if (ec) input.eyeColor = ec;
+          const hair = byId('hu-hair').value; if (hair) input.hair = hair;
+          const clothes = byId('hu-clothes').value; if (clothes) input.clothes = clothes;
+          input.eyes      = byId('hu-eyes').checked;
+          input.teeth     = byId('hu-teeth').checked;
+          input.eyebrows  = byId('hu-brows').checked;
+          input.eyelashes = byId('hu-lashes').checked;
+          const rigSel = byId('hu-rig').value; if (rigSel) input.rig = rigSel;
+          input.staged = true; // tab flow: build hidden, show preview, commit on Place
+          const ft = buildFaceTargets();
+          if (Object.keys(ft).length) input.targets = ft;
+          const st = byId('hu-status');
+          if (st) st.textContent = 'Generating… (this can take a few seconds)';
+          postAction('make_human', input);
+        });
+        const placeBtn = byId('hu-place');
+        if (placeBtn) {
+          placeBtn.addEventListener('click', () => {
+            const st = byId('hu-status');
+            if (st) st.textContent = 'Placing in scene…';
+            placeBtn.disabled = true;
+            postAction('place_human', {});
+          });
+        }
+        const faceReset = byId('hu-face-reset');
+        if (faceReset) {
+          faceReset.addEventListener('click', () => {
+            FACE_KEYS.forEach(k => { const el = byId('hu-face-' + k); if (el) el.value = 0.5; });
+          });
+        }
+
+        // ── animation controls (Mixamo FBX retarget) ──
+        const animSel = byId('hu-anim-sel');
+        const refreshAnims = async (selectName) => {
+          if (!animSel) return;
+          try {
+            const r = await fetch('/animations');
+            const j = await r.json();
+            const list = (j && j.animations) || [];
+            // "Describe a new motion" is an ENTRY in the list, not a second button:
+            // generating and picking are the same intent (choose what plays), so they
+            // belong in the same control. Animate then routes on what's selected.
+            const gen = '<option value="__generate__">✨ Describe a new motion…</option>';
+            animSel.innerHTML = gen + (list.length
+              ? list.map(n => '<option value="' + n.replace(/"/g, '&quot;') + '">' + n + '</option>').join('')
+              : '');
+            animSel.value = selectName || (list.length ? list[0] : '__generate__');
+          } catch (_) { /* ignore */ }
+        };
+        refreshAnims();
+        // hy_motion writes a new clip into animations/ while the tab is open — let the
+        // reply handler pull the list again so the generated clip is selectable at once.
+        window.__phoenixRefreshAnims = refreshAnims;
+        const animAdd  = byId('hu-anim-add');
+        const animFile = byId('hu-anim-file');
+        if (animAdd && animFile) {
+          animAdd.addEventListener('click', () => animFile.click());
+          animFile.addEventListener('change', async () => {
+            const f = animFile.files && animFile.files[0];
+            if (!f) return;
+            const st = byId('hu-status');
+            if (st) st.textContent = 'Uploading ' + f.name + '…';
+            try {
+              const buf = await f.arrayBuffer();
+              const r = await fetch('/upload-animation?name=' + encodeURIComponent(f.name),
+                { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: buf });
+              const j = await r.json();
+              if (j && j.ok) { await refreshAnims(j.name); if (st) st.textContent = 'Added ' + j.name; }
+              else if (st) st.textContent = 'Upload failed: ' + ((j && j.error) || 'error');
+            } catch (_) { if (st) st.textContent = 'Upload failed'; }
+            animFile.value = '';
+          });
+        }
+        // Text→motion takes minutes, so the status line gets a running clock: without one
+        // there is no sign the job is alive. Elapsed time only — no invented percentage.
+        let genTimer = null;
+        const stopGenClock = () => { if (genTimer) { clearInterval(genTimer); genTimer = null; } };
+        const startGenClock = (desc, secs) => {
+          const st = byId('hu-status');
+          const t0 = Date.now();
+          const eta = Math.max(120, Math.round(secs * 38));   // measured: ~230 s for 6 s
+          const tick = () => {
+            if (!st) return;
+            const e = Math.round((Date.now() - t0) / 1000);
+            const mm = String(Math.floor(e / 60)), ss = String(e % 60).padStart(2, '0');
+            st.textContent = '⏳ Generating "' + desc + '" — ' + mm + ':' + ss +
+                             ' of ~' + Math.round(eta / 60) + ' min. Phoenix stays usable.';
+          };
+          stopGenClock();
+          tick();
+          genTimer = setInterval(tick, 1000);
+        };
+        window.__phoenixStopGenClock = stopGenClock;
+
+        // The generate dialog reuses the app's existing modal instead of a second overlay.
+        // It opens fresh every time, so the description can never linger and silently
+        // trigger a second generation on the next Animate click.
+        const openMotionDialog = (charName) => {
+          openModal('Describe a motion');
+          const body = byId('tool-body');
+          body.innerHTML =
+            '<p class="modal-note">In English, describe the <b>motion</b> — not the character. ' +
+            'Runs on your GPU (~4 min for 6 s); Phoenix stays usable meanwhile. ' +
+            'The clip is saved and reusable.<br>' +
+            // The one failure that looks like a bad prompt but is a setup problem: an A-pose
+            // template gives a hunched figure every time, no matter what you type. Named here
+            // because this dialog is where the user is standing when it happens.
+            '<small>Comes out hunched with bent forearms? That is the <b>T-pose template</b>, not your ' +
+            'prompt — see <i>Text → motion</i> in the README (<code>hyMotion.template</code>).</small></p>' +
+            '<textarea id="mo-prompt" rows="3" style="width:100%;box-sizing:border-box" ' +
+            'placeholder="a person walks forward, stops and looks around"></textarea>' +
+            '<div class="hu-row" style="margin-top:8px"><label>Length</label>' +
+            '<input type="number" id="mo-secs" min="1" max="20" step="1" value="6"><span class="hu-unit">s</span></div>' +
+            '<div class="hu-actions" style="margin-top:10px">' +
+            '<button class="art-btn" id="mo-go" type="button">Generate &amp; animate ✨</button>' +
+            '<button class="art-btn" id="mo-cancel" type="button">Cancel</button></div>';
+          const ta = byId('mo-prompt');
+          if (ta) ta.focus();
+          byId('mo-cancel').addEventListener('click', closeModal);
+          byId('mo-go').addEventListener('click', () => {
+            const desc = (byId('mo-prompt').value || '').trim();
+            if (!desc) { byId('mo-prompt').focus(); return; }
+            const secs = parseInt(byId('mo-secs').value, 10);
+            const input = { prompt: desc, duration: isNaN(secs) ? 6 : secs };
+            if (charName) input.character = charName;
+            closeModal();
+            startGenClock(desc, input.duration);
+            postAction('hy_motion', input);
+          });
+        };
+
+        // One button, two paths — routed by what is selected, not by a second control.
+        // Save the animation that's on the character right now as a reusable clip.
+        const saveBtn = byId('hu-anim-save');
+        if (saveBtn) {
+          saveBtn.addEventListener('click', () => {
+            const st = byId('hu-status');
+            const name = byId('hu-name').value.trim();
+            const suggested = 'my_clip';
+            const clipName = window.prompt('Save the current animation as (clip name):', suggested);
+            if (!clipName) return;
+            const input = { name: clipName };
+            if (name) input.character = name;
+            if (st) st.textContent = 'Saving "' + clipName + '"…';
+            postAction('save_animation', input);
+          });
+        }
+
+        const animateBtn = byId('hu-animate');
+        if (animateBtn) {
+          animateBtn.addEventListener('click', () => {
+            const st = byId('hu-status');
+            const name = byId('hu-name').value.trim();
+            const fbx = animSel ? animSel.value : '';
+
+            if (fbx === '__generate__') { openMotionDialog(name); return; }
+            if (!fbx) { if (st) st.textContent = 'Pick a clip, or choose "Describe a new motion…".'; return; }
+            const input = { fbx };
+            if (name) input.character = name;
+            if (st) st.textContent = 'Animating from ' + fbx + '… (retarget + bake)';
+            postAction('animate_human', input);
+          });
+        }
+
+        // ── sequence: playlist + Sequence/Append (blended NLA chain) ──
+        const playlist = [];
+        const plEl = byId('hu-playlist');
+        const renderPlaylist = () => {
+          if (!plEl) return;
+          plEl.innerHTML = playlist.map((n, i) =>
+            '<li><span class="hu-pl-name">' + n + '</span><button type="button" data-i="' + i + '" title="remove">&#10005;</button></li>').join('');
+        };
+        if (plEl) {
+          plEl.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-i]');
+            if (btn) { playlist.splice(parseInt(btn.dataset.i, 10), 1); renderPlaylist(); }
+          });
+        }
+        const plAdd = byId('hu-pl-add');
+        if (plAdd) plAdd.addEventListener('click', () => {
+          const v = animSel ? animSel.value : '';
+          if (!v || v === '__generate__') return;      // the generate entry is not a clip
+          playlist.push(v); renderPlaylist();
+        });
+        const plClear = byId('hu-pl-clear');
+        if (plClear) plClear.addEventListener('click', () => { playlist.length = 0; renderPlaylist(); });
+        const seqParams = () => {
+          const blend = parseInt(byId('hu-blend').value, 10);
+          const speed = parseFloat(byId('hu-speed').value);
+          const input = { blend: isNaN(blend) ? 8 : blend, speed: isNaN(speed) ? 0 : speed };
+          const name = byId('hu-name').value.trim();
+          if (name) input.character = name;
+          return input;
+        };
+        const seqBtn = byId('hu-sequence');
+        if (seqBtn) seqBtn.addEventListener('click', () => {
+          const st = byId('hu-status');
+          if (!playlist.length) { if (st) st.textContent = 'Playlist is empty — add clips first.'; return; }
+          const input = Object.assign(seqParams(), { fbxs: playlist.slice(), append: false });
+          if (st) st.textContent = 'Building sequence (' + playlist.length + ' clips)… (retarget + bake each)';
+          postAction('sequence_animations', input);
+        });
+        const appendBtn = byId('hu-anim-append');
+        if (appendBtn) appendBtn.addEventListener('click', () => {
+          const v = animSel ? animSel.value : '';
+          const st = byId('hu-status');
+          if (!v || v === '__generate__') { if (st) st.textContent = 'Pick a clip to append.'; return; }
+          const input = Object.assign(seqParams(), { fbxs: [v], append: true });
+          if (st) st.textContent = 'Appending ' + v + '… (to the end of the sequence)';
+          postAction('sequence_animations', input);
+        });
+        renderPlaylist();
+
+        // ── character library (saved "skins") ──
+        // Deliberately NOT a second folder system like the Custom-Rig tab: every character
+        // here wears the same mixamorig: skeleton, so they all share the animation list
+        // above. A character is just a saved mesh+rig — hence one dropdown, no clips of
+        // its own. The empty value is the MakeHuman generator (Generate → Place), which is
+        // why it can be neither renamed nor deleted: it isn't a file.
+        const charSel = byId('hu-char-sel');
+        if (charSel) {
+          const spawnBtn  = byId('hu-char-spawn');
+          const saveBtn   = byId('hu-char-save');
+          const renameBtn = byId('hu-char-rename');
+          const delBtn    = byId('hu-char-del');
+          let chars = [];
+
+          const syncCharButtons = () => {
+            const picked = !!charSel.value;
+            [spawnBtn, renameBtn, delBtn].forEach(b => { if (b) b.disabled = !picked; });
+            if (spawnBtn) spawnBtn.title = picked
+              ? 'Spawn the saved character into the scene'
+              : 'Pick a saved character — the MakeHuman entry uses Generate → Place above';
+          };
+
+          const refreshChars = async (selectName) => {
+            try {
+              const r = await fetch('/characters');
+              const j = await r.json();
+              chars = (j && j.characters) || [];
+            } catch (_) { chars = []; }
+            const keep = selectName || charSel.value;
+            charSel.innerHTML = '<option value="">MakeHuman (use Generate above)</option>' +
+              chars.map(c => '<option value="' + c.name.replace(/"/g, '&quot;') + '">' + c.name +
+                ' (' + c.meshCount + ' mesh' + (c.meshCount === 1 ? '' : 'es') + ')</option>').join('');
+            charSel.value = (keep && chars.some(c => c.name === keep)) ? keep : '';
+            syncCharButtons();
+          };
+          // save_character writes a new .blend while the tab is open — the reply handler
+          // pulls the list again so it is selectable at once (same idiom as the clips).
+          window.__phoenixRefreshChars = refreshChars;
+          refreshChars();
+          charSel.addEventListener('change', syncCharButtons);
+
+          if (spawnBtn) spawnBtn.addEventListener('click', () => {
+            const name = charSel.value;
+            if (!name) return;
+            const st = byId('hu-status');
+            if (st) st.textContent = 'Spawning "' + name + '"…';
+            postAction('spawn_character', { name });
+          });
+
+          if (saveBtn) saveBtn.addEventListener('click', () => {
+            const name = window.prompt('Name this character (e.g. "hero", "guard_a"):', '');
+            if (!name) return;
+            const st = byId('hu-status');
+            if (st) st.textContent = 'Saving "' + name + '"… (select the rigged character in the scene first)';
+            postAction('save_character', { name });
+          });
+
+          if (renameBtn) renameBtn.addEventListener('click', async () => {
+            const from = charSel.value;
+            if (!from) return;
+            const to = window.prompt('Rename character "' + from + '" to:', from);
+            if (!to || to === from) return;
+            try {
+              const r = await fetch('/character-rename', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ from, to }) });
+              const j = await r.json();
+              if (j && j.ok) await refreshChars(j.character.name);
+              else window.alert('Could not rename: ' + ((j && j.error) || 'error'));
+            } catch (_) { window.alert('Could not rename character.'); }
+          });
+
+          if (delBtn) delBtn.addEventListener('click', async () => {
+            const name = charSel.value;
+            if (!name) return;
+            if (!window.confirm('Delete character "' + name + '"? This cannot be undone.')) return;
+            try {
+              const r = await fetch('/character-delete', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }) });
+              const j = await r.json();
+              if (j && j.ok) await refreshChars('');
+              else window.alert('Could not delete: ' + ((j && j.error) || 'error'));
+            } catch (_) { window.alert('Could not delete character.'); }
+          });
+        }
+      })();
+
+      // ── Custom Rig panel ─────────────────────────────────────────────────────
+      (function wireCustomRigPanel() {
+        const byId = id => document.getElementById(id);
+        const listEl = byId('cr-folderlist');
+        if (!listEl) return;
+        let folders = [];         // [{name, hasSkeleton, boneCount, variants, clips}]
+        let selectedName = '';    // the picked folder (was the <select> value)
+        const esc = s => String(s).replace(/[&<>"']/g, c =>
+          ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        const currentFolder = () => folders.find(f => f.name === selectedName) || null;
+
+        // ── playlist (Sequence) ──
+        // Declared before render(), because render() empties it whenever the open folder
+        // changes: clips are bound to ONE skeleton, so carrying a deer's playlist into the
+        // monster folder could only ever produce a refused chain.
+        const crPlaylist = [];
+        let plFolder = null;
+        const crPlEl = byId('cr-playlist');
+        function renderCrPlaylist() {
+          if (!crPlEl) return;
+          crPlEl.innerHTML = crPlaylist.map((n, i) =>
+            '<li><span class="hu-pl-name">' + esc(n) + '</span>' +
+            '<button type="button" data-i="' + i + '" title="remove">&#10005;</button></li>').join('');
+        }
+        if (crPlEl) {
+          crPlEl.addEventListener('click', (ev) => {
+            const b = ev.target.closest('button[data-i]');
+            if (b) { crPlaylist.splice(parseInt(b.dataset.i, 10), 1); renderCrPlaylist(); }
+          });
+        }
+
+        // Render the folder list (the picker) — one row per folder with its state + row actions.
+        function renderList() {
+          if (!folders.length) {
+            listEl.innerHTML = '<div class="cr-folderempty">No rig folders yet. Create one to start a creature/rig.</div>';
+            return;
+          }
+          listEl.innerHTML = folders.map(f => {
+            const badge = f.hasSkeleton
+              ? '<span class="cr-fbadge">' + f.boneCount + 'b · ' + (f.clips.length || 0) + ' clips</span>'
+              : '<span class="cr-fbadge locked">no skeleton</span>';
+            const n = esc(f.name);
+            return '<div class="cr-folderrow' + (f.name === selectedName ? ' sel' : '') + '" data-name="' + n + '">' +
+              '<span class="cr-fname">' + n + '</span>' + badge +
+              '<button class="cr-ficon" data-act="rename" data-name="' + n + '" title="Rename">&#9998;</button>' +
+              '<button class="cr-ficon" data-act="delete" data-name="' + n + '" title="Delete">&#128465;</button>' +
+              '</div>';
+          }).join('');
+        }
+
+        // Two views: no folder picked -> the full list (main view); a folder picked -> that
+        // folder's panel (locked/unlocked) with the others tucked into a switcher + a Back button.
+        function render() {
+          renderList();
+          if (plFolder !== selectedName) { plFolder = selectedName; crPlaylist.length = 0; renderCrPlaylist(); }
+          const f = currentFolder();
+          const opened = !!f;
+          const show = (id, on) => { const el = byId(id); if (el) el.style.display = on ? '' : 'none'; };
+          show('cr-mainview', !opened);
+          show('cr-openhead', opened);
+          show('cr-locked', opened && !f.hasSkeleton);
+          show('cr-unlocked', opened && f.hasSkeleton);
+          if (opened) {
+            const sw = byId('cr-switch');
+            if (sw) {
+              sw.innerHTML = folders.map(ff => '<option value="' + ff.name.replace(/"/g, '&quot;') + '"' +
+                (ff.name === selectedName ? ' selected' : '') + '>' + ff.name +
+                (ff.hasSkeleton ? '' : ' (no skeleton)') + '</option>').join('');
+            }
+          }
+          if (f && f.hasSkeleton) {
+            const info = byId('cr-info');
+            if (info) info.innerHTML =
+              'Skeleton: <b>' + f.boneCount + ' bones</b>' +
+              ' · variants: <b>' + (f.variants.length || 0) + '</b>' +
+              ' · clips: <b>' + (f.clips.length || 0) + '</b>';
+            const vsel = byId('cr-variant');
+            if (vsel) vsel.innerHTML = '<option value="rig">bare rig</option>' +
+              f.variants.map(v => '<option value="' + v.replace(/"/g, '&quot;') + '">rig + ' + v + '</option>').join('');
+            const csel = byId('cr-clip');
+            if (csel) {
+              const keepClip = csel.value;
+              const clips = f.clips || [];
+              csel.innerHTML = clips.length
+                ? clips.map(c => '<option value="' + c.replace(/"/g, '&quot;') + '">' + c + '</option>').join('')
+                : '<option value="">— no clips yet —</option>';
+              if (keepClip && clips.includes(keepClip)) csel.value = keepClip;
+            }
+          }
+        }
+
+        async function refresh(selectName) {
+          try {
+            const r = await fetch('/custom-rigs');
+            const j = await r.json();
+            folders = (j && j.folders) || [];
+          } catch (_) { folders = []; }
+          const keep = selectName || selectedName;
+          selectedName = (keep && folders.some(f => f.name === keep)) ? keep : '';
+          render();
+        }
+        window.__phoenixRefreshRigs = refresh;
+        refresh();
+
+        const status = msg => { const st = byId('hu-status'); if (st) st.textContent = msg; };
+
+        // Row click = select; the pencil/trash icons rename/delete.
+        listEl.addEventListener('click', async (ev) => {
+          const btn = ev.target.closest('.cr-ficon');
+          if (btn) {
+            ev.stopPropagation();
+            const name = btn.dataset.name;
+            const act = btn.dataset.act;
+            if (act === 'rename') {
+              const to = window.prompt('Rename folder "' + name + '" to:', name);
+              if (!to || to === name) return;
+              try {
+                const r = await fetch('/custom-rig-rename', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ from: name, to }) });
+                const j = await r.json();
+                if (j && j.ok) { await refresh(j.folder.name); }
+                else window.alert('Could not rename: ' + ((j && j.error) || 'error'));
+              } catch (_) { window.alert('Could not rename folder.'); }
+            } else if (act === 'delete') {
+              if (!window.confirm('Delete folder "' + name + '" and all its clips/meshes? This cannot be undone.')) return;
+              try {
+                const r = await fetch('/custom-rig-delete', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ name }) });
+                const j = await r.json();
+                if (j && j.ok) { if (selectedName === name) selectedName = ''; await refresh(); }
+                else window.alert('Could not delete: ' + ((j && j.error) || 'error'));
+              } catch (_) { window.alert('Could not delete folder.'); }
+            }
+            return;
+          }
+          const row = ev.target.closest('.cr-folderrow');
+          if (row) { selectedName = row.dataset.name; render(); }
+        });
+
+        // Back to the full list; the switcher jumps between open folders without going back.
+        byId('cr-back').addEventListener('click', () => { selectedName = ''; render(); });
+        byId('cr-switch').addEventListener('change', (ev) => { selectedName = ev.target.value; render(); });
+
+        byId('cr-new').addEventListener('click', async () => {
+          const name = window.prompt('New rig folder name (e.g. "deer", "spider"):', '');
+          if (!name) return;
+          try {
+            const r = await fetch('/custom-rig-create', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name }) });
+            const j = await r.json();
+            if (j && j.ok) { await refresh(j.folder.name); }
+            else window.alert('Could not create folder: ' + ((j && j.error) || 'error'));
+          } catch (_) { window.alert('Could not create folder.'); }
+        });
+
+        const doAssign = () => {
+          const f = currentFolder();
+          if (!f) return;
+          status('Assigning the selected armature to "' + f.name + '"… (select the rig in the scene first)');
+          postAction('assign_skeleton', { folder: f.name });
+        };
+        byId('cr-assign').addEventListener('click', doAssign);
+        byId('cr-reassign').addEventListener('click', () => {
+          if (window.confirm('Re-assign this folder to the armature currently selected in the scene?')) doAssign();
+        });
+
+        byId('cr-spawn').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const variant = byId('cr-variant').value || 'rig';
+          status('Spawning ' + (variant === 'rig' ? 'bare rig' : variant) + ' from "' + f.name + '"…');
+          postAction('spawn_rig', { folder: f.name, variant });
+        });
+
+        byId('cr-save').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const name = window.prompt('Name this clip (e.g. "walk", "attack"):', '');
+          if (!name) return;
+          status('Saving "' + name + '" to "' + f.name + '"… (select the animated rig in the scene first)');
+          postAction('save_clip', { folder: f.name, name });
+        });
+
+        byId('cr-animate').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const clip = byId('cr-clip').value;
+          if (!clip) { status('No clip to animate — save one first.'); return; }
+          status('Applying "' + clip + '" onto the rig… (select the target rig in the scene first)');
+          postAction('animate_clip', { folder: f.name, clip });
+        });
+
+        // Append / playlist / Sequence — the Human tab's chaining, on this folder's clips.
+        const crBlend = () => {
+          const b = parseInt(byId('cr-blend').value, 10);
+          return isNaN(b) ? 8 : b;
+        };
+        byId('cr-append').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const clip = byId('cr-clip').value;
+          if (!clip) { status('No clip to append — save one first.'); return; }
+          status('Appending "' + clip + '" to the end of the chain… (select the target rig in the scene first)');
+          postAction('sequence_clips', { folder: f.name, clips: [clip], blend: crBlend(), append: true });
+        });
+
+        byId('cr-pl-add').addEventListener('click', () => {
+          const clip = byId('cr-clip').value;
+          if (!clip) return;
+          crPlaylist.push(clip); renderCrPlaylist();
+        });
+        byId('cr-pl-clear').addEventListener('click', () => { crPlaylist.length = 0; renderCrPlaylist(); });
+
+        byId('cr-sequence').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          if (!crPlaylist.length) { status('Playlist is empty — pick a clip and press "+ to playlist".'); return; }
+          status('Building sequence (' + crPlaylist.length + ' clips)… (import + bake each — this takes a while)');
+          postAction('sequence_clips', { folder: f.name, clips: crPlaylist.slice(), blend: crBlend(), append: false });
+        });
+
+        // Rig to mesh — two calls, because the bone alignment between them happens in Blender,
+        // not here. A dialog you have to reopen for step 2 would be more friction, not less.
+        byId('cr-prepare').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const voxel = parseFloat(byId('cr-voxel').value);
+          const remesh = byId('cr-remesh').checked;
+          status('Preparing the selected mesh' + (remesh ? ' (join + voxel remesh — can take minutes on a dense mesh)' : ' (join only)') + '…');
+          postAction('prepare_mesh', { folder: f.name, voxel: isNaN(voxel) ? 0 : voxel, remesh });
+        });
+
+        byId('cr-bind').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          status('Binding… (select the mesh AND this folder\'s rig; the rig must be in rest pose)');
+          postAction('bind_mesh', { folder: f.name });
+        });
+
+        byId('cr-savemesh').addEventListener('click', () => {
+          const f = currentFolder();
+          if (!f) return;
+          const name = window.prompt('Name this mesh variant (e.g. "deer", "deer_hurt"):', '');
+          if (!name) return;
+          status('Saving mesh "' + name + '" to "' + f.name + '"… (select the mesh bound to this rig first)');
+          postAction('save_mesh', { folder: f.name, name });
+        });
+      })();
 
       // ── Gate-waiting highlight ───────────────────────────────────────────────
 
@@ -935,6 +1833,9 @@
           document.getElementById('gate-prompt').checked = g.prompt !== false;
           document.getElementById('gate-image').checked  = g.image  !== false;
           document.getElementById('gate-mesh').checked   = g.mesh   !== false;
+          // vision is a mode, not a checkbox — anything unset/unknown reads as the default
+          document.getElementById('gate-vision').value =
+            ['off', 'focused', 'full'].includes(g.vision) ? g.vision : 'focused';
           document.getElementById('gate-notool').checked = blenderOnly;
         } catch (_) {}
       }
@@ -944,6 +1845,7 @@
           prompt: document.getElementById('gate-prompt').checked,
           image:  document.getElementById('gate-image').checked,
           mesh:   document.getElementById('gate-mesh').checked,
+          vision: document.getElementById('gate-vision').value,
         };
         try {
           await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gates }) });
@@ -958,6 +1860,7 @@
       document.getElementById('gate-prompt').addEventListener('change', saveGates);
       document.getElementById('gate-image').addEventListener('change', saveGates);
       document.getElementById('gate-mesh').addEventListener('change', saveGates);
+      document.getElementById('gate-vision').addEventListener('change', saveGates);
       document.getElementById('gate-notool').addEventListener('change', function () { setBlenderOnly(this.checked); });
 
       document.addEventListener('click', function (e) {
@@ -1185,7 +2088,7 @@
         const comfyInp = document.createElement('input');
         comfyInp.type = 'text';
         comfyInp.id = 'set-comfyui';
-        comfyInp.placeholder = 'http://localhost:8000';
+        comfyInp.placeholder = 'http://localhost:8188';
         toolBody.appendChild(makeRow('ComfyUI endpoint', comfyInp));
 
         // Metaprompter seat
@@ -1470,6 +2373,9 @@
         const sendBtn = document.createElement('button');
         sendBtn.className = 'modal-btn';
         sendBtn.textContent = 'Send feedback';
+        // Shown only once /bugreport confirms an endpoint is configured — a Send button that can
+        // only answer "not configured" is worse than no Send button.
+        sendBtn.style.display = 'none';
         const copyBtn = document.createElement('button');
         copyBtn.className = 'modal-btn';
         copyBtn.textContent = 'Copy bug report';
@@ -1483,7 +2389,7 @@
         // Hint
         const hint = document.createElement('p');
         hint.className = 'set-hint';
-        hint.textContent = 'Send goes straight to the developer if a feedback endpoint is set (Settings). Otherwise use Copy and send it manually.';
+        hint.textContent = 'Copy the report and send it wherever you like — the GitHub issues page is the usual place.';
         toolBody.appendChild(hint);
 
         // Fetch technical details from /bugreport on open
@@ -1492,6 +2398,11 @@
           const data = await r.json();
           if (r.ok && data.report) {
             preview.value = data.report;
+            // Direct sending only exists if someone configured an endpoint to send to.
+            if (data.canSend) {
+              sendBtn.style.display = '';
+              hint.textContent = 'Send delivers this straight to the configured feedback endpoint. Copy works too, if you would rather send it yourself.';
+            }
           } else {
             preview.value = '(failed to load technical details: ' + (data.error || r.status) + ')';
           }
@@ -1595,6 +2506,16 @@
           }
           meshFromLibrary = (obj.source === 'library');
           updateRegenLock();
+        } else if (obj.slot === 'human') {
+          const img = document.getElementById('hu-preview');
+          const ph  = document.getElementById('hu-preview-ph');
+          if (img) { img.src = obj.url; img.classList.add('loaded'); }
+          if (ph)  { ph.style.display = 'none'; }
+          const placeBtn = document.getElementById('hu-place');
+          if (placeBtn) placeBtn.disabled = false;
+          const st = document.getElementById('hu-status');
+          if (st) st.textContent = 'Preview ready — press Place in scene to commit it.';
+          switchTab('human');
         }
       }
 
@@ -1619,10 +2540,31 @@
         document.querySelectorAll('.art-btn').forEach(b => b.disabled = !on);
       }
 
+      // hy_motion spends ~4 minutes generating in ComfyUI and only touches Blender at the very
+      // end, which is why the server defers the lock for it (server.js, defersLock). Greying the
+      // whole UI out for that whole time would contradict the three places that promise "Phoenix
+      // stays usable meanwhile" — and would be a lie about a server that is genuinely free.
+      const NON_BLOCKING_ACTIONS = ['hy_motion'];
+
+      // How many blocking operations are in flight. A non-blocking action finishing must NOT
+      // re-enable the UI while a blocking one is still running — otherwise the buttons light up
+      // mid-flight and every click bounces off with "busy". Counted rather than a boolean because
+      // a chat turn and an action can overlap.
+      let blockingInFlight = 0;
+      function releaseUi(action) {
+        if (action && NON_BLOCKING_ACTIONS.includes(action)) return;   // was never blocking
+        blockingInFlight = Math.max(0, blockingInFlight - 1);
+        if (blockingInFlight === 0) { setInputEnabled(true); setActionsEnabled(true); }
+      }
+
       async function postAction(action, input) {
-        setActionsEnabled(false);
+        const blocking = !NON_BLOCKING_ACTIONS.includes(action);
+        if (blocking) {
+          blockingInFlight++;
+          setActionsEnabled(false);
+          setInputEnabled(false);
+        }
         clearGateWaiting();
-        setInputEnabled(false);
         let res;
         try {
           res = await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
@@ -1689,16 +2631,45 @@
 
         if (obj.kind === 'reply') {
           appendBubble('phoenix', obj.text);
-          setInputEnabled(true);
-          setActionsEnabled(true);
+          releaseUi(obj.action);
           refreshLibrary();
+          // Namenskollision beim Brush-Speichern: der Server lehnt ab, statt still zu
+          // ueberschreiben. Hier bekommt der Operator die Entscheidung, die der Text
+          // vorschlaegt — sonst steht in der UI ein Vorschlag, den die UI nicht ausfuehren kann.
+          if (obj.action === 'save_as_brush' && /REFUSED: the brush name/.test(obj.text || '') && window.__lastBrushSave) {
+            const again = window.__lastBrushSave;
+            window.__lastBrushSave = null;                  // nur EINE Rueckfrage pro Versuch
+            setTimeout(function () {
+              if (confirm('A brush with that name already exists.\n\nReplace it?\n\nOK = replace (the old brush is gone)\nCancel = keep it and save under a different name')) {
+                postAction('save_as_brush', Object.assign({}, again, { overwrite: true }));
+              }
+            }, 50);
+          }
+          if (window.__phoenixStopGenClock) window.__phoenixStopGenClock();
+          if (window.__phoenixRefreshAnims) window.__phoenixRefreshAnims();
+          if (window.__phoenixRefreshRigs) window.__phoenixRefreshRigs();
+          if (window.__phoenixRefreshChars) window.__phoenixRefreshChars();
+          // The face preview is best-effort: it can fail (unsupported render engine, a scene that
+          // refuses to render) while the human itself was built and staged perfectly well. Place
+          // used to be unlocked ONLY by the preview artifact arriving, so a failed preview
+          // dead-ended the documented Generate → Place flow with the figure stuck out of sight.
+          // Keyed on the ACTION, not the reply text: a chat turn echoing the same wording must not
+          // unlock a Place button that has nothing staged behind it.
+          if (obj.action === 'make_human') {
+            const pb = document.getElementById('hu-place');
+            if (pb && pb.disabled) {
+              pb.disabled = false;
+              const st = document.getElementById('hu-status');
+              if (st) st.textContent = 'Built, but the preview render failed — press Place in scene to commit it anyway.';
+            }
+          }
           return;
         }
 
         if (obj.kind === 'error') {
           appendBubble('error', 'Error: ' + obj.message);
-          setInputEnabled(true);
-          setActionsEnabled(true);
+          releaseUi(obj.action);
+          if (window.__phoenixStopGenClock) window.__phoenixStopGenClock();
           return;
         }
 
@@ -1716,6 +2687,9 @@
       async function sendChat(message, noTool) {
         appendBubble('user', message);
         clearGateWaiting();
+        // A chat turn holds the server lock for its whole duration, so it counts as blocking.
+        // Its SSE reply carries no action name, which releaseUi treats as blocking by default.
+        blockingInFlight++;
         setInputEnabled(false);
         let res;
         try {
@@ -1726,18 +2700,18 @@
           });
         } catch (err) {
           appendBubble('error', 'Network error: ' + err.message);
-          setInputEnabled(true);
+          releaseUi();
           return;
         }
         if (res.status === 409) {
           appendBubble('busy-note', 'busy… try again in a moment');
-          setInputEnabled(true);
+          releaseUi();
           return;
         }
         if (!res.ok) {
           const body = await res.text();
           appendBubble('error', 'Server error ' + res.status + ': ' + body);
-          setInputEnabled(true);
+          releaseUi();
           return;
         }
         // 202 — reply/error arrives via SSE
@@ -1753,6 +2727,7 @@
           const cmd  = (sp === -1 ? text : text.slice(0, sp)).toLowerCase();
           const rest = sp === -1 ? '' : text.slice(sp + 1).trim();
           inputEl.value = '';
+          if (window.__phoenixAutoGrowInput) window.__phoenixAutoGrowInput();
           if (cmd === '/notool') {
             const arg = rest.toLowerCase();
             if (rest === '') {
@@ -1818,16 +2793,28 @@
         }
 
         inputEl.value = '';
+        if (window.__phoenixAutoGrowInput) window.__phoenixAutoGrowInput();
         sendChat(text, blenderOnly);
       }
 
       sendBtn.addEventListener('click', sendMessage);
+
+      // Grow the box to fit its content: reset to auto first, otherwise scrollHeight
+      // only ever reports the current (already grown) height and it can never shrink.
+      function autoGrowInput() {
+        inputEl.style.height = 'auto';
+        inputEl.style.height = inputEl.scrollHeight + 'px';
+      }
+      window.__phoenixAutoGrowInput = autoGrowInput;
+      inputEl.addEventListener('input', autoGrowInput);
+      autoGrowInput();
 
       inputEl.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
           sendMessage();
         }
+        // Shift+Enter falls through to the textarea's own newline handling.
       });
 
       // ── Action buttons ──────────────────────────────────────────────────────
@@ -1900,7 +2887,13 @@
         } else if (act === 'save-brush') {
           if (!currentMesh) { appendBubble('error', 'Import the mesh first, then save it as a brush.'); return; }
           const nm = prompt('Brush name (slug):');
-          if (nm) postAction('save_as_brush', { name: nm.trim(), category: currentMesh.category });
+          if (nm) {
+            // Merken, womit gespeichert wurde: kommt eine Namenskollision zurueck, kann
+            // der Reply-Handler dieselbe Anfrage mit overwrite wiederholen. Ohne das
+            // waere die vorgeschlagene Loesung ("ersetzen") aus der UI unerreichbar.
+            window.__lastBrushSave = { name: nm.trim(), category: currentMesh.category };
+            postAction('save_as_brush', window.__lastBrushSave);
+          }
         }
       });
 

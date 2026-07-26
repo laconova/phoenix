@@ -7,11 +7,11 @@ be using sd15 · gen fails immediately after the metaprompt succeeds.
 **Root cause:** the runtime `workflows.json` stores **absolute** file paths from wherever it was first
 seeded (an old E:/Z: drive). After the workspace moved, those paths are dead. Separately, the active
 image workflow defaults to `flux_klein` if `phoenix-config.json` has no `workflows` override — and
-Flux won't fit an 8 GB laptop GPU anyway.
+Flux will not fit an 8 GB GPU anyway.
 
 ## Fix — do it for me
 1. In `workflows.json`, rewrite each `"file"` path to the current location (fix the drive letter).
-2. In `phoenix-config.json`, set `"workflows": { "image": "sd15", "mesh": "trellis2" }` (laptop = sd15).
+2. In `phoenix-config.json`, set `"workflows": { "image": "sd15", "mesh": "trellis2" }` (sd15 is the safe choice on 8 GB).
 3. ⟳ restart `server.bat` — the workflow registry is loaded into memory at startup.
 
 ## Fix — explain it

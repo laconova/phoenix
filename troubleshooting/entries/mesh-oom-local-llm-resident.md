@@ -7,7 +7,7 @@ stage · mesh stage runs forever then times out while GPU shows ~full memory at 
 **Root cause:** the metaprompter's call **JIT-loads the local LLM into VRAM and leaves it there**
 (LM Studio's idle TTL only evicts after ~1 h). On a 10 GB card, Gemma-12B-Q4 (~8.6 GB with 8k context)
 plus Trellis cannot coexist → the mesh job OOMs. The eject-before-heavy-stage logic does not cover
-this path (found live on the rig 2026-07-02).
+this path (found live).
 
 ## Fix — do it for me
 1. Free the VRAM: `lms unload --all` (add `~/.lmstudio/bin` to PATH if `lms` is not found).
@@ -19,7 +19,7 @@ this path (found live on the rig 2026-07-02).
 Two GPU tenants, one 10 GB card: the prompt-writing LLM and the 3D generator each want most of it.
 They never need to run at the same moment — the prompt is finished before the mesh starts — but
 LM Studio keeps the model warm long after its last call. Until Phoenix ejects automatically before
-heavy stages (planned; same problem the Forge VRAM-lock solves system-wide), unload manually between
+heavy stages (planned; same problem automatic model eviction before heavy stages solves system-wide), unload manually between
 "prompt work" and "mesh work".
 
 ## Verify
@@ -30,4 +30,4 @@ heavy stages (planned; same problem the Forge VRAM-lock solves system-wide), unl
 - The image stage usually survives (SD1.5 is small); it's the **mesh** stage that collides.
 - LM Studio's TTL (~1 h) will *eventually* free it — never soon enough for a pipeline run.
 - Long-term fix = Phoenix ejects before mesh dispatch / loads the metaprompter with a short TTL;
-  system-wide fix = the Forge VRAM booking lock.
+  system-wide fix = automatic model eviction before heavy stages.

@@ -23,23 +23,47 @@ const DEFAULT_PALETTE = {
 
 /**
  * loadPalette() — reads palette.json fresh on every call.
- * On any read/parse failure, writes DEFAULT_PALETTE to disk (best-effort) and
- * returns a deep copy of DEFAULT_PALETTE.
+ * Seeds DEFAULT_PALETTE to disk ONLY when the file is absent (ENOENT). On any other read error, a
+ * parse failure, or a shape-invalid file, it returns a deep copy of DEFAULT_PALETTE WITHOUT touching
+ * the file — a transient read failure must never destroy the user's authored categories.
  */
 function loadPalette() {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(PALETTE_FILE, 'utf8'));
+    raw = fs.readFileSync(PALETTE_FILE, 'utf8');
+  } catch (e) {
+    // File genuinely absent → seed it (first run). Any OTHER read error (EBUSY/EPERM from AV or a
+    // concurrent writer on Windows) is TRANSIENT — return defaults WITHOUT touching the file, so a
+    // momentary read failure can never destroy the user's authored categories.
+    if (e && e.code === 'ENOENT') {
+      try { fs.writeFileSync(PALETTE_FILE, JSON.stringify(DEFAULT_PALETTE, null, 2), 'utf8'); } catch { /* read-only FS */ }
+    }
+    return JSON.parse(JSON.stringify(DEFAULT_PALETTE));
+  }
+  try {
+    const p = JSON.parse(raw);
+    // Shape guard: a file that parses but lacks a categories object (mid-write truncation, a
+    // hand-edit, `{}`) would otherwise crash callers that do Object.keys(p.categories). Fall back
+    // to defaults WITHOUT overwriting — leave the file intact for the user to inspect/recover.
+    if (!p || typeof p !== 'object' || !p.categories || typeof p.categories !== 'object') {
+      return JSON.parse(JSON.stringify(DEFAULT_PALETTE));
+    }
+    return p;
   } catch {
-    try { fs.writeFileSync(PALETTE_FILE, JSON.stringify(DEFAULT_PALETTE, null, 2), 'utf8'); } catch { /* read-only FS */ }
+    // Parse failure (corruption / partial write) — do NOT overwrite; return defaults.
     return JSON.parse(JSON.stringify(DEFAULT_PALETTE));
   }
 }
 
 /**
- * savePalette(palette) — writes palette object to palette.json.
+ * savePalette(palette) — writes palette object to palette.json atomically.
  */
 function savePalette(palette) {
-  fs.writeFileSync(PALETTE_FILE, JSON.stringify(palette, null, 2));
+  // tmp + rename: a crash or interrupt mid-write can never leave a truncated palette.json that the
+  // next loadPalette would treat as corrupt (same atomic pattern as blender-ipc.js).
+  const tmp = PALETTE_FILE + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(palette, null, 2));
+  fs.renameSync(tmp, PALETTE_FILE);
 }
 
 /**

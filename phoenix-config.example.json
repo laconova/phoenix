@@ -1,13 +1,21 @@
 {
-  "version": "1.5.0",
-  "gates": { "prompt": false, "image": true, "mesh": false },
+  "version": "1.6.0",
+  "gates": { "prompt": false, "image": true, "mesh": false, "vision": "focused" },
+  "_comment_gates": "prompt/image/mesh = stop for your approval after that pipeline stage. vision = render-vision gate, one of off | focused | full: after an action the assistant renders the scene and looks at it before claiming anything visual. focused (default) covers animation, rig/mesh binding, brush placement and spawns; full adds every other look-changing step including raw bpy. Each check costs one extra vision call.",
   "seats": {
     "orchestrator": { "model": "claude-opus-4-8", "historyMessages": 3 },
     "metaprompter": { "model": "claude-haiku-4-5-20251001", "temperature": 0.7 },
-    "troubleshooter": { "model": "claude-sonnet-4-6", "historyMessages": 8 }
+    "troubleshooter": { "model": "claude-sonnet-4-6", "historyMessages": 8 },
+    "vision": { "model": "claude-opus-4-8" }
   },
-  "endpoints": { "local": "http://localhost:1234/v1", "comfyui": "http://localhost:8000" },
+  "_comment_seats_vision": "The model that LOOKS at renders (inspect_render + the render-vision gate). It is a judge, not an orchestrator: it is the only thing that can contradict a 'fixed' claim, so it gets its own seat. Remove this seat and it falls back to the orchestrator's model - which means changing the orchestrator would silently change the judge too. Keep them separate on purpose.",
+  "endpoints": { "local": "http://localhost:1234/v1", "comfyui": "http://localhost:8188" },
+  "_comment_endpoints": "comfyui = the ComfyUI running your image and mesh workflows. 8188 is ComfyUI's own default port; change it if you started ComfyUI with --port. local = an optional OpenAI-compatible local model server (e.g. LM Studio) for the metaprompter.",
+  "hyMotion": { "api": "http://localhost:8188", "template": "input/3d/phoenix_char_tpose.fbx" },
+  "_comment_hyMotion": "Text->Motion, optional. api = the ComfyUI that has ComfyUI-HY-Motion1 in custom_nodes and the weights under models/HY-Motion/. That can be the same ComfyUI as endpoints.comfyui (then leave both alike) or a separate one; what matters is that the nodes are installed there, not which port it uses. Point it at another machine (e.g. http://gpu-box.local:8188) if generation runs on a separate GPU box. template = a Mixamo REST-POSE (T-pose) FBX, relative to that ComfyUI's folder; create it with scripts/hy-motion/make_tpose_char.py.",
   "preflight": { "expected": { "python": "3.12", "pytorch": "2.10", "cuda": "cu130", "blender": "5.1" } },
-  "apps": { "blender": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe", "comfyOutput": "" },
+  "_comment_preflight": "What `node preflight.js` compares the ComfyUI environment against. Drift is reported as a warning, not an error - set these to whatever your working install reports.",
+  "apps": { "blender": "", "comfyOutput": "" },
+  "_comment_apps": "blender = full path to your Blender executable, used only so Phoenix can launch it for you; optional. Windows: C:\\\\Program Files\\\\Blender Foundation\\\\Blender 5.1\\\\blender.exe - macOS: /Applications/Blender.app/Contents/MacOS/Blender - Linux: /usr/bin/blender. blenderIpcDir (not listed above, optional) = the folder Phoenix and the Blender addon exchange commands through. WARNING: setting it here only moves the PHOENIX side - the addon reads the PHOENIX_BLENDER_IPC_DIR environment variable and nothing else, so unless you ALSO start Blender with that variable set to the same path, every Blender call will time out. Leave it unset unless you know you need it. comfyOutput = the folder ComfyUI writes generated files into. Left empty, Phoenix looks in ~/Documents/ComfyUI/output, which is where ComfyUI-Desktop puts them - a portable or git install writes somewhere else, so SET THIS to <your ComfyUI folder>/output or the mesh stage will fail to collect a mesh that generated fine.",
   "sceneSync": { "enabled": true, "intervalSeconds": 120 }
 }

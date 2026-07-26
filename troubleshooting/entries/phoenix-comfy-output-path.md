@@ -16,7 +16,7 @@ nothing (found the hard way, twice, 2026-07-02).
    `ls <comfyui-dir>/output` (your fresh `.glb` should be there).
 2. Set it in `phoenix-config.json` (note: the `apps` section):
    ```json
-   "apps": { "blender": "...", "comfyOutput": "/home/erazz/ComfyUI-trellis/output" }
+   "apps": { "blender": "...", "comfyOutput": "<your ComfyUI folder>/output" }
    ```
 3. Re-run the stage (or restart `server.bat` first if using the UI — config is cached at startup).
 

@@ -19,7 +19,20 @@ const fs   = require('fs');
 const path = require('path');
 const { callBlender } = require('./blender-ipc');
 const { ensureBrushScaffold } = require('./brush-scaffold');
-ensureBrushScaffold(); // brushes/ is gitignored — seed the .py base + registry on first use
+// brushes/ is gitignored — seed the .py base + registry on first use.
+// Ist die Laufzeitdatei in einem kaputten Zustand (abgeschnitten / ohne Marker), wird
+// NICHT gespeichert: ein angehaengtes add_() unter einem zerstoerten Kopf faellt sonst
+// erst viel spaeter beim Platzieren als unverstaendlicher Python-Fehler auf.
+{
+  const _st = ensureBrushScaffold().scaffold || {};
+  if (_st.reason === 'version-current-but-truncated' || _st.reason === 'marker-missing') {
+    console.error(
+      'ABORT: brushes/phoenix_brushes.py is in a broken state (' + _st.reason + '). Nothing was written.\n' +
+      'Your brushes are most likely intact in the newest phoenix_brushes.py.bak-* next to it — restore that file first.'
+    );
+    process.exit(1);
+  }
+}
 
 const BRUSHES_DIR   = path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
@@ -34,7 +47,11 @@ const get  = k => { const i = args.indexOf(k); return i >= 0 ? (args[i + 1] || n
 const rawName     = get('--name');
 const objName     = get('--object') || '';
 const colName     = get('--collection') || '';
-const category    = (get('--category') || 'item').toLowerCase();
+// Whitelisted, not just lowercased: the category becomes a DIRECTORY under brushes/lib, so an
+// unchecked value ('../..') writes the library outside the tree and records the escaped path
+// in registry.json. Anything unexpected falls back to 'item' rather than failing the save.
+const rawCategory = (get('--category') || 'item').toLowerCase();
+const category    = /^[a-z0-9_]{1,32}$/.test(rawCategory) ? rawCategory : 'item';
 const displayName = get('--display') || rawName;
 
 if (!rawName) {
@@ -45,6 +62,88 @@ if (!rawName) {
 const slug    = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '_');
 const libPath = path.join(LIB_DIR, category, `${slug}.blend`);
 const libFwd  = libPath.replace(/\\/g, '/');
+const force   = args.includes('--force');
+
+// ─── Collision guard ──────────────────────────────────────────────────────────
+// The slug is LOSSY: "Oak Tree A", "oak-tree-a" and "Oak Tree-A" all collapse to
+// oak_tree_a. Before this guard the save just overwrote — the .blend, the add_()
+// function and the registry entry — and reported success, so a brush saved weeks
+// ago vanished on a name the user thought was new. Refuse instead, and say what to
+// do about it (user decision 2026-07-25). --force is the deliberate way through,
+// which is also how you legitimately UPDATE an existing brush.
+//
+// Checked against the registry AND the file: the function name and the registry key
+// are global while the .blend sits under a category folder, so a same-slug save in a
+// different category still hijacks the old brush's name and orphans its library file.
+function firstFreeSlug(base, taken) {
+  for (let n = 2; n < 1000; n++) if (!taken.has(`${base}_${n}`)) return `${base}_${n}`;
+  return `${base}_${Date.now()}`;
+}
+
+// Registry EINMAL lesen, und zwar bevor irgendetwas geschrieben wird.
+// ⚠ Vorher stand hier ein `catch → {}` und weiter unten ein zweites, ungeschuetztes
+// JSON.parse derselben Datei. Eine kaputte registry.json hat damit erst still die halbe
+// Kollisionswache abgeschaltet (leere Registry = "kein Eintrag da") und ist dann NACH dem
+// Schreiben der .blend abgestuerzt — halb gespeicherter Brush, und der zweite Versuch
+// wurde mit "existiert bereits" abgewiesen. Kaputt ist deshalb ein Abbruchgrund, fehlend nicht.
+let registry = {};
+if (fs.existsSync(REGISTRY_FILE)) {
+  let rawReg;
+  try {
+    rawReg = fs.readFileSync(REGISTRY_FILE, 'utf8');
+  } catch (e) {
+    // Gesperrt (Virenscanner, offener Editor) ist kein Grund fuer einen rohen Stacktrace
+    console.error('ABORT: brushes/registry.json could not be read (' + e.message + '). Nothing was written.');
+    process.exit(1);
+  }
+  try {
+    registry = JSON.parse(rawReg);
+  } catch (e) {
+    console.error(
+      `ABORT: brushes/registry.json is not valid JSON (${e.message}).\n` +
+      `Nothing was written. Fix or delete the file first — saving now would create a brush ` +
+      `that no lookup can ever find, and would overwrite an existing one without noticing.`
+    );
+    process.exit(1);
+  }
+  if (registry === null || typeof registry !== 'object' || Array.isArray(registry)) {
+    console.error('ABORT: brushes/registry.json does not contain an object. Nothing was written.');
+    process.exit(1);
+  }
+}
+
+if (!force) {
+  const brushes  = registry.brushes || {};
+  const existing = brushes[slug];
+  const fileInTheWay = fs.existsSync(libPath);
+
+  if (existing || fileInTheWay) {
+    // Nicht nur die Registry fragen: liegt eine .blend ohne Eintrag herum (oder umgekehrt),
+    // waere der "freie" Vorschlag selbst wieder besetzt.
+    const taken = new Set(Object.keys(brushes));
+    try {
+      for (const cat of fs.readdirSync(LIB_DIR, { withFileTypes: true })) {
+        if (!cat.isDirectory()) continue;
+        for (const f of fs.readdirSync(path.join(LIB_DIR, cat.name))) {
+          if (f.toLowerCase().endsWith('.blend')) taken.add(f.replace(/\.blend$/i, ''));
+        }
+      }
+    } catch (_) { /* keine lib/ = nichts zusaetzlich belegt */ }
+    const where = existing && existing.category && existing.category !== category
+      ? ` — registered under category "${existing.category}", you are saving into "${category}"`
+      : '';
+    const label = existing && existing.display ? ` ("${existing.display}")` : '';
+    console.error(
+      `REFUSED: the brush name "${rawName}" becomes "${slug}", which already exists${label}${where}.\n` +
+      `Saving would overwrite the existing brush library, its add_${slug}() function and its registry entry — silently and unrecoverably.\n` +
+      `Pick one:\n` +
+      `  • a different name, e.g. "${firstFreeSlug(slug, taken)}"\n` +
+      `  • delete the old brush first (delete_brush ${slug})\n` +
+      `  • pass --force / overwrite:true if you MEANT to replace it (this is also how you update a brush)`
+    );
+    process.exit(1);
+  }
+}
 
 // ─── Blender IPC ──────────────────────────────────────────────────────────────
 // File-based transport via blender-ipc.js (callBlender imported above). Was a 9876
@@ -54,11 +153,15 @@ const libFwd  = libPath.replace(/\\/g, '/');
 
 function buildAddFn(slug, display, relPath) {
   // relPath is relative from LIB_DIR. Emit it as os.path.join(_LIB_DIR, "a", "b") with
-  // forward-slash-split components so the .py resolves on both rig (Linux) and laptop (Windows).
+  // forward-slash-split components so the .py resolves on Linux and on Windows alike.
   const parts = relPath.replace(/\\/g, '/').split('/').map(p => JSON.stringify(p)).join(', ');
+  // Sanitize display for a Python docstring: a stray triple-quote / backslash / newline in the
+  // label would break the docstring and SyntaxError the whole phoenix_brushes.py (every brush
+  // stops loading). name= keeps the JSON.stringify'd value, which is already safe.
+  const docName = String(display).replace(/[\\"\r\n]/g, ' ').trim() || slug;
   return `
 def add_${slug}(x=None, y=None, z=None, name=${JSON.stringify(display)}):
-    """${display} — Phoenix-generated brush. Spawns as a grouped brush under a grab
+    """${docName} — Phoenix-generated brush. Spawns as a grouped brush under a grab
     handle at the 3D cursor (pass x/y/z to place at explicit coords instead)."""
     lib = os.path.join(_LIB_DIR, ${parts})
     loc = None if (x is None and y is None and z is None) else (x or 0.0, y or 0.0, z or 0.0)
@@ -110,7 +213,7 @@ async function main() {
 
   const saveCode = `
 import bpy, os
-lib_path = r'${libFwd}'
+lib_path = ${JSON.stringify(libFwd)}
 col_name = ${pyStr(colName)}
 obj_name = ${pyStr(objName)}
 if col_name:
@@ -168,6 +271,9 @@ else:
                 c = ec.default_value; r, g, b = c[0], c[1], c[2]; strength = es.default_value; kind = 'emission'
             return ('solid', _phx_solid(m, r, g, b, metallic, rough, kind, strength))
         return ('proc', None)
+    # Namen, die ein Generator vergibt und die NICHTS ueber den Inhalt aussagen.
+    # Muss mit _GENERIC_MAT in brushes/phoenix_brushes.py uebereinstimmen.
+    _PHX_GENERIC_MAT = re.compile(r'^(Material|Mat|Default|Standard|Untitled)(_?\\d+)?$', re.I)
     _seen = set(); _solids = []; _libmats = []
     _all_objs = list(objs)
     for obj in objs:
@@ -189,6 +295,17 @@ else:
             if base in _seen:
                 continue
             _seen.add(base)
+            # GENERISCHE NAMEN NIE IN DIE GETEILTE PALETTE (Fund 2026-07-13).
+            # Trellis nennt JEDES exportierte Material "Material_0" — Stamm, Blatt, Stein.
+            # Ein solches Material hat eine Textur an der Base Color, wird also als 'proc'
+            # eingestuft und landete als palette_materials/Material_0.blend in der Bibliothek.
+            # Damit galt "Material_0" fortan als BENANNTES, GETEILTES Palette-Material, und das
+            # Remap beim Spawnen warf alle Staemme und Blaetter auf diesen einen Block zusammen:
+            # der Stamm trug die Blatt-Textur. Der Name sagt nichts ueber den Inhalt -> raus.
+            # (Das Material bleibt in der Brush-.blend selbst erhalten — nur geteilt wird es nicht.)
+            if _PHX_GENERIC_MAT.match(base):
+                print('  palette: generisches Material uebersprungen: ' + base)
+                continue
             kind, payload = _phx_classify(mm)
             if kind == 'solid':
                 _solids.append(payload)
@@ -239,15 +356,12 @@ else:
   try { libmats = JSON.parse(libLine || '[]'); } catch (_) { libmats = []; }
   if (libmats.length) console.log(`  palette library += ${libmats.length}: ${libmats.join(', ')}`);
 
-  // Step 3: Register in registry.json
-  let registry = {};
-  if (fs.existsSync(REGISTRY_FILE)) {
-    registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
-  }
+  // Step 3: Register in registry.json — nutzt die oben EINMAL geprüfte Registry.
+  // Ein zweites JSON.parse hier war der Absturz nach dem Schreiben (siehe Kommentar oben).
   if (!registry.brushes) registry.brushes = {};
-  // Pfade relativ + forward slashes: die registry.json reist zwischen Laptop und Rig
-  // mit, ein absoluter D:\phoenix\... darin ist auf dem Rig wertlos (Bug-Klasse
-  // _LIB_DIR / resolveWorkflowFile). Jede Maschine loest gegen ihren eigenen Tree auf.
+  // Relative paths with forward slashes: registry.json travels with the brush library, so an
+  // absolute path recorded on the machine that saved the brush is worthless anywhere else
+  // (same class as _LIB_DIR / resolveWorkflowFile). Every install resolves against its own tree.
   const fwd = p => p.replace(/\\/g, '/');
   registry.phoenix_source = fwd(path.relative(__dirname, PHOENIX_PY));
   registry.lib_dir        = fwd(path.relative(__dirname, LIB_DIR));
