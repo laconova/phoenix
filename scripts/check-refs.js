@@ -27,6 +27,7 @@ const EXPECTED_ABSENT = {
   'palette.json':         'self-seeds with DEFAULT_PALETTE (palette.js)',
   'workflows.json':       'self-seeds with DEFAULT_WORKFLOWS (workflows.js)',
   'library-labels.json':  'optional; loadLibraryLabels() falls back to {assets:{}} and writes on save',
+  'library-folders.json': 'optional; library-folders.js load() returns EMPTY() when absent, save() writes on first mutation',
   'SUSPECTED-ISSUES.md':  'optional troubleshooter input; read in a try/catch with an empty-string fallback',
 };
 
@@ -70,7 +71,7 @@ for (const f of files) {
   // 1b) ABSOLUTE requires. These resolve fine on the machine they were written on and crash with
   // MODULE_NOT_FOUND everywhere else, so they are always a bug — no existence check needed, the
   // shape alone condemns them. Added 2026-07-23 after blend-run.js was found doing
-  // require('D:/phoenix/blender-ipc.js'): relative-path analysis cannot see this, and neither
+  // require('/abs/path/blender-ipc.js'): relative-path analysis cannot see this, and neither
   // can `node --check`, because the file parses perfectly.
   for (const m of src.matchAll(/require\(['"]((?:[A-Za-z]:[\\/]|\/|~)[^'"]+)['"]\)/g)) {
     checked++;

@@ -1,4 +1,5 @@
-# secrets — never commit.
+# secrets — never commit. Verified 2026-07-23: this was NOT covered before and .secrets/
+# was showing up as a normal untracked file, one `git add -A` away from being published.
 .secrets/
 *.env
 
@@ -7,24 +8,33 @@ phoenix-config.json
 workflows.json
 palette.json
 library-labels.json
+library-folders.json
 
 # generated / runtime dirs
 output/
 staging/
+# Cached brush GLBs for the Unreal bridge. Deliberately NOT under staging/ — every directory in
+# there is read as a palette category, which turned cached brushes into phantom library assets.
+brush-cache/
+# Cached character/Unreal GLB exports (auto-seeded by the Unreal bridge). User data, and large
+# binaries — 84 MB on this machine on 2026-08-01, one `git add -A` away from the public release.
+character-cache/
+unreal-cache/
 session/
 logs/
 brushes/
+characters/
 animations/
 custom-rigs/
-characters/
 
 # Blender working files. Scenes, rescues and WIP saves are hundreds of MB and belong to the
-# artist, not to the project. No .blend ships: the addon is .py, the workflows are .json.
+# artist, not to the project — a single careless `git add -A` would otherwise write them into
+# history for good. No .blend ships today; the addon is .py and the workflows are .json.
 scenes/
 *.blend
 *.blend1
 
-# One-off session scratch under scripts/ (shipped helpers live in scripts/<topic>/)
+# One-off recovered/session scratch under scripts/ (the shipped helpers live in scripts/<topic>/)
 scripts/session-*
 
 # OS / editor / node
@@ -40,9 +50,16 @@ __pycache__/
 troubleshooting/active/*
 !troubleshooting/active/_TEMPLATE.md
 
-# Editor/session backups
+# Session-Backups (git uebernimmt ab 2026-07-09 die Historie)
 *.bak
 *.bak-*
 
+# Ton-Pool (Nutzerdaten wie brushes/characters) - gehoert nicht ins Release
+sounds/
+
 # Claude working instructions (references the local dev tree — machine path, never ships)
 CLAUDE.md
+
+# Internal working notes (traps, measurements, machine paths, session state). Deliberately
+# NOT shipped — decided 2026-07-28. They live in the dev tree only, where they are tracked.
+dev-notes/

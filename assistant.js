@@ -2,11 +2,17 @@
 
 const readline = require('readline');
 const { spawnSync, spawn } = require('child_process');
+const { spawnNode } = require('./spawn-node');   // async spawn so a ~2-3 min brush child never freezes the loop
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
 const net  = require('net');
 const blenderIpc = require('./blender-ipc');
+const unrealIpc  = require('./unreal-ipc');
+const unrealVision = require('./unreal-vision');
+const { brushToUnreal, ensureBrushGlb } = require('./brush-to-unreal');
+const { unrealToBlender, unrealToBrush } = require('./unreal-to-blender');
+const { characterToUnreal } = require('./character-to-unreal');
 
 // ─── Windows: resolve claude.exe path once to avoid shell:true newline truncation ──
 // On Windows, spawning 'claude' with shell:true routes through cmd.exe which treats
@@ -47,8 +53,16 @@ function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
 }
 
+// tmp + rename: a crash mid-write can never leave a truncated file that the next read treats as
+// corrupt or reseeds over. Same atomic pattern as palette.js / workflows.js.
+function writeFileAtomic(file, data) {
+  const tmp = file + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
 function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  writeFileAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2));
 }
 
 // First-run seed: if there's no phoenix-config.json yet, create it from the shipped example
@@ -111,6 +125,12 @@ TOOLS:
 - image_to_3d     runs the 3D mesh stage from the last generated image (or a given one); the system decides whether to continue automatically. INPUT: {} or {"image": "path", "description": "..."}  Optional: {"target_face_num": <n>} to regenerate the mesh at a specific face count (e.g. 7500).
 - generate_prop   full pipeline image→3D in ONE shot, STAGES the result (GLB on disk). Does NOT import into the scene. REJECTED while any approval gate is enabled in Settings — use generate_image then. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}
 - blender_run     runs Python in Blender. INPUT: {"code": "python as single string, \\n for newlines"}
+- unreal_run      runs Python in a RUNNING Unreal Editor (separate app from Blender — this does NOT touch the Blender scene). Use for Unreal-side work: querying assets, spawning/inspecting actors, taking a viewport screenshot. INPUT: {"code": "python as single string, \\n for newlines"}. NOTE: Unreal writes screenshots at the END of the frame, so take the shot in one call and collect the file in the NEXT one — checking os.path.exists() in the same call always reports False.
+- unreal_to_blender is the OTHER direction: it pulls an existing Unreal asset back into Blender. INPUT: {"asset": "/Game/MHExport/spudermin_Body", "refresh": true (optional — re-export instead of using the cached GLB), "export_only": true (optional — write the GLB and stop, do not touch Blender)}. Works on StaticMesh, SkeletalMesh and AnimSequence; a SkeletalMesh arrives with its armature, vertex groups and ARMATURE modifier intact. Two things it reports and you should relay: a material named WorldGridMaterial means the SOURCE asset had an empty material slot and the grey checker was substituted — the real look did NOT travel; and materials with no metallicFactor are corrected to 0 on the way in, because glTF's default for the missing key is 1.0 (fully metal) and that is almost never what the asset meant. Assets whose metallic comes from a TEXTURE are left alone.
+- unreal_to_brush goes one step further than unreal_to_blender: it fetches the Unreal asset into Blender and saves it into the BRUSH LIBRARY, so it can be placed anywhere afterwards. INPUT: {"asset": "/Game/Props/SM_Crate", "name": "crate" (optional — defaults to the asset name), "category": "item" (optional), "force": true (optional — overwrite an existing brush of that name), "keep_in_blender": true (optional)}. REFUSES a rigged asset on purpose: a brush holds meshes only, so an armature would be dropped silently — rigged characters belong in the Human tab (mixamorig) or the Custom-Rig tab. By default the imported objects are removed from Blender again AFTER the brush is confirmed in the registry.
+- character_to_unreal carries a RIGGED character from the Human tab into Unreal as SkeletalMeshes with their skeleton — the counterpart to brush_to_unreal, which cannot do this because a brush is meshes only. INPUT: {"rig": "Human.rig" (optional — omitted takes the first mixamorig armature in the scene), "name": "my_char" (optional), "unreal_path": "/Game/PhoenixCharacters" (optional), "with_animation": true (optional)}. Two things worth relaying: characters built in the Human tab are HIDDEN (staged) and are unhidden for the export and re-hidden afterwards; and every import creates its OWN skeleton asset, so several characters imported this way do not share an animation library until their skeletons are merged. For animation work FBX is the right carrier, not glTF — with_animation is preview-grade.
+- brush_to_unreal carries a brush from the library into Unreal as a placed ACTOR TREE (hierarchy and relative transforms intact), not loose meshes. Blender is used only the first time per brush; afterwards a cached GLB is imported directly, so this works with Blender closed. INPUT: {"name": "slug", "unreal_path": "/Game/PhoenixBrushes" (optional), "refresh": true (optional — rebuild the cached GLB), "keep_in_blender": true (optional)}. By default the brush is removed from the Blender scene again AFTER the export is verified — never before, so a failed export cannot cost the placed objects. Reports how many parameters each imported material carries; a material with 0 renders black and the call fails rather than shipping it.
+- inspect_unreal   renders the Unreal level AND LOOKS AT IT — returns a description written by a vision model that actually saw the image, not a file path. INPUT: {"focus": "ActorLabel" (optional — frames that actor and its children automatically), "question": "what to check" (optional), "mode": "camera" (default) | "viewport", "width": 1280, "height": 720}. The camera route works no matter which window is in focus but carries NO post-processing, so emissive materials do not glow in it — judge placement/material/breakage from it, not final looks. "viewport" is the real editor view including bloom and FAILS with a clear error unless the Unreal window is in the foreground. If this tool returns an error, or if Unreal vision is switched off, you have NOT seen the level: say so plainly and never describe its contents from memory or inference.
 - read_state      reads session state: sceneObjects (what was in the Blender scene at the last sync — refreshed by imports, by an explicit refresh, and by the optional scene-sync poller if it is running; treat it as possibly stale and verify with blender_run when it matters), stagedFiles (GLB FILES on disk in staging/, ready to import), lastTask, sceneUpdatedAt. INPUT: {}
 - list_assets     lists staged GLB FILES on disk (in staging/). These are assets ready to import — they are NOT necessarily in the Blender scene. INPUT: {}
 - read_palette    returns the current style palette (each category's style text + params). Use ONLY when the user asks you to help draft or choose a category. INPUT: {}
@@ -398,6 +418,221 @@ async function toolReadPalette(_input, _state, _cfg) {
   return JSON.stringify({ categories: cats });
 }
 
+async function toolUnrealRun(input, _state, cfg) {
+  const code = input.code;
+  if (!code) return 'ERROR: no code provided';
+  try {
+    // Anders als bei Blender wird cfg DURCHGEREICHT: die Bruecke findet die Engine ueber
+    // apps.unrealEngine (oder faellt auf den neuesten UE_* zurueck) und braucht sie, um
+    // Epics eigenen remote_execution-Client zu laden.
+    const r = await unrealIpc.callUnreal(code, { cfg, timeoutMs: 120000 });
+    if (r.status !== 'ok') {
+      // Die Bruecke liefert bei "kein Editor gefunden" bereits eine Diagnose, die ALLE vier
+      // Ursachen nennt (Editor zu / Plugin aus / Remote Execution aus / Multicast blockiert).
+      // Deshalb wird sie durchgereicht statt zu einem generischen Satz eingedampft.
+      return `UNREAL_ERROR: ${r.message || r.stderr || JSON.stringify(r)}`;
+    }
+    const out = String(r.stdout || '').trim();
+    if (!out) return 'OK (script ran, no print output)';
+    if (out.includes('Traceback') || out.includes('SyntaxError')) return `PYTHON_ERROR:\n${out}`;
+    return out;
+  } catch (e) {
+    return 'UNREAL_ERROR: ' + e.message;
+  }
+}
+
+// Carry a brush from the library into Unreal in one call. The heavy lifting (GLB cache, scene
+// import, material verification) lives in brush-to-unreal.js — this is only the tool seam.
+async function toolBrushToUnreal(input, _state, cfg) {
+  const name = input && input.name;
+  if (!name) return 'ERROR: name required';
+  try {
+    const r = await brushToUnreal({
+      name,
+      unrealPath:    input.unreal_path,
+      refresh:       !!input.refresh,
+      keepInBlender: !!input.keep_in_blender,
+      cfg,
+    });
+    const lines = r.steps.map(s => '  ' + s);
+    // The material parameter counts are reported, not hidden: a brush arriving with zero of them
+    // renders black, and that is the one defect this route has actually produced.
+    if (r.materials && r.materials.length) {
+      lines.push('  materials: ' + r.materials.map(m => `${m.name} (${m.params})`).join(', '));
+    }
+    return `Brush "${r.slug}" is in Unreal at ${r.destPath}\n` + lines.join('\n');
+  } catch (e) {
+    return 'BRUSH_TO_UNREAL_ERROR: ' + (e.message || String(e));
+  }
+}
+
+// The other direction: pull an Unreal asset back into Blender. Mirror of toolBrushToUnreal, and
+// the heavy lifting is in unreal-to-blender.js — this is only the tool seam.
+async function toolUnrealToBlender(input, _state, cfg) {
+  const asset = input && input.asset;
+  if (!asset) return 'ERROR: asset required, e.g. "/Game/MHExport/spudermin_Body"';
+  try {
+    const r = await unrealToBlender({
+      asset,
+      refresh:    !!input.refresh,
+      exportOnly: !!input.export_only,
+      cfg,
+    });
+    const lines = r.steps.map(s => '  ' + s);
+    // What ARRIVED, not what was requested. A bone/vertex-group count is the difference between
+    // "a mesh came over" and "a rigged character came over", and only the second one is usable.
+    if (r.blender) {
+      for (const o of r.blender.objects) {
+        lines.push(o.type === 'ARMATURE'
+          ? `  armature ${o.name}: ${o.bones} bones, root ${o.roots.join('/') || '(none)'}`
+          : `  ${o.type.toLowerCase()} ${o.name}: ${o.verts} verts, ${o.vertexGroups} vertex groups, ` +
+            `modifiers [${o.modifiers.join(', ')}]`);
+      }
+    }
+    return `${r.asset} -> ${r.blender ? 'Blender' : r.glb}\n` + lines.join('\n');
+  } catch (e) {
+    return 'UNREAL_TO_BLENDER_ERROR: ' + (e.message || String(e));
+  }
+}
+
+// Unreal asset -> Blender -> brush library, in one call. Closes the round trip: brush_to_unreal
+// sends geometry out, this turns something that only existed in Unreal into a placeable brush.
+async function toolUnrealToBrush(input, _state, cfg) {
+  const asset = input && input.asset;
+  if (!asset) return 'ERROR: asset required, e.g. "/Game/Props/SM_Crate"';
+  try {
+    const r = await unrealToBrush({
+      asset,
+      name:          input.name,
+      category:      input.category,
+      display:       input.display,
+      force:         !!input.force,
+      refresh:       !!input.refresh,
+      keepInBlender: !!input.keep_in_blender,
+      cfg,
+    });
+    return `Brush "${r.slug}" saved from ${r.asset}\n` + r.steps.map(s => '  ' + s).join('\n') +
+           `\n  Say "use brush ${r.slug}" to place it.`;
+  } catch (e) {
+    return 'UNREAL_TO_BRUSH_ERROR: ' + (e.message || String(e));
+  }
+}
+
+// A rigged character from the Human tab into Unreal as a SkeletalMesh. Separate from
+// brush_to_unreal because a brush is meshes only — this one has to carry the armature.
+async function toolCharacterToUnreal(input, _state, cfg) {
+  try {
+    const r = await characterToUnreal({
+      rig:           input && input.rig,
+      name:          input && input.name,
+      unrealPath:    input && input.unreal_path,
+      withAnimation: !!(input && input.with_animation),
+      refresh:       !!(input && input.refresh),
+      cfg,
+    });
+    const lines = r.steps.map(s => '  ' + s);
+    // The skeleton is named, not hidden: N characters with N skeletons means no shared clip
+    // library, and that is a decision the operator has to be able to see coming.
+    if (r.skelMesh.length) lines.push('  skeletal meshes: ' + r.skelMesh.length);
+    return `Character is in Unreal at ${r.destPath}\n` + lines.join('\n');
+  } catch (e) {
+    return 'CHARACTER_TO_UNREAL_ERROR: ' + (e.message || String(e));
+  }
+}
+
+// Build (or reuse) a brush's cached GLB so the mesh viewer can show it. A brush is Python plus a
+// .blend and therefore has no preview of its own — the cache the Unreal bridge already produces is
+// exactly the missing artefact, so this reuses it rather than inventing a second thumbnail path.
+// On-demand by the user's choice (2026-07-31): the first click on a brush costs one Blender export,
+// every later one is instant.
+async function toolBrushPreview(input, _state, cfg) {
+  const name = input && input.name;
+  if (!name) return 'ERROR: name required';
+  try {
+    const r = await ensureBrushGlb({ name, cfg });
+    return `PREVIEW_READY ${path.relative(__dirname, r.glb).replace(/\\/g, '/')} — ` +
+           `${r.cached ? 'from cache' : 'exported from Blender'} (${r.bytes} bytes)`;
+  } catch (e) {
+    return 'BRUSH_PREVIEW_ERROR: ' + (e.message || String(e)) +
+           (/not responding|IPC/i.test(e.message || '')
+             ? '\nThe first preview of a brush needs Blender open with the Phoenix IPC addon; ' +
+               'after that it is served from the cache.'
+             : '');
+  }
+}
+
+// Render the Unreal level to a PNG so it can actually be LOOKED at. Default route is the
+// in-level camera, which does not care whether the Unreal window has focus — see unreal-vision.js
+// for why the viewport route is not the default.
+async function toolInspectUnreal(input, _state, cfg) {
+  try {
+    // The Settings values are the DEFAULT, an explicit argument wins. Without this the switches in
+    // the gates panel would be decoration — set but never consulted.
+    const prefs = (cfg && cfg.unreal) || {};
+
+    // ...with ONE exception: "off" is not a default, it is a refusal, and it beats the argument.
+    // A switch the caller can talk its way past is not a switch. The message says plainly that the
+    // level was not looked at, so the turn cannot quietly continue as if it had been.
+    if (prefs.visionMode === 'off') {
+      return 'UNREAL_VISION_OFF: Unreal vision is switched off in Settings, so the level was NOT ' +
+             'rendered and NOT looked at. Do not describe or judge how anything in Unreal looks. ' +
+             'Say that vision is off and let the user turn it on (gates panel → Unreal vision) if ' +
+             'they want a visual check.';
+    }
+
+    const r = await unrealVision.captureUnreal({
+      cfg,
+      mode:   (input && input.mode)   || prefs.visionMode,
+      focus:  input && input.focus,
+      width:  (input && input.width)  || prefs.visionWidth,
+      height: (input && input.height) || prefs.visionHeight,
+    });
+
+    // 🔴 THE RENDER IS NOT THE ANSWER. Returning a file path here let the orchestrator answer
+    // "what do you see in the level?" with an invented description — it reported a character
+    // standing in a scene that holds a capacitor and a tree trunk (live, 2026-07-31). A path is
+    // not evidence; somebody has to LOOK. So the image goes through the vision seat, exactly like
+    // inspect_render does for Blender, and what comes back is a VERDICT.
+    const model = visionModel(cfg);   // own seat — the judge is not the orchestrator
+
+    // Hand the judge the level's actual contents. Without it, it can only describe shapes — it
+    // called an oak trunk "a canopy/shelter structure" and a capacitor "a translucent canister"
+    // (live, 2026-07-31). Phoenix knows the names, so withholding them was throwing away
+    // information we already had.
+    let inventory = '';
+    try {
+      const actors = await unrealVision.levelInventory(cfg);
+      if (actors.length) {
+        inventory =
+          '\n\nFor reference, Unreal reports these actors in the level (indentation = parenting):\n' +
+          actors.map(a => '  '.repeat((a.depth || 0) + 1) + a.label + '  [' + a.cls + ']').join('\n') +
+          '\n\nUse these NAMES when you describe what you see. ⚠️ This list is what the level ' +
+          'CONTAINS, not what is in frame — the camera may not show all of it. State which of ' +
+          'these you can actually see and which you cannot. Never claim to see something merely ' +
+          'because it appears in this list.';
+      }
+    } catch (_) { /* inventory is a bonus; a render without it still beats no render */ }
+
+    const question = ((input && typeof input.question === 'string' && input.question.trim())
+      ? input.question.trim()
+      : 'Describe what is actually visible in this Unreal Engine level render: which objects are ' +
+        'present, roughly where they sit, and whether anything looks broken, black, untextured or ' +
+        'misplaced. Only describe what you can SEE. If the image is empty or shows nothing but ' +
+        'ground and sky, say exactly that.') + inventory;
+
+    const verdict = await renderCheck.askVision(claudeCli, model, r.file, question);
+
+    const caveat = r.mode === 'camera'
+      ? '\n\n(camera route — no viewport post-processing, so emissive materials do not glow here; ' +
+        'judge placement and materials from this, not final looks)'
+      : '\n\n(viewport route — full post-processing)';
+    return verdict + '\n\n→ ' + r.file + caveat;
+  } catch (e) {
+    return 'INSPECT_UNREAL_ERROR: ' + (e.message || String(e)) +
+           '\nNothing was looked at. Do not describe the level.';
+  }
+}
+
 async function toolBlenderRun(input, _state, _cfg) {
   const code = input.code;
   if (!code) return 'ERROR: no code provided';
@@ -442,67 +677,29 @@ async function toolGenerateProp(input, state, cfg) {
   const cat = category || 'item';
   state.lastTask = `generate_prop: ${description}`;
 
-  const phoenixPath = path.join(__dirname, 'phoenix.js');
   dbg.event('progress', { label: 'generate_prop', description, category: cat });
 
-  return new Promise((resolve) => {
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    let partialLine = '';
+  // Run the full headless pipeline through the pipeline cancel wrapper (spawnPhoenixStage): it
+  // registers the child so POST /stop can reach it, captures PHX_COMFY_PROMPT, and on timeout
+  // cancels the ComfyUI job on the rig. A bare spawn here (the old code) left the GPU computing for
+  // up to 20 min on a killed prop and made /stop report "nothing running".
+  const res = await pipeline.spawnPhoenixStage(['--headless', description, '--cat', cat], 900000);
 
-    const child = spawn(
-      'node',
-      [phoenixPath, '--headless', description, '--cat', cat],
-      { encoding: 'utf8' }
-    );
+  if (!res.ok) {
+    const tail = (res.stderr || res.stdout || '').trim().slice(0, 500);
+    const how = res.timedOut ? `timed out (ComfyUI cancel: ${res.comfyui})` : `exit ${res.code !== undefined ? res.code : '?'}`;
+    return `Pipeline failed (${how}):\n${tail}`;
+  }
 
-    const timer = setTimeout(() => {
-      child.kill();
-      const stdout = stdoutChunks.join('');
-      const stderr = stderrChunks.join('');
-      resolve(`Pipeline failed (exit timeout):\n${(stderr || stdout || '').slice(0, 500)}`);
-    }, 600000);
-
-    child.stdout.on('data', chunk => {
-      stdoutChunks.push(chunk);
-      const combined = partialLine + chunk;
-      const lines = combined.split('\n');
-      partialLine = lines.pop();
-      for (const line of lines) {
-        if (line.trim()) dbg.event('pipeline', { line: line.trim() });
-      }
-    });
-
-    child.stderr.on('data', chunk => stderrChunks.push(chunk));
-
-    child.on('error', err => {
-      clearTimeout(timer);
-      resolve(`ERROR launching pipeline: ${err.message}`);
-    });
-
-    child.on('close', code => {
-      clearTimeout(timer);
-      if (partialLine.trim()) dbg.event('pipeline', { line: partialLine.trim() });
-      const stdout = stdoutChunks.join('');
-      const stderr = stderrChunks.join('');
-
-      if (code !== 0) {
-        resolve(`Pipeline failed (exit ${code}):\n${(stderr || stdout || '').slice(0, 500)}`);
-        return;
-      }
-
-      const m = stdout.match(/RESULT_GLB:\s*(.+)/);
-      if (m) {
-        const glbPath = m[1].trim();
-        const name = path.basename(glbPath);
-        if (!state.staged) state.staged = [];
-        if (!state.staged.includes(name)) state.staged.push(name);
-        resolve(`Generated and staged: ${name}. The asset is on disk in the staging folder and is not yet in the Blender scene — use import_asset with {"name": "${name}"} to import it when ready.`);
-        return;
-      }
-      resolve(stdout.trim() || 'Pipeline completed (no GLB path in output)');
-    });
-  });
+  const m = res.stdout.match(/RESULT_GLB:\s*(.+)/);
+  if (m) {
+    const glbPath = m[1].trim();
+    const name = path.basename(glbPath);
+    if (!state.staged) state.staged = [];
+    if (!state.staged.includes(name)) state.staged.push(name);
+    return `Generated and staged: ${name}. The asset is on disk in the staging folder and is not yet in the Blender scene — use import_asset with {"name": "${name}"} to import it when ready.`;
+  }
+  return res.stdout.trim() || 'Pipeline completed (no GLB path in output)';
 }
 
 async function toolGenerateImage(input, state, cfg, opts = {}) {
@@ -798,16 +995,16 @@ async function toolSaveAsBrush(input, _state, _cfg) {
   // silently overwriting an existing brush (see save_brush.js collision guard).
   if (overwrite === true) argv.push('--force');
 
-  const r = spawnSync('node', [path.join(__dirname, 'save_brush.js'), ...argv], {
+  const r = await spawnNode(path.join(__dirname, 'save_brush.js'), argv, {
     // Longer than the 90 s the child allows its own Blender call: if the OUTER timeout fires
     // first, the child is killed between writing the .blend and registering it, leaving an
     // orphan library file the user can neither see nor place. Let the inner call fail first,
     // with a message that says what happened.
-    encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 120000,
+    timeoutMs: 120000, maxBuffer: 2 * 1024 * 1024,
   });
 
-  if (r.error)      return `ERROR: ${r.error.message}`;
-  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  if (r.error)    return `ERROR: ${r.error.message}`;
+  if (r.code !== 0) return `ERROR (exit ${r.code}): ${(r.stderr || r.stdout || '').trim()}`;
   return (r.stdout || '').trim() || 'Brush saved.';
 }
 
@@ -821,16 +1018,16 @@ async function toolUseBrush(input, _state, _cfg) {
   if (z !== undefined && z !== null) argv.push('--z', String(z));
   if (instance_name)                 argv.push('--instance-name', instance_name);
 
-  const r = spawnSync('node', [path.join(__dirname, 'use_brush.js'), ...argv], {
+  const r = await spawnNode(path.join(__dirname, 'use_brush.js'), argv, {
     // Longer than the 90 s the child allows its own Blender call: if the OUTER timeout fires
     // first, the child is killed between writing the .blend and registering it, leaving an
     // orphan library file the user can neither see nor place. Let the inner call fail first,
     // with a message that says what happened.
-    encoding: 'utf8', maxBuffer: 2 * 1024 * 1024, timeout: 120000,
+    timeoutMs: 120000, maxBuffer: 2 * 1024 * 1024,
   });
 
-  if (r.error)        return `ERROR: ${r.error.message}`;
-  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  if (r.error)    return `ERROR: ${r.error.message}`;
+  if (r.code !== 0) return `ERROR (exit ${r.code}): ${(r.stderr || r.stdout || '').trim()}`;
   return (r.stdout || '').trim() || 'Brush placed.';
 }
 
@@ -878,7 +1075,7 @@ async function toolRenameBrush(input) {
     const reg = JSON.parse(fs.readFileSync(REG, 'utf8'));
     if (!reg.brushes || !reg.brushes[slug]) return 'ERROR: brush not found: ' + slug;
     reg.brushes[slug].display = String(display).trim();
-    fs.writeFileSync(REG, JSON.stringify(reg, null, 2));
+    writeFileAtomic(REG, JSON.stringify(reg, null, 2));
     return 'Renamed brush to "' + reg.brushes[slug].display + '"';
   } catch (e) { return 'ERROR: ' + e.message; }
 }
@@ -918,12 +1115,12 @@ async function toolDeleteBrush(input) {
         if (start >= 0) {
           const nextDef = src.indexOf('\ndef ', start + 1);
           src = src.slice(0, start) + (nextDef >= 0 ? src.slice(nextDef) : '');
-          fs.writeFileSync(PY, src, 'utf8');
+          writeFileAtomic(PY, src);
         }
       } catch (_) {}
     }
     delete reg.brushes[slug];
-    fs.writeFileSync(REG, JSON.stringify(reg, null, 2));
+    writeFileAtomic(REG, JSON.stringify(reg, null, 2));
     return 'Deleted brush ' + slug;
   } catch (e) { return 'ERROR: ' + e.message; }
 }
@@ -1018,9 +1215,10 @@ async function toolSpawnCharacter(input, _state, cfg) {
 // Text -> motion -> straight onto the character. Generation runs in ComfyUI (~230 s for
 // 6 s of motion); the clip is kept in animations/ so it can be reused without paying for
 // it twice. apply:false stops after generating.
-async function toolHyMotion(input, _state, cfg, opts = {}) {
-  const inp = input || {};
-  // Generation runs in ComfyUI — no Blender, so no lock: Phoenix stays usable meanwhile.
+// The work itself, independent of who asked for it. takeLock says whether THIS function owns the
+// Blender lock for the apply step — the three callers differ, see toolHyMotion below.
+async function runHyMotion(inp, cfg, takeLock) {
+  // Generation runs in ComfyUI and touches no Blender.
   const gen = await generateMotion(inp, cfg);
   if (gen.error) return 'ERROR: ' + gen.error;
   // gen.note carries anything the generator had to change about the request (currently: a
@@ -1029,20 +1227,54 @@ async function toolHyMotion(input, _state, cfg, opts = {}) {
   const made = `Generated "${gen.file}" from your description — ${gen.seconds}s of generation.` +
                (gen.note ? ` Note: ${gen.note}.` : '');
   if (inp.apply === false) return made + ' Not applied (apply:false).';
-  // Applying DOES touch Blender, so it needs the lock — but ONLY if the caller does not already
-  // hold it. The /action route defers the lock precisely so this tool can take it late; /chat
-  // takes it up front for the whole turn. Acquiring it again from inside a /chat turn is a
-  // SELF-DEADLOCK: lock.acquire() queues a waiter that only /chat's finally could resolve, and
-  // that finally is itself blocked awaiting this call. The turn then hangs forever and every
-  // later request answers 409 busy until the server is restarted. Hence holdsLock, set by /chat.
-  const mine = !opts.holdsLock;
-  if (mine) await lock.acquire();
+  // Applying DOES touch Blender — seconds, not minutes.
+  if (takeLock) await lock.acquire();
   try {
     const applied = await animateHuman({ fbx: gen.file, character: inp.character }, cfg);
     return made + '\n' + applied;
   } finally {
-    if (mine) lock.release();
+    if (takeLock) lock.release();
   }
+}
+
+// Three callers, three different lock situations — that is what the branch below is for.
+//
+//   /chat    sets holdsLock:true and holds the Blender lock for the WHOLE turn. Awaiting the ~230 s
+//            generation here froze Blender for four minutes (measured 2026-07-28). So the work moves
+//            into a background job: the turn returns immediately, /chat's finally releases the lock,
+//            and the job takes it itself only for the seconds-long apply step.
+//            ⭐ This cannot reproduce the old SELF-DEADLOCK — that one happened because /chat was
+//            AWAITING this call while holding the lock, so the waiter could never be resolved. A
+//            detached job is not awaited by anyone: if it reaches lock.acquire() first, it simply
+//            waits for a lock that WILL be released.
+//            The outcome travels back via opts.onNote, because a job's return value reaches only the
+//            debug log — without it the user would never learn how the four minutes ended.
+//   /action  defers the lock precisely so this tool can take it late, and it broadcasts our return
+//            value. Awaiting is correct there; making it a job would replace the real result with
+//            "started #N" and lose it.
+//   CLI      no opts at all — plain synchronous run.
+async function toolHyMotion(input, _state, cfg, opts = {}) {
+  const inp = input || {};
+
+  if (opts.holdsLock && typeof opts.onNote === 'function') {
+    const started = jobs.start({ kind: 'motion', label: inp.description || 'text→motion' }, async () => {
+      let text;
+      try {
+        text = await runHyMotion(inp, cfg, true);
+      } catch (e) {
+        text = 'ERROR: ' + ((e && e.message) || e);
+      }
+      try { opts.onNote(text); } catch (_) { /* a broadcast must never break the job */ }
+      return text;
+    });
+    if (!started.started) return started.reason;
+    return 'Started text→motion as background job #' + started.id + '. It takes about four minutes — ' +
+           'Blender stays usable meanwhile, and I will report here as soon as the clip is applied.';
+  }
+
+  // Fallback covers /action, the CLI, and any /chat caller without onNote: keep the old behaviour,
+  // including not re-acquiring a lock the caller already holds.
+  return runHyMotion(inp, cfg, !opts.holdsLock);
 }
 
 // inspect_render — render the CURRENT scene and get a vision verdict, so the
@@ -1085,6 +1317,13 @@ const TOOLS = {
   image_to_3d:    toolImageTo3d,
   generate_prop:  toolGenerateProp,
   blender_run:    toolBlenderRun,
+  unreal_run:     toolUnrealRun,
+  brush_to_unreal: toolBrushToUnreal,
+  unreal_to_blender: toolUnrealToBlender,
+  unreal_to_brush: toolUnrealToBrush,
+  character_to_unreal: toolCharacterToUnreal,
+  brush_preview:   toolBrushPreview,
+  inspect_unreal:  toolInspectUnreal,
   list_assets:    toolListAssets,
   read_palette:   toolReadPalette,
   import_asset:   toolImportAsset,
@@ -1124,7 +1363,7 @@ function callClaude(messages, cfg, extraSystem) {
 
   const _t = Date.now();
   // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
-  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'] })
+  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'], timeout: 300000 })
     .then(result => {
       dbg.llm('orchestrator', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
       return result;
@@ -1390,6 +1629,18 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     // broadcast it, the chat path never did — which is why the render stayed invisible
     // even though it had been taken (live-test finding 2026-07-25).
     if (!noEvidence && toolCall.name === 'inspect_render') broadcastIfFresh(toolStart);
+    // Same for the Unreal render — a picture nobody sees is a claim, not evidence. Its own file,
+    // so the freshness check cannot pass off a stale Blender render as the Unreal one.
+    if (!noEvidence && toolCall.name === 'inspect_unreal') {
+      const UNREAL_CHECK_REL = 'output/unreal-check.png';
+      if (typeof opts.onArtifact === 'function') {
+        try {
+          if (fs.statSync(path.join(__dirname, UNREAL_CHECK_REL)).mtimeMs >= toolStart - 1000) {
+            opts.onArtifact({ slot: 'image', rel: UNREAL_CHECK_REL });
+          }
+        } catch (_) { /* vision off or nothing written — nothing to show */ }
+      }
+    }
 
     // Feed result back into messages
     // The hint after the result nudges Claude to reply in text if the answer is complete,
@@ -1555,6 +1806,7 @@ AVAILABLE TOOLS (only these six are allowed):
 - run_preflight         Runs the full preflight health check and returns the status. INPUT: {}
 - tail_debug_log        Reads the last ~40 lines of the current debug log. INPUT: {}
 - probe_blender_socket  Tests whether Blender is reachable via the Phoenix file-based IPC (Blender open + IPC addon enabled). INPUT: {}
+- probe_unreal          Tests whether a running Unreal Editor answers (editor open + Python plugin + remote execution enabled). Returns the engine version and the open project. INPUT: {}
 - check_workflow_deps   Checks whether the ACTIVE image + mesh workflows' required custom nodes and models are installed in ComfyUI. INPUT: {}
 - list_lmstudio_models  Lists the models currently loaded by LM Studio (the local model server). Use when the user can't find or select a local model (e.g. a metaprompter seat model like Gemma 12B). INPUT: {}
 - read_troubleshooting  The known-trap library. Best: INPUT {"symptom":"<the exact error string>"} — it matches the index server-side and returns the matching fix in ONE call. Also: INPUT {} for the whole symptom→entry INDEX, or {"entry":"<slug>"} for a specific trap. Each fix has symptoms, root cause, "do it for me" steps, "explain it" steps, and verify.
@@ -1629,6 +1881,12 @@ function tsTailDebugLog() {
     const tail = lines.slice(-40).join('\n');
     return '[file: ' + files[0].f + ']\n' + (tail || '(empty)');
   } catch (e) { return 'ERROR: ' + e.message; }
+}
+
+function tsProbeUnreal() {
+  // Spiegel zu probe_blender_socket: sagt, OB ein Editor antwortet - und wenn nicht,
+  // nennt die Bruecke selbst alle vier moeglichen Ursachen.
+  return unrealIpc.probeUnreal({ cfg: loadConfig() });
 }
 
 function tsProbeBlenderSocket() {
@@ -1788,6 +2046,7 @@ const TROUBLESHOOTER_TOOLS = {
   run_preflight:        tsRunPreflight,
   tail_debug_log:       tsTailDebugLog,
   probe_blender_socket: tsProbeBlenderSocket,
+  probe_unreal:         tsProbeUnreal,
   check_workflow_deps:  tsCheckWorkflowDeps,
   list_lmstudio_models: tsListLmStudioModels,
   read_troubleshooting: tsReadTroubleshooting,
@@ -1810,7 +2069,7 @@ function callClaudeSeat(messages, { model, systemPrompt }) {
   const userMsg = contextBlock + lastUser;
   const _t = Date.now();
   // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
-  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'] })
+  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'], timeout: 300000 })
     .then(result => {
       dbg.llm('troubleshooter', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
       return result;

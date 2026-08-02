@@ -196,7 +196,9 @@ function injectPaletteEntries(out) {
   }
   if (!lines.length) { console.log('  palette: no new materials (all already present)'); return; }
   const src = src0.slice(0, close) + '\n' + lines.join('\n') + src0.slice(close);
-  fs.writeFileSync(PHOENIX_PY, src, 'utf8');
+  const _pyTmp = PHOENIX_PY + '.tmp-' + process.pid;
+  fs.writeFileSync(_pyTmp, src, 'utf8');
+  fs.renameSync(_pyTmp, PHOENIX_PY);
   console.log(`  palette += ${added.length}: ${added.join(', ')}`);
 }
 
@@ -373,7 +375,9 @@ else:
     lib:      fwd(path.relative(LIB_DIR, libPath)),
     added:    new Date().toISOString().slice(0, 10),
   };
-  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2), 'utf8');
+  const _regTmp = REGISTRY_FILE + '.tmp-' + process.pid;
+  fs.writeFileSync(_regTmp, JSON.stringify(registry, null, 2), 'utf8');
+  fs.renameSync(_regTmp, REGISTRY_FILE);
   console.log(`  '${slug}' → registry.json`);
   console.log(`\n  Done. Say "use brush ${slug}" to place it.`);
 }

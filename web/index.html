@@ -18,6 +18,16 @@
       --muted: #6B6B6B;
       --accent: #FF7A18;
       --accent-hover: #E2660D;
+
+      /* Machine/status semantics — adopted verbatim from Anvil (its index.html :root)
+         by decision 2026-07-31, so that one colour means one thing across both apps:
+         blue = running, green = ok, yellow = needs attention, red = bad.
+         Deliberately OUTSIDE the theme presets: a warning has to keep its colour in
+         every skin, which is the same reason Anvil hard-wired them. */
+      --ok:   #4cc38a;
+      --warn: #e5c454;
+      --bad:  #e5605e;
+      --run:  #58a6ff;
     }
 
     html, body {
@@ -42,6 +52,51 @@
       justify-content: space-between;
       align-items: center;
     }
+
+    /* Unreal bridge indicator — a dot, not a control. Unreal is a target in the
+       chain, not a second workplace, so it gets no tab and no button.
+       It exists because every bridge failure reads identically ("no editor
+       answered"): the dot separates "Unreal is not running" from "Unreal is running
+       but silent", the pair that cost two hours on 2026-07-29. Colours are the
+       shared machine semantics — see :root. */
+    #unreal-dot {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: 14px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      cursor: default;
+      white-space: nowrap;
+    }
+    /* An author `display` beats the browser's [hidden] rule, so it has to be restated
+       here — without this the indicator can never hide, which is precisely the
+       permanent-noise case the 'noengine' branch exists to avoid. */
+    #unreal-dot[hidden] { display: none; }
+    #unreal-dot i {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex: none;
+      background: var(--muted);
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.18);
+    }
+    #unreal-dot[data-state="live"]      i { background: var(--run); }
+    #unreal-dot[data-state="noproject"] i { background: var(--warn); }
+    #unreal-dot[data-state="silent"]    i { background: var(--warn); }
+    #unreal-dot[data-state="unknown"]   i { background: var(--bad); }
+    #unreal-dot[data-state="absent"]    i { opacity: 0.5; }   /* off is not an error */
+    /* The COLOUR lives in the dot, the label stays dark — checked with the eye on an
+       isolated bench: Anvil's --warn was designed against its near-black panel, and
+       on Phoenix's light-grey header (#B3B3B3) yellow text is barely legible. The
+       semantics carry over from Anvil; the contrast does not. */
+    #unreal-dot[data-state="live"],
+    #unreal-dot[data-state="noproject"],
+    #unreal-dot[data-state="silent"],
+    #unreal-dot[data-state="unknown"]     { color: var(--text); }
 
     #logo {
       display: flex;
@@ -103,6 +158,9 @@
       font-weight: 600;
       font-size: 13px;
       color: var(--text);
+      display: flex;          /* so an ⓘ button can sit beside the heading text */
+      align-items: center;
+      gap: 6px;
     }
 
     .gate-row {
@@ -118,6 +176,38 @@
       font-size: 11px;
       color: var(--muted);
     }
+
+    /* Explanations that would otherwise flood the panel live behind these (user's call,
+       2026-07-31): the text is long enough to matter and rare enough to hide. */
+    .gate-info {
+      width: 15px; height: 15px; flex: 0 0 15px;
+      border-radius: 50%;
+      border: 1px solid var(--outline);
+      background: transparent;
+      color: var(--muted);
+      font-size: 10px; line-height: 1;
+      padding: 0; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .gate-info:hover { color: var(--text); border-color: var(--text); }
+
+    .gate-pop {
+      position: absolute;
+      right: calc(100% + 10px);            /* opens to the LEFT — the panel is already at the
+                                              right screen edge, so anything else clips */
+      width: 260px;
+      background: var(--panel);
+      border: 1px solid var(--outline);
+      border-radius: 8px;
+      padding: 10px 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.24);
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--muted);
+      z-index: 60;
+    }
+    .gate-pop[hidden] { display: none; }
+    .gate-pop b { color: var(--text); }
 
     #logo { cursor: pointer; }
     #menu-panel {
@@ -602,6 +692,45 @@
     .lib-item:hover { background:var(--accent); color:#fff; }
     .lib-item.selected { border-left:3px solid var(--accent); padding-left:9px; }
     .lib-empty { color:#B8B8B8; font-style:italic; font-size:12px; padding:10px 12px; }
+
+    /* User folders. Depth is expressed with padding-left on a CSS variable so a row at any depth
+       still uses one rule — nesting has no fixed maximum. */
+    .lib-folder {
+      font-size:12px; font-weight:600; color:var(--text);
+      padding:5px 12px 5px calc(12px + var(--depth, 0) * 13px);
+      cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px;
+      background:rgba(128,128,128,0.06);
+    }
+    .lib-folder:hover { background:rgba(128,128,128,0.16); }
+    .lib-folder .lib-tri { width:9px; flex-shrink:0; font-size:9px; color:var(--muted); transition:transform .12s; }
+    .lib-folder.collapsed .lib-tri { transform:rotate(-90deg); }
+    .lib-folder .lib-folder-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-folder .lib-count { font-size:10px; color:var(--muted); font-weight:400; }
+    .lib-folder .lib-actions { display:none; }
+    .lib-folder:hover .lib-actions { display:flex; }
+    .lib-item { --depth:0; }
+    .lib-item.in-folder { padding-left: calc(12px + var(--depth, 0) * 13px + 15px); }
+
+    .lib-newfolder {
+      font-size:11px; color:var(--muted); padding:6px 12px; cursor:pointer; user-select:none;
+      border-top:1px solid rgba(128,128,128,0.18);
+    }
+    .lib-newfolder:hover { color:var(--text); }
+
+    /* Folder picker — a deliberate list, not drag-and-drop. Dropping into the wrong row of a
+       dense tree is easy and silent; picking from a named list is not. */
+    .lib-pick-backdrop { position:fixed; inset:0; z-index:80; background:rgba(0,0,0,0.35); }
+    .lib-pick {
+      position:fixed; z-index:81; right:16px; top:60px; max-height:70vh; overflow:auto;
+      min-width:220px; background:var(--panel); border:1px solid var(--outline);
+      border-radius:8px; padding:6px; box-shadow:0 6px 24px rgba(0,0,0,0.3);
+    }
+    .lib-pick-title { font-size:11px; color:var(--muted); padding:4px 8px 6px; }
+    .lib-pick-row {
+      font-size:12px; color:var(--text); padding:5px 8px; border-radius:5px; cursor:pointer;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .lib-pick-row:hover { background:var(--accent); color:#fff; }
     .lib-item-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .lib-actions { display:none; gap:4px; flex-shrink:0; }
     .lib-item:hover .lib-actions { display:flex; }
@@ -638,26 +767,92 @@
     <div style="display:flex;align-items:center;">
       <span id="logo"><span id="logo-badge"><img src="/vendor/logo.png" alt="Phoenix"></span><span id="logo-word">Phoenix</span></span>
       <span id="mode-indicator" hidden>Blender-only</span>
+      <span id="unreal-dot" hidden><i></i><span id="unreal-dot-text">Unreal</span></span>
     </div>
     <button id="settings-btn" title="Settings" aria-label="Settings">&#9881;</button>
   </div>
   <div id="settings-panel" hidden>
-    <div class="settings-title">Approval gates</div>
+    <div class="settings-title">
+      <span>Approval gates</span>
+      <!-- One bubble for all three: the explanation is about the gate CONCEPT, not about any one
+           of them, so three identical buttons would be noise. -->
+      <button type="button" class="gate-info" data-pop="pop-gates" title="What these do" aria-label="What these do">i</button>
+    </div>
     <label class="gate-row"><input type="checkbox" id="gate-prompt"> Prompt gate</label>
     <label class="gate-row"><input type="checkbox" id="gate-image"> Image gate</label>
     <label class="gate-row"><input type="checkbox" id="gate-mesh"> Mesh gate</label>
-    <div class="settings-hint">On = stop for your approval after this stage. Off = auto-continue with no LLM between steps.</div>
-    <label class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+
+    <div class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;"><input type="checkbox" id="gate-notool"> Blender-only mode</label>
+      <button type="button" class="gate-info" data-pop="pop-notool" title="What this does" aria-label="What this does">i</button>
+    </div>
+
+    <div class="gate-row">
       <span>Render vision</span>
+      <button type="button" class="gate-info" data-pop="pop-vision" title="What this does" aria-label="What this does">i</button>
       <select id="gate-vision" style="margin-left:auto;">
         <option value="off">off</option>
         <option value="focused">focused</option>
         <option value="full">full</option>
       </select>
-    </label>
-    <div class="settings-hint">The assistant looks at a render of the scene before it claims anything visual. <b>focused</b> = after animation, rig/mesh binding, brush placement and spawns (plus whenever you ask). <b>full</b> = after every step that changes the look, including raw bpy. Each check costs one extra vision call (~10&ndash;15&nbsp;s).</div>
-    <label class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;"><input type="checkbox" id="gate-notool"> Blender-only mode</label>
-    <div class="settings-hint">On = model directly in Blender (bpy), image/3D generation tools disabled. (Same as /notool.)</div>
+    </div>
+
+    <div class="gate-pop" id="pop-gates" hidden>
+      <b>On</b> = stop for your approval after this stage.<br>
+      <b>Off</b> = auto-continue with no LLM between steps.
+    </div>
+    <div class="gate-pop" id="pop-notool" hidden>
+      <b>On</b> = model directly in Blender (bpy); the image and 3D generation tools are disabled.
+      Same as <b>/notool</b>.
+    </div>
+    <div class="gate-pop" id="pop-vision" hidden>
+      The assistant looks at a render of the scene before it claims anything visual.<br><br>
+      <b>focused</b> — after animation, rig/mesh binding, brush placement and spawns (plus whenever
+      you ask).<br>
+      <b>full</b> — after every step that changes the look, including raw bpy.<br><br>
+      Each check costs one extra vision call (~10&ndash;15&nbsp;s).
+    </div>
+
+    <!-- Unreal sits LAST on purpose: the individual gates above are the ones reached for every
+         session, this group is set once and left alone. -->
+    <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">Unreal</div>
+    <div class="gate-row">
+      <span>Brush lands in</span>
+      <button type="button" class="gate-info" data-pop="pop-brush-target" title="What this does" aria-label="What this does">i</button>
+      <select id="gate-brush-target" style="margin-left:auto;">
+        <option value="blender">Blender</option>
+        <option value="unreal">Unreal</option>
+        <option value="both">both</option>
+      </select>
+    </div>
+    <div class="gate-row">
+      <span>Unreal vision</span>
+      <button type="button" class="gate-info" data-pop="pop-unreal-vision" title="What this does" aria-label="What this does">i</button>
+      <select id="gate-unreal-vision" style="margin-left:auto;">
+        <option value="off">off</option>
+        <option value="camera">camera</option>
+        <option value="viewport">viewport</option>
+      </select>
+    </div>
+
+    <div class="gate-pop" id="pop-brush-target" hidden>
+      Where a <b>double-clicked</b> brush goes.<br><br>
+      <b>Blender</b> — places it in the open Blender scene, as before.<br>
+      <b>Unreal</b> — carries it into Unreal as a placed actor tree and removes it from Blender again.
+      Blender is only needed the first time per brush; after that a cached GLB is used, so this works
+      with Blender closed.<br>
+      <b>both</b> — lands in Unreal <i>and</i> stays in Blender.
+    </div>
+    <div class="gate-pop" id="pop-unreal-vision" hidden>
+      How the assistant <b>looks</b> at the Unreal level.<br><br>
+      <b>off</b> — no rendering at all. The assistant is then told it cannot see Unreal and must say
+      so instead of guessing. This wins over any request: off means off.<br>
+      <b>camera</b> — renders from a camera inside the level, so it works no matter which window you
+      are using. It carries no post-processing, so emissive materials do not glow in it. Good for
+      checking placement, materials and breakage — not for judging how something looks.<br>
+      <b>viewport</b> — the real editor view including bloom. ⚠️ Produces <b>no file and no error</b>
+      unless the Unreal window is in the foreground.
+    </div>
   </div>
   <div id="menu-panel" hidden>
     <button class="menu-item" data-menu="settings">Settings</button>
@@ -698,6 +893,8 @@
         <button class="art-tab-btn"        data-tab="mesh">Mesh</button>
         <button class="art-tab-btn"        data-tab="human">Human</button>
         <button class="art-tab-btn"        data-tab="customrig">Custom Rig</button>
+        <button class="art-tab-btn"        data-tab="voice">Voice</button>
+        <button class="art-tab-btn"        data-tab="sfx">SFX</button>
       </div>
       <div id="art-panels">
 
@@ -743,6 +940,20 @@
             <button class="art-btn" data-action="import-cleaned">Import cleaned</button>
             <button class="art-btn" data-action="regen-mesh">Regenerate mesh</button>
             <button class="art-btn" data-action="save-brush">Save as brush</button>
+          </div>
+          <!-- The way BACK from Unreal. One entry with a target selector, deliberately mirroring
+               the brush target in the gates panel rather than adding a second set of buttons:
+               "fetch it" and "where does it land" is one decision, not two. -->
+          <div class="art-actions" id="mesh-unreal-row">
+            <label class="face-label" style="flex:1;min-width:0;">from Unreal:
+              <input type="text" id="mesh-unreal-path" class="face-input" style="width:100%;"
+                     placeholder="/Game/Props/SM_Crate" />
+            </label>
+            <select id="mesh-unreal-target" title="Where the fetched asset lands">
+              <option value="blender">→ Blender</option>
+              <option value="brush">→ Brush library</option>
+            </select>
+            <button class="art-btn" data-action="from-unreal">Fetch</button>
           </div>
         </div>
 
@@ -893,6 +1104,7 @@
               <div class="hu-actions">
                 <button class="art-btn" id="hu-char-spawn" type="button" disabled>Spawn &#129485;</button>
                 <button class="art-btn" id="hu-char-save" type="button" title="Store the rigged character in the scene as a reusable skin">&#128190; Save character</button>
+                <button class="art-btn" id="hu-char-unreal" type="button" title="Send the rigged character in the scene to Unreal as a SkeletalMesh">&#8594; Unreal</button>
               </div>
               <div class="hu-anim-hint"><b>Save character</b> stores the rigged human standing in your scene &mdash; every mesh, its textures and its skeleton &mdash; as a reusable skin. <b>Spawn</b> drops a saved one back in, already selected. Saved characters <b>share the animation list below</b>: every clip works on every character, because they all wear the same Mixamo skeleton. That also covers a character you rigged yourself at <b>mixamo.com</b> &mdash; import it, save it here once, and it animates like a MakeHuman figure. Creature rigs (deer, monsters) are refused here on purpose &mdash; they belong in the <b>Custom Rig</b> tab.</div>
             </div>
@@ -919,6 +1131,258 @@
               <div class="hu-anim-hint">Needs Rig = <b>Mixamo</b>. <b>Animate</b> = one clip (replaces). Pick <b>&#10024; Describe a new motion…</b> in the list to generate one from text instead — that runs on your GPU (roughly <b>4 min</b> for 6 s) and Phoenix stays usable while it does. Generated clips stay in the list, so reusing one is free. <b>Append</b> = add the selected clip to the end. <b>Playlist → Sequence</b> = build the whole chain, blended at the seams — each clip carries its <b>own real travel</b> and picks up where the previous one stood. <b>Extra drift</b> = leave at <b>0</b> for normal clips; only Mixamo "In Place" clips (no root motion of their own) need a value here.</div>
             </div>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Voice panel — a saved voice pack speaks a line -->
+        <div class="art-panel" id="panel-voice">
+          <div class="cr-wrap">
+            <div class="cr-row cr-listhead">
+              <span class="cr-listtitle">Voice</span>
+              <span id="vo-status" class="cr-note" style="margin:0"></span>
+            </div>
+
+            <p class="cr-note" id="vo-setup" style="display:none">
+              No speech server configured. Set <b>voice.api</b> in <code>phoenix-config.json</code> to a
+              running CrispASR server, e.g. <code>http://gpu-box.local:8090</code>. Start it with:<br>
+              <code>crispasr --server --host 0.0.0.0 --port 8090 -m tada --voice-dir &lt;folder with .gguf packs&gt;</code>
+            </p>
+
+            <div id="vo-main" style="display:none">
+              <div class="cr-row">
+                <label>Voice</label>
+                <select id="vo-voice"></select>
+                <button class="art-btn" id="vo-refresh" type="button">Refresh</button>
+              </div>
+
+              <textarea id="vo-text" class="img-prompt-edit" rows="3"
+                        placeholder="the line to speak"></textarea>
+
+              <!-- Same shape as the Sound tab's simple view: fader standing, readout under it,
+                   name under that. align-items:flex-end keeps the button on the fader's baseline. -->
+              <div class="cr-row" style="align-items:flex-end">
+                <label>Effect</label>
+                <select id="vo-effect"><option value="">none</option></select>
+                <div class="sx-param" style="margin-left:10px">
+                  <input type="range" id="vo-strength" class="sx-fader"
+                         min="0" max="1" step="0.05" value="0.5">
+                  <span id="vo-strengthval" class="sx-pread">0.50</span>
+                  <span class="sx-plabel">Strength</span>
+                </div>
+                <button class="art-btn" id="vo-speak" type="button">Speak &#127908;</button>
+              </div>
+
+              <p class="cr-note" id="vo-chain" style="display:none"></p>
+
+              <audio id="vo-player" controls style="width:100%;margin-top:8px;display:none"></audio>
+
+              <div class="cr-row cr-listhead" style="margin-top:10px">
+                <span class="cr-listtitle">Recent takes</span>
+                <button class="art-btn" id="vo-open" type="button">Open folder</button>
+              </div>
+              <div id="vo-takes" class="cr-folderlist"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- SFX panel — the clip workbench: three sources, edit, two exits -->
+        <style>
+          #panel-sfx .sx-src        { border:1px solid rgba(255,255,255,.12); border-radius:6px; padding:8px; margin-bottom:8px; }
+          #panel-sfx .sx-srctabs    { display:flex; gap:6px; margin-bottom:8px; flex-wrap:wrap; }
+          #panel-sfx .sx-srctab.on  { outline:2px solid rgba(120,180,255,.6); }
+          #panel-sfx .sx-bench      { border:1px solid rgba(255,255,255,.18); border-radius:6px; padding:8px; margin:10px 0; }
+          #panel-sfx .sx-adv        { max-height:460px; overflow-y:auto; border:1px solid rgba(255,255,255,.10);
+                                      border-radius:6px; padding:6px; }
+          /* A mixing desk reads by POSITION: a fader's height IS its value, so the
+             whole chain compares at a glance without reading a single number.
+             Strips therefore sit side by side and the controls stand up. */
+          #panel-sfx .sx-rack       { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:8px; }
+          #panel-sfx .sx-effrow     { border:1px solid rgba(255,255,255,.10); border-radius:5px;
+                                      padding:5px 6px; background:rgba(255,255,255,.02);
+                                      display:flex; flex-direction:column; }
+          #panel-sfx .sx-effrow.on  { border-color:rgba(120,180,255,.55); background:rgba(120,180,255,.07); }
+          #panel-sfx .sx-effhead    { display:flex; align-items:center; gap:6px; cursor:help;
+                                      font-size:12px; }
+          #panel-sfx .sx-bools      { display:flex; flex-direction:column; gap:2px;
+                                      font-size:10px; opacity:.8; padding:5px 0 0 2px; }
+          /* margin-top:auto puts the fader row on the floor of its strip, so a strip
+             with an extra switch does not stand its faders higher than its neighbour. */
+          #panel-sfx .sx-params     { display:flex; align-items:flex-end; gap:8px;
+                                      padding:6px 0 0; margin-top:auto; }
+          /* Voice borrows the mixer's fader parts, so these four rules cannot stay scoped to
+             #panel-sfx. They live here because this is where the mixer is described; the
+             second selector is what makes the Voice tab's Strength control stand up at all. */
+          #panel-sfx .sx-param,
+          #panel-voice .sx-param    { display:flex; flex-direction:column; align-items:center; gap:3px;
+                                      font-size:10px; opacity:.9; }
+          /* writing-mode is the current way to stand a range control up; the
+             slider-vertical spelling is the older WebKit one and stays as fallback. */
+          #panel-sfx .sx-fader,
+          #panel-voice .sx-fader    { writing-mode:vertical-lr; direction:rtl;
+                                      -webkit-appearance:slider-vertical; appearance:slider-vertical;
+                                      width:24px; height:120px; padding:0; margin:0; accent-color:#78b4ff; }
+          #panel-sfx .sx-pval       { width:46px; text-align:center; font-size:10px; padding:1px 2px; }
+          #panel-sfx .sx-pread,
+          #panel-voice .sx-pread    { font-size:11px; font-family:monospace; opacity:.9; }
+          #panel-sfx .sx-plabel,
+          #panel-voice .sx-plabel   { max-width:64px; text-align:center; line-height:1.15; opacity:.7; }
+          #panel-sfx .sx-punit      { opacity:.45; }
+          #panel-sfx .sx-grp        { font-size:11px; text-transform:uppercase; letter-spacing:.5px;
+                                      opacity:.5; margin:6px 0 2px; }
+          #panel-sfx .sx-chain      { font-family:monospace; font-size:11px; opacity:.75; word-break:break-all; }
+          #panel-sfx .sx-warn       { color:#f0b429; }
+        </style>
+        <div class="art-panel" id="panel-sfx">
+          <div class="cr-wrap">
+            <div class="cr-row cr-listhead">
+              <span class="cr-listtitle">SFX &mdash; clip workbench</span>
+              <span id="sx-status" class="cr-note" style="margin:0"></span>
+            </div>
+
+            <p class="cr-note" id="sx-setup" style="display:none">
+              No audio service configured. Set <b>voice.api</b> in <code>phoenix-config.json</code>
+              to the running voice-service, e.g. <code>http://gpu-box.local:8090</code>.
+            </p>
+
+            <div id="sx-main" style="display:none">
+
+              <!-- ── source ─────────────────────────────────────────────── -->
+              <div class="sx-src">
+                <div class="sx-srctabs">
+                  <button class="art-btn sx-srctab on" data-src="sfx"  type="button">Generate SFX</button>
+                  <button class="art-btn sx-srctab"    data-src="vo"   type="button">Generate voice</button>
+                  <button class="art-btn sx-srctab"    data-src="load" type="button">Load a clip</button>
+                </div>
+
+                <div class="sx-srcbody" data-body="sfx">
+                  <textarea id="sx-prompt" class="img-prompt-edit" rows="2"
+                            placeholder="describe the sound — e.g. a heavy body landing on soft grass, then rustling"></textarea>
+                  <div class="cr-row">
+                    <label>Seconds</label><input type="number" id="sx-seconds" value="8" min="1" max="30" style="width:64px">
+                    <label>Throws</label><input type="number" id="sx-n" value="3" min="1" max="8" style="width:56px">
+                    <label>Seed</label><input type="number" id="sx-seed" placeholder="random" style="width:110px">
+                    <button class="art-btn" id="sx-gen" type="button">Generate &#127925;</button>
+                  </div>
+                  <div class="cr-note">Every throw gets its own seed and each one is reported back &mdash;
+                    a good throw stays reproducible. Leave <b>Seed</b> empty for a random base.
+                    Without an explicit seed the model would return a <b>bit-identical</b> clip every time.</div>
+                </div>
+
+                <div class="sx-srcbody" data-body="vo" style="display:none">
+                  <textarea id="sx-instr" class="img-prompt-edit" rows="2"
+                            placeholder="describe the voice — e.g. an old man, gravelly and low, slow and weary"></textarea>
+                  <textarea id="sx-line" class="img-prompt-edit" rows="2"
+                            placeholder="the line it should say"></textarea>
+                  <div class="cr-row">
+                    <label>Throws</label><input type="number" id="sx-von" value="3" min="1" max="8" style="width:56px">
+                    <button class="art-btn" id="sx-cast" type="button">Cast &#127908;</button>
+                  </div>
+                  <div class="cr-note">Casting <b>spreads on purpose</b> &mdash; that is what makes it casting.
+                    You get a take back, not a seed: the WAV is what you keep, and it is also what a character
+                    is baked from.</div>
+                </div>
+
+                <div class="sx-srcbody" data-body="load" style="display:none">
+                  <div class="cr-row">
+                    <input type="text" id="sx-path" placeholder="full path to a .wav / .mp3 / .flac / .ogg / .m4a"
+                           style="flex:1">
+                    <button class="art-btn" id="sx-load" type="button">Load</button>
+                  </div>
+                  <div class="cr-note">A loaded clip carries <b>no transcript</b>. Editing works the same,
+                    but saving it as a <b>character</b> will ask you to type what is said &mdash; word for word.</div>
+                </div>
+              </div>
+
+              <!-- ── candidates ─────────────────────────────────────────── -->
+              <div id="sx-jobbox" style="display:none">
+                <div class="cr-row cr-listhead">
+                  <span class="cr-listtitle">Throws</span>
+                  <span id="sx-jobstate" class="cr-note" style="margin:0"></span>
+                </div>
+                <div id="sx-takes" class="cr-folderlist"></div>
+                <p class="cr-note sx-chain" id="sx-joblog" style="display:none"></p>
+              </div>
+
+              <!-- ── the bench ──────────────────────────────────────────── -->
+              <div class="sx-bench">
+                <div class="cr-row cr-listhead">
+                  <span class="cr-listtitle">On the bench</span>
+                  <span id="sx-benchinfo" class="cr-note" style="margin:0">empty</span>
+                </div>
+                <audio id="sx-player" controls style="width:100%;display:none"></audio>
+
+                <div class="cr-row" style="margin-top:8px">
+                  <label>Editing</label>
+                  <button class="art-btn sx-depth on" data-depth="simple"   type="button">simple</button>
+                  <button class="art-btn sx-depth"    data-depth="advanced" type="button">advanced</button>
+                  <span style="flex:1"></span>
+                  <button class="art-btn" id="sx-apply" type="button">Apply</button>
+                  <button class="art-btn" id="sx-reset" type="button">Reset</button>
+                </div>
+
+                <div id="sx-simple">
+                  <div class="cr-row" style="align-items:flex-end">
+                    <label>Effect</label>
+                    <select id="sx-effect"><option value="">none</option></select>
+                    <div class="sx-param" style="margin-left:10px">
+                      <input type="range" id="sx-strength" class="sx-fader"
+                             min="0" max="1" step="0.05" value="0.5">
+                      <span id="sx-strengthval" class="sx-pread">0.50</span>
+                      <span class="sx-plabel">Strength</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="sx-advanced" style="display:none">
+                  <div class="cr-note">Tick what should run, set the numbers, order the chain.
+                    <b>Pegel</b> is appended last automatically &mdash; the chain never writes unlimited.</div>
+                  <div class="sx-adv" id="sx-advlist"></div>
+                  <div class="cr-row" style="margin-top:6px">
+                    <span class="cr-note" style="margin:0">Order:</span>
+                    <span id="sx-order" class="cr-note sx-chain" style="margin:0;flex:1">&mdash;</span>
+                    <button class="art-btn" id="sx-up" type="button">&uarr;</button>
+                    <button class="art-btn" id="sx-down" type="button">&darr;</button>
+                  </div>
+                </div>
+
+                <p class="cr-note sx-chain" id="sx-chaininfo" style="display:none"></p>
+                <p class="cr-note sx-warn"  id="sx-warn"      style="display:none"></p>
+              </div>
+
+              <!-- ── the two exits ──────────────────────────────────────── -->
+              <div class="cr-row cr-listhead"><span class="cr-listtitle">Save as</span></div>
+              <div class="cr-row">
+                <label>Name</label><input type="text" id="sx-savename" placeholder="name" style="flex:1">
+                <button class="art-btn" id="sx-saveclip" type="button">&#128190; Soundclip</button>
+                <button class="art-btn" id="sx-savechar" type="button">&#127917; Character</button>
+              </div>
+              <div id="sx-charbox" style="display:none">
+                <textarea id="sx-transcript" class="img-prompt-edit" rows="2"
+                          placeholder="exactly what is said in this clip"></textarea>
+                <div class="cr-row">
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="checkbox" id="sx-rights"> I have the rights to clone this voice
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px">
+                    <input type="checkbox" id="sx-overwrite"> overwrite
+                  </label>
+                  <button class="art-btn" id="sx-bake" type="button">Bake pack</button>
+                </div>
+                <div class="cr-note">A character becomes a <code>.gguf</code> pack and appears in the
+                  <b>Voice</b> tab. The transcript must match the audio <b>word for word</b> &mdash;
+                  an approximate one misaligns the pack silently. For a cast take Phoenix fills it in itself.
+                  ⚠️ The reference also freezes the <b>delivery</b>, not just the timbre: a pack baked from a
+                  calm read speaks everything calmly.</div>
+              </div>
+              <p class="cr-note" id="sx-saveinfo" style="display:none"></p>
+
+              <!-- ── saved clips ────────────────────────────────────────── -->
+              <div class="cr-row cr-listhead" style="margin-top:10px">
+                <span class="cr-listtitle">Saved soundclips</span>
+                <button class="art-btn" id="sx-openclips" type="button">Open folder</button>
+              </div>
+              <div id="sx-clips" class="cr-folderlist"></div>
             </div>
           </div>
         </div>
@@ -1049,6 +1513,84 @@
       // Apply saved (or default) theme immediately on load
       try { applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'orange-light'); } catch (_) { applyTheme('orange-light'); }
 
+      // ── The VRAM ledger, in one line ─────────────────────────────────────────
+      //
+      // The 10 GB card is shared: this app, ComfyUI, and the batch queue all want
+      // it. Until 2026-07-27 a busy card meant a silent hang — you pressed a
+      // button and nothing happened for minutes. Now the audio service reports
+      // the ledger in /health, and both audio tabs show it in their status line.
+      //
+      // ONE implementation, two callers (Voice and Sound). Written twice, the two
+      // wordings drift and one of them ends up lying.
+      function cardStatusText(health) {
+        if (!health) return '';
+        // Our own service busy beats everything else — it is the nearer cause.
+        if (health.busy) return ' · card busy (' + (health.busyWith || 'a job') + ')';
+        const k = health.kasse;
+        if (!k) return '';
+        if (k.aus) return ' · ledger unavailable';
+        const held = (k.halter && k.halter.length) ? k.halter.join(', ') : null;
+        // One decimal always — '7/9.6' next to '2.6/9.6' reads like two different units.
+        return ' · card ' + Number(k.freiGb).toFixed(1) + '/' + Number(k.gesamtGb).toFixed(1) + ' GB free'
+             + (held ? ' · held by ' + held : '');
+      }
+
+      // Why THIS action will have to wait — or null if it can start right away.
+      // `action` is one of the keys the service reports under kasse.braucht:
+      // speak · bake · cast · sfx.
+      //
+      // Deliberately a hint, not a gate: the service asks ComfyUI to release the
+      // card and often gets it, so a "will wait" here still frequently succeeds
+      // within seconds. Blocking the button on this would refuse work that would
+      // have gone through.
+      function cardWaitReason(health, action) {
+        if (!health) return null;
+        if (health.busy) return 'The card is busy with ' + (health.busyWith || 'another job') + '.';
+        const k = health.kasse;
+        if (!k || k.aus) return null;
+        const need = k.braucht && k.braucht[action];
+        if (!need || typeof need.gb !== 'number') return null;
+        if (need.gb <= k.freiGb) return null;
+        const held = (k.halter && k.halter.length) ? k.halter.join(', ') : 'another process';
+        return action + ' needs ' + Number(need.gb).toFixed(1) + ' GB, '
+             + Number(k.freiGb).toFixed(1) + ' GB free — ' + held
+             + ' holds the card. Asking it to release…';
+      }
+
+      // The status line was written on tab open and after each action only, so a card that
+      // changed WHILE you sat on the tab stayed invisible until you clicked something. The
+      // earlier note left a poll out because it costs a request every few seconds — so this
+      // one only spends that when it can actually be seen: the panel has to be the open one
+      // AND the browser tab in front. A backgrounded window costs nothing.
+      //
+      // ONE implementation, two callers — same reason as the two helpers above.
+      const CARD_POLL_MS = 10000;
+      function startCardStatusPoll(panelId, statusId, stateUrl, buildLine) {
+        const panel = document.getElementById(panelId);
+        const statusEl = document.getElementById(statusId);
+        if (!panel || !statusEl) return;
+        const CANON = "connected · ";
+        let inFlight = false;
+        setInterval(async () => {
+          if (inFlight) return;                                 // a slow answer must not be overtaken
+          if (!panel.classList.contains("visible")) return;     // this tab is not the open one
+          if (document.visibilityState !== "visible") return;   // browser in the background
+          // A RUNNING ACTION OWNS THIS LINE: speak writes its wait reason into the very same
+          // element. Only the canonical status line is ever touched — anything else is left
+          // alone until the action's own refresh() writes it back.
+          if ((statusEl.textContent || "").indexOf(CANON) !== 0) return;
+          inFlight = true;
+          try {
+            const j = await (await fetch(stateUrl)).json();
+            if (j && j.health && j.health.ok) {
+              // Re-check: the await above is a window in which an action may have claimed the line.
+              if ((statusEl.textContent || "").indexOf(CANON) === 0) statusEl.textContent = buildLine(j);
+            }
+          } catch (_) { /* a failed peek must never break the tab it is decorating */ }
+          finally { inFlight = false; }
+        }, CARD_POLL_MS);
+      }
+
       // ── Debug console collapse toggle (starts collapsed) ─────────────────────
 
       const consoleWrapEl  = document.getElementById('console-wrap');
@@ -1158,6 +1700,8 @@
         mesh:   document.getElementById('panel-mesh'),
         human:  document.getElementById('panel-human'),
         customrig: document.getElementById('panel-customrig'),
+        voice:  document.getElementById('panel-voice'),
+        sfx:    document.getElementById('panel-sfx'),
       };
 
       function switchTab(tab) {
@@ -1172,6 +1716,658 @@
       tabBtns.forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
       });
+
+      // Wording stays with each tab (packs vs voices); only the card part is shared.
+      startCardStatusPoll('panel-sfx', 'sx-status', '/sfx-state', (j) =>
+        'connected · ' + (j.health.backend || '?') + ' · ' + (j.packs || []).length + ' packs'
+        + cardStatusText(j.health));
+      startCardStatusPoll('panel-voice', 'vo-status', '/voice-state', (j) =>
+        'connected · ' + (j.health.backend || '?') + ' · ' + (j.voices || []).length + ' packs'
+        + cardStatusText(j.health));
+
+      // ── Unreal bridge indicator ─────────────────────────────────────────────
+      // Poll, do not push: the bridge has no event channel, and an editor that
+      // starts or dies does so without telling anyone. 30 s, because the server
+      // caches for 20 — a faster tick would only re-read the same answer. Paused
+      // while the tab is hidden, for the same reason the card polls are, and it
+      // catches up immediately on return so a just-started editor shows at once.
+      (function startUnrealDot() {
+        const el  = document.getElementById('unreal-dot');
+        const txt = document.getElementById('unreal-dot-text');
+        if (!el || !txt) return;
+
+        // get_engine_version() answers "5.8.1-43139311+++UE5+Release-5.8" — only the
+        // part before the build hash belongs in a header.
+        const shortVer = v => String(v || '').split('-')[0] || '?';
+
+        // The label carries the DIAGNOSIS, not just a colour — that is the whole
+        // point: "silent" and "no project" used to look identical from out here.
+        const LABEL = {
+          live:      s => 'Unreal ' + shortVer(s.engineVersion)
+                          + (s.projectName ? ' · ' + s.projectName : ''),
+          noproject: () => 'Unreal · no project',
+          silent:    () => 'Unreal silent',
+          absent:    () => 'Unreal off',
+          unknown:   () => 'Unreal ?',
+        };
+        const TIP = {
+          live:      s => 'Bridge is live — ' + (s.projectFile || 'project path unknown'),
+          absent:    () => 'No Unreal Editor is running. Nothing is wrong — start one '
+                          + 'when you need it.',
+          // These three already carry a full explanation from the bridge; passing it
+          // through verbatim beats paraphrasing it in two places.
+          noproject: s => s.message || '',
+          silent:    s => s.message || '',
+          unknown:   s => 'Could not determine the bridge state.\n\n' + (s.message || ''),
+        };
+
+        async function tick() {
+          if (document.hidden) return;
+          try {
+            const r = await fetch('/unreal-state');
+            if (!r.ok) return;
+            const s = await r.json();
+            // No Unreal on this machine ⇒ no indicator at all. A permanent red dot
+            // for something the user never installed is noise, not information.
+            if (s.state === 'noengine') { el.hidden = true; return; }
+            el.hidden = false;
+            el.dataset.state = s.state;
+            txt.textContent = (LABEL[s.state] || LABEL.unknown)(s);
+            el.title        = (TIP[s.state]   || TIP.unknown)(s);
+          } catch (_) { /* the header must never be the thing that breaks the page */ }
+        }
+
+        tick();
+        setInterval(tick, 30000);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+      })();
+
+      // ── SFX panel — the clip workbench ──────────────────────────────────────
+      // Three sources, edit at two depths, two exits. The bench holds {source, chain}
+      // and re-renders from the SOURCE on every Apply — never stacking onto the last
+      // result, so repeated tweaking neither degrades the audio nor drifts away from
+      // what the controls say.
+      (function wireSfxPanel() {
+        const panel = document.getElementById('panel-sfx');
+        if (!panel) return;
+        const byId = id => document.getElementById(id);
+        const el = {
+          status: byId('sx-status'), setup: byId('sx-setup'), main: byId('sx-main'),
+          prompt: byId('sx-prompt'), seconds: byId('sx-seconds'), n: byId('sx-n'), seed: byId('sx-seed'),
+          instr: byId('sx-instr'), line: byId('sx-line'), von: byId('sx-von'), path: byId('sx-path'),
+          jobbox: byId('sx-jobbox'), jobstate: byId('sx-jobstate'), takes: byId('sx-takes'), joblog: byId('sx-joblog'),
+          player: byId('sx-player'), benchinfo: byId('sx-benchinfo'),
+          simple: byId('sx-simple'), advanced: byId('sx-advanced'), advlist: byId('sx-advlist'),
+          effect: byId('sx-effect'), strength: byId('sx-strength'), strengthval: byId('sx-strengthval'),
+          order: byId('sx-order'), chaininfo: byId('sx-chaininfo'), warn: byId('sx-warn'),
+          savename: byId('sx-savename'), charbox: byId('sx-charbox'), transcript: byId('sx-transcript'),
+          rights: byId('sx-rights'), overwrite: byId('sx-overwrite'), saveinfo: byId('sx-saveinfo'),
+          clips: byId('sx-clips'),
+        };
+
+        let effects = [];          // full catalogue with parameter definitions
+        let chainOrder = [];       // enabled effect ids, in chain order
+        let selectedStep = null;   // which chain step the ↑/↓ buttons move
+        let depth = 'simple';
+        let poll = null;
+        let benchKind = null;      // 'sfx' | 'cast' | 'file' — decides the transcript rule
+
+        function note(elem, text, show) {
+          elem.textContent = text || '';
+          elem.style.display = show && text ? 'block' : 'none';
+        }
+
+        // ── source switch ───────────────────────────────────────────────────
+        panel.querySelectorAll('.sx-srctab').forEach(btn => {
+          btn.addEventListener('click', () => {
+            panel.querySelectorAll('.sx-srctab').forEach(b => b.classList.toggle('on', b === btn));
+            panel.querySelectorAll('.sx-srcbody').forEach(b => {
+              b.style.display = b.dataset.body === btn.dataset.src ? 'block' : 'none';
+            });
+          });
+        });
+
+        // ── editing depth ───────────────────────────────────────────────────
+        panel.querySelectorAll('.sx-depth').forEach(btn => {
+          btn.addEventListener('click', () => {
+            depth = btn.dataset.depth;
+            panel.querySelectorAll('.sx-depth').forEach(b => b.classList.toggle('on', b === btn));
+            el.simple.style.display   = depth === 'simple'   ? 'block' : 'none';
+            el.advanced.style.display = depth === 'advanced' ? 'block' : 'none';
+          });
+        });
+
+        el.strength.addEventListener('input', () => {
+          el.strengthval.textContent = Number(el.strength.value).toFixed(2);
+        });
+
+        // Does the parameter name already contain its unit? Punctuation and case are
+        // dropped first, so "peak_dbfs" swallows "dBFS" and "semitones" swallows itself.
+        function sameWord(name, unit) {
+          const norm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+          const u = norm(unit);
+          return !!u && norm(name).includes(u);
+        }
+
+        // ── the advanced catalogue: a mixer rack ────────────────────────────
+        // One strip per effect, faders running bottom-to-top, strips side by side
+        // within their group. The number stays next to every fader AND stays
+        // typable: a 120px fader cannot hit 12000 Hz exactly, and losing that
+        // would be a regression over the number fields this replaced.
+        function renderAdvanced() {
+          el.advlist.innerHTML = '';
+          // ONE rack for all of them. A heading per group broke the row every few
+          // strips and turned one desk into three blocks; the grouping still shows
+          // in the order the strips appear, and it is named in each tooltip.
+          const rack = document.createElement('div');
+          rack.className = 'sx-rack';
+          el.advlist.appendChild(rack);
+          effects.forEach(e => {
+            const row = document.createElement('div');
+            row.className = 'sx-effrow';
+
+            const head = document.createElement('label');
+            head.className = 'sx-effhead';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox'; cb.dataset.eff = e.id;
+            cb.addEventListener('change', () => {
+              if (cb.checked) { if (!chainOrder.includes(e.id)) chainOrder.push(e.id); selectedStep = e.id; }
+              else chainOrder = chainOrder.filter(x => x !== e.id);
+              row.classList.toggle('on', cb.checked);   // a lit strip = in the chain
+              renderOrder();
+            });
+            const name = document.createElement('span');
+            name.textContent = e.label;
+            head.appendChild(cb); head.appendChild(name);
+            // The description rides along as the tooltip rather than as a line of
+            // text: printed, it decided how wide the strip had to be, and ten wide
+            // strips read as clutter instead of as a desk.
+            row.title = (e.group ? e.group + ' · ' : '') + e.label +
+                        (e.description ? ' — ' + e.description : '');
+            row.appendChild(head);
+
+            // Switches sit above the faders the way they do on a channel strip.
+            // A fader for on/off would be a control that can only be read wrong.
+            const bools  = document.createElement('div');
+            bools.className = 'sx-bools';
+            const params = document.createElement('div');
+            params.className = 'sx-params';
+
+            (e.parameter || []).forEach(p => {
+              if (p.unit === 'bool') {
+                const lab = document.createElement('label');
+                lab.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer';
+                const inp = document.createElement('input');
+                inp.type = 'checkbox';
+                inp.checked = !!p.default;
+                inp.dataset.eff = e.id; inp.dataset.param = p.name; inp.dataset.bool = 'true';
+                const t = document.createElement('span');
+                t.textContent = p.name;
+                lab.appendChild(inp); lab.appendChild(t);
+                bools.appendChild(lab);
+                return;
+              }
+
+              const strip = document.createElement('div');
+              strip.className = 'sx-param';
+
+              const fader = document.createElement('input');
+              fader.type = 'range';
+              fader.className = 'sx-fader';
+              fader.min = p.min; fader.max = p.max;
+              fader.step = (p.max - p.min) <= 2 ? 0.05 : 1;
+              fader.value = p.default;
+              // Only the FADER carries data-param — collectAdvanced() looks the
+              // control up by that pair, and two inputs answering to it would make
+              // the read depend on document order.
+              fader.dataset.eff = e.id; fader.dataset.param = p.name; fader.dataset.bool = 'false';
+
+              const val = document.createElement('input');
+              val.type = 'number';
+              val.className = 'sx-pval';
+              val.min = p.min; val.max = p.max; val.step = fader.step;
+              val.value = p.default;
+
+              // The readout is the same value, not a second one. Typing writes the
+              // fader and reads it back, so the browser does the clamping and the
+              // two can never drift apart.
+              fader.addEventListener('input',  () => { val.value = fader.value; });
+              val.addEventListener('change', () => {
+                fader.value = val.value;
+                val.value = fader.value;
+              });
+
+              const lab = document.createElement('span');
+              lab.className = 'sx-plabel';
+              lab.textContent = p.name;
+
+              strip.appendChild(fader);
+              strip.appendChild(val);
+              strip.appendChild(lab);
+              // The unit earns its line only when the name does not already say it:
+              // "threshold_db" over "dB" tells the eye the same thing twice, whereas
+              // "amount" over "0..1" says something the name leaves out.
+              if (p.unit && !sameWord(p.name, p.unit)) {
+                const unit = document.createElement('span');
+                unit.className = 'sx-plabel sx-punit';
+                unit.textContent = p.unit;
+                strip.appendChild(unit);
+              }
+              params.appendChild(strip);
+            });
+
+            if (bools.children.length) row.appendChild(bools);
+            row.appendChild(params);
+            rack.appendChild(row);
+          });
+          renderOrder();
+        }
+
+        function renderOrder() {
+          el.order.textContent = chainOrder.length
+            ? chainOrder.map(id => (id === selectedStep ? '[' + id + ']' : id)).join(' → ')
+            : '—';
+        }
+
+        function moveStep(delta) {
+          if (!selectedStep) return;
+          const i = chainOrder.indexOf(selectedStep);
+          const j = i + delta;
+          if (i < 0 || j < 0 || j >= chainOrder.length) return;
+          chainOrder.splice(j, 0, chainOrder.splice(i, 1)[0]);
+          renderOrder();
+        }
+        byId('sx-up').addEventListener('click', () => moveStep(-1));
+        byId('sx-down').addEventListener('click', () => moveStep(1));
+
+        // Collect the advanced block. buildChain demands EVERY parameter of an
+        // enabled effect, and that `advanced` and `order` hold the same set —
+        // so this reads the controls rather than guessing defaults.
+        function collectAdvanced() {
+          const advanced = {};
+          chainOrder.forEach(id => {
+            const def = effects.find(e => e.id === id);
+            if (!def) return;
+            const params = {};
+            (def.parameter || []).forEach(p => {
+              const inp = el.advlist.querySelector('input[data-eff="' + id + '"][data-param="' + p.name + '"]');
+              if (!inp) { params[p.name] = p.default; return; }
+              params[p.name] = inp.dataset.bool === 'true' ? inp.checked : Number(inp.value);
+            });
+            advanced[id] = params;
+          });
+          return { advanced, order: chainOrder.slice() };
+        }
+
+        // ── generation ──────────────────────────────────────────────────────
+        async function startJob(url, body, label) {
+          note(el.saveinfo, '', false);
+          el.jobbox.style.display = 'block';
+          el.takes.innerHTML = '';
+          el.jobstate.textContent = label + ' — starting…';
+          // Both generators come through here, so the card check lives here once.
+          // The same mapping label→action that renderTakes already uses.
+          try {
+            const hj = await (await fetch('/sfx-state')).json();
+            const warte = cardWaitReason(hj && hj.health, label === 'Cast' ? 'cast' : 'sfx');
+            if (warte) el.jobstate.textContent = label + ' — ' + warte;
+          } catch (_) { /* a failed peek must never stop the actual attempt */ }
+          try {
+            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                         body: JSON.stringify(body) });
+            const j = await r.json();
+            if (j.error) { el.jobstate.textContent = j.error; return; }
+            watchJob(j.job, label);
+          } catch (e) { el.jobstate.textContent = 'could not reach Phoenix'; }
+        }
+
+        function watchJob(id, label) {
+          if (poll) clearInterval(poll);
+          const t0 = Date.now();
+          const tick = async () => {
+            try {
+              const r = await fetch('/sfx-job?id=' + encodeURIComponent(id));
+              const j = await r.json();
+              const secs = Math.round((Date.now() - t0) / 1000);
+              if (j.error) { el.jobstate.textContent = j.error; clearInterval(poll); poll = null; return; }
+              el.jobstate.textContent = label + ' — ' + j.status + ' · ' + secs + 's';
+              note(el.joblog, (j.log || []).slice(-3).join('  |  '), true);
+              if (j.status === 'running') return;
+              clearInterval(poll); poll = null;
+              if (j.status !== 'done') { el.jobstate.textContent = j.error || 'failed'; return; }
+              renderTakes(j.result, label === 'Cast' ? 'cast' : 'sfx', j.result && j.result.text);
+            } catch (_) { /* keep polling — a single hiccup is not a failure */ }
+          };
+          tick();
+          poll = setInterval(tick, 3000);
+        }
+
+        function renderTakes(result, kind, text) {
+          el.takes.innerHTML = '';
+          (result.takes || []).forEach(t => {
+            const row = document.createElement('div');
+            row.className = 'cr-row';
+            const name = document.createElement('span');
+            name.className = 'cr-note'; name.style.margin = '0'; name.style.flex = '1';
+            const bits = [t.datei];
+            if (t.dauer_s != null) bits.push(t.dauer_s + 's');
+            if (t.rms_dbfs != null) bits.push('RMS ' + t.rms_dbfs + ' dBFS');
+            if (t.seed != null) bits.push('seed ' + t.seed);
+            if (t.laenge && t.laenge.verdacht_abbruch) bits.push('⚠ looks truncated');
+            if (t.fehler) bits.push('⚠ ' + t.fehler);
+            if (t.pullError) bits.push('⚠ not fetched: ' + t.pullError);
+            name.textContent = bits.join(' · ');
+            row.appendChild(name);
+            if (t.playUrl) {
+              const play = document.createElement('button');
+              play.className = 'art-btn'; play.type = 'button'; play.textContent = 'Play';
+              play.addEventListener('click', () => {
+                el.player.src = t.playUrl; el.player.style.display = 'block'; el.player.play();
+              });
+              row.appendChild(play);
+              const use = document.createElement('button');
+              use.className = 'art-btn'; use.type = 'button'; use.textContent = 'To bench';
+              use.addEventListener('click', () => adopt(t.local, kind, text));
+              row.appendChild(use);
+            }
+            el.takes.appendChild(row);
+          });
+        }
+
+        byId('sx-gen').addEventListener('click', () => startJob('/sfx-generate', {
+          prompt: el.prompt.value, seconds: Number(el.seconds.value), n: Number(el.n.value),
+          seed: el.seed.value === '' ? null : Number(el.seed.value),
+        }, 'SFX'));
+
+        byId('sx-cast').addEventListener('click', () => startJob('/sfx-cast', {
+          instruction: el.instr.value, text: el.line.value, n: Number(el.von.value),
+        }, 'Cast'));
+
+        byId('sx-load').addEventListener('click', async () => {
+          const r = await fetch('/sfx-load', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                               body: JSON.stringify({ path: el.path.value }) });
+          const j = await r.json();
+          if (j.error) { note(el.saveinfo, j.error, true); return; }
+          applyBench(j.bench);
+        });
+
+        // ── the bench ───────────────────────────────────────────────────────
+        async function adopt(take, kind, text) {
+          const r = await fetch('/sfx-adopt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ take, kind, text }) });
+          const j = await r.json();
+          if (j.error) { note(el.saveinfo, j.error, true); return; }
+          applyBench(j.bench);
+        }
+
+        function applyBench(b) {
+          if (!b) { el.benchinfo.textContent = 'empty'; el.player.style.display = 'none'; benchKind = null; return; }
+          benchKind = b.kind;
+          const bits = [b.kind === 'cast' ? 'voice take' : b.kind === 'sfx' ? 'sfx take' : 'loaded clip'];
+          if (b.seconds != null) bits.push(b.seconds + 's');
+          if (b.rate) bits.push((b.rate / 1000) + ' kHz');
+          if (b.channels) bits.push(b.channels === 1 ? 'mono' : b.channels + ' ch');
+          if (b.hasChain) bits.push('edited');
+          if (b.text) bits.push('transcript known');
+          else if (b.kind === 'file') bits.push('no transcript');
+          el.benchinfo.textContent = bits.join(' · ');
+          el.player.src = b.url; el.player.style.display = 'block';
+          note(el.chaininfo, b.chain ? b.chain.filter : '', !!b.chain);
+          note(el.warn, (b.warnings || []).join(' · '), (b.warnings || []).length > 0);
+          // A cast take knows its own line — fill it in and leave it read-only, because
+          // this is exactly the case where the transcript cannot be wrong.
+          if (b.text) { el.transcript.value = b.text; el.transcript.readOnly = true; }
+          else { el.transcript.readOnly = false; }
+        }
+
+        byId('sx-apply').addEventListener('click', async () => {
+          const spec = depth === 'simple'
+            ? (el.effect.value ? { effect: el.effect.value, strength: Number(el.strength.value) } : {})
+            : collectAdvanced();
+          const r = await fetch('/sfx-render', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify(spec) });
+          const j = await r.json();
+          if (j.error && !j.bench) { note(el.warn, j.error, true); return; }
+          if (j.error) note(el.warn, j.error, true);
+          applyBench(j.bench);
+        });
+
+        byId('sx-reset').addEventListener('click', async () => {
+          const r = await fetch('/sfx-render', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                 body: JSON.stringify({}) });
+          const j = await r.json();
+          applyBench(j.bench);
+        });
+
+        // ── the two exits ───────────────────────────────────────────────────
+        byId('sx-saveclip').addEventListener('click', async () => {
+          el.charbox.style.display = 'none';
+          const r = await fetch('/sfx-save-clip', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ name: el.savename.value }) });
+          const j = await r.json();
+          note(el.saveinfo, j.error || ('saved as ' + j.file), true);
+          if (!j.error) refresh();
+        });
+
+        // "Character" opens the confirmation block rather than acting at once —
+        // baking clones a voice, which is a decision, not a click.
+        byId('sx-savechar').addEventListener('click', () => {
+          el.charbox.style.display = el.charbox.style.display === 'none' ? 'block' : 'none';
+          if (benchKind === 'file' && !el.transcript.value) {
+            note(el.saveinfo, 'This clip was loaded — type what is said in it, word for word.', true);
+          }
+        });
+
+        byId('sx-bake').addEventListener('click', async () => {
+          const btn = byId('sx-bake');
+          btn.disabled = true; const was = btn.textContent; btn.textContent = 'baking…';
+          // Same as speak/cast/sfx: say WHY it will be slow before it is slow. bake runs the
+          // same CrispASR model as speak (8.2 GB), so it is the single biggest consumer on a
+          // 9.6 GB ledger — the one action most likely to sit and wait without explanation.
+          try {
+            const hj = await (await fetch('/sfx-state')).json();
+            const warte = cardWaitReason(hj && hj.health, 'bake');
+            if (warte) note(el.saveinfo, warte, true);
+          } catch (_) { /* a failed peek must never stop the actual attempt */ }
+          try {
+            const r = await fetch('/sfx-save-character', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                name: el.savename.value, transcript: el.transcript.value,
+                iHaveRights: el.rights.checked, overwrite: el.overwrite.checked,
+              }),
+            });
+            const j = await r.json();
+            note(el.saveinfo, j.error || ('baked pack "' + j.pack + '" — it is now in the Voice tab'), true);
+          } catch (e) { note(el.saveinfo, 'could not reach Phoenix', true); }
+          finally { btn.disabled = false; btn.textContent = was; }
+        });
+
+        byId('sx-openclips').addEventListener('click', () => {
+          fetch('/sfx-open', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                               body: JSON.stringify({ which: 'clips' }) }).catch(() => {});
+        });
+
+        // ── state ───────────────────────────────────────────────────────────
+        function renderClips(clips) {
+          el.clips.innerHTML = '';
+          (clips || []).forEach(c => {
+            const row = document.createElement('div');
+            row.className = 'cr-row';
+            const name = document.createElement('span');
+            name.className = 'cr-note'; name.style.margin = '0'; name.style.flex = '1';
+            name.textContent = c.file;
+            const play = document.createElement('button');
+            play.className = 'art-btn'; play.type = 'button'; play.textContent = 'Play';
+            play.addEventListener('click', () => {
+              el.player.src = c.url; el.player.style.display = 'block'; el.player.play();
+            });
+            row.appendChild(name); row.appendChild(play);
+            el.clips.appendChild(row);
+          });
+        }
+
+        async function refresh() {
+          try {
+            const r = await fetch('/sfx-state');
+            const j = await r.json();
+            const ok = j.health && j.health.ok;
+            el.setup.style.display = ok ? 'none' : 'block';
+            el.main.style.display  = ok ? 'block' : 'none';
+            el.status.textContent = ok
+              ? ('connected · ' + (j.health.backend || '?') + ' · ' + (j.packs || []).length + ' packs'
+                 + cardStatusText(j.health))
+              : ((j.health && j.health.error) || 'not configured');
+            if (!ok) return;
+            if (!effects.length) {
+              effects = j.effects || [];
+              effects.forEach(e => {
+                const o = document.createElement('option');
+                o.value = e.id; o.textContent = e.label || e.id;
+                el.effect.appendChild(o);
+              });
+              renderAdvanced();
+            }
+            renderClips(j.clips);
+            applyBench(j.bench);
+          } catch (_) { el.status.textContent = 'could not reach Phoenix'; }
+        }
+
+        // Load when the tab is first opened, not on every page load.
+        document.querySelectorAll('.art-tab-btn').forEach(b => {
+          if (b.dataset.tab === 'sfx') b.addEventListener('click', refresh);
+        });
+      })();
+
+      // ── Voice panel ─────────────────────────────────────────────────────────
+      // Pick a saved voice pack, type a line, hear it. Generation happens on whatever
+      // machine runs the speech server (voice.api) — this panel only asks and plays.
+      (function wireVoicePanel() {
+        const panel = document.getElementById('panel-voice');
+        if (!panel) return;
+        const byId = id => document.getElementById(id);
+        const elVoice = byId('vo-voice'), elText = byId('vo-text'), elEffect = byId('vo-effect');
+        const elStrength = byId('vo-strength'), elStrengthVal = byId('vo-strengthval');
+        const elSpeak = byId('vo-speak'), elStatus = byId('vo-status'), elSetup = byId('vo-setup');
+        const elMain = byId('vo-main'), elPlayer = byId('vo-player'), elChain = byId('vo-chain');
+        const elTakes = byId('vo-takes');
+        let loaded = false;
+
+        elStrength.addEventListener('input', () => {
+          elStrengthVal.textContent = Number(elStrength.value).toFixed(2);
+        });
+
+        function renderTakes(takes) {
+          elTakes.innerHTML = '';
+          (takes || []).forEach(t => {
+            const row = document.createElement('div');
+            row.className = 'cr-row';
+            const name = document.createElement('span');
+            name.className = 'cr-note';
+            name.style.margin = '0';
+            name.style.flex = '1';
+            name.textContent = t.file;
+            const play = document.createElement('button');
+            play.className = 'art-btn';
+            play.type = 'button';
+            play.textContent = 'Play';
+            play.addEventListener('click', () => {
+              elPlayer.src = t.url; elPlayer.style.display = 'block'; elPlayer.play();
+            });
+            row.appendChild(name); row.appendChild(play);
+            elTakes.appendChild(row);
+          });
+        }
+
+        async function refresh() {
+          try {
+            const r = await fetch('/voice-state');
+            const j = await r.json();
+            const ok = j.health && j.health.ok;
+            elSetup.style.display = ok ? 'none' : 'block';
+            elMain.style.display  = ok ? 'block' : 'none';
+            elStatus.textContent = ok
+              ? ('connected · ' + (j.health.backend || '?') + ' · ' + (j.voices || []).length + ' packs'
+                 + cardStatusText(j.health))
+              : ((j.health && j.health.error) || 'not configured');
+            if (!ok) return;
+
+            const keep = elVoice.value;
+            elVoice.innerHTML = '';
+            (j.voices || []).forEach(v => {
+              const o = document.createElement('option');
+              o.value = v.name; o.textContent = v.name;
+              elVoice.appendChild(o);
+            });
+            if (keep) elVoice.value = keep;
+
+            if (elEffect.options.length <= 1) {
+              (j.effects || []).forEach(e => {
+                const o = document.createElement('option');
+                o.value = e.id; o.textContent = e.label || e.id;
+                elEffect.appendChild(o);
+              });
+            }
+            renderTakes(j.takes);
+            loaded = true;
+          } catch (_) {
+            elStatus.textContent = 'could not reach Phoenix';
+          }
+        }
+
+        byId('vo-refresh').addEventListener('click', refresh);
+        byId('vo-open').addEventListener('click', () => {
+          fetch('/voice-open', { method: 'POST' }).catch(() => {});
+        });
+
+        elSpeak.addEventListener('click', async () => {
+          const text = (elText.value || '').trim();
+          if (!text) { window.alert('Type a line first.'); return; }
+          elSpeak.disabled = true;
+          const was = elSpeak.textContent;
+          elSpeak.textContent = 'speaking…';
+          elChain.style.display = 'none';
+          // Say WHY it will be slow before it is slow. Without this the button sat
+          // on 'speaking…' for up to 20 s and only then admitted the card was taken.
+          // One extra round trip on click is cheap next to the wait it explains.
+          try {
+            const hj = await (await fetch('/voice-state')).json();
+            const warte = cardWaitReason(hj && hj.health, 'speak');
+            if (warte) { elSpeak.textContent = 'waiting for the card…'; elStatus.textContent = warte; }
+          } catch (_) { /* a failed peek must never stop the actual attempt */ }
+          try {
+            const r = await fetch('/voice-speak', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                voice: elVoice.value, text,
+                effect: elEffect.value || null,
+                strength: Number(elStrength.value),
+              }),
+            });
+            const j = await r.json();
+            if (j && j.url) {
+              elPlayer.src = j.url; elPlayer.style.display = 'block'; elPlayer.play();
+              if (j.filter) {
+                elChain.style.display = 'block';
+                elChain.textContent = j.seconds + 's · ' + (j.steps || []).join(' → ') + '  —  ' + j.filter;
+              }
+              if (j.error) window.alert(j.error);
+              refresh();
+            } else {
+              window.alert((j && j.error) || 'speaking failed');
+            }
+          } catch (_) {
+            window.alert('speaking failed — is Phoenix still running?');
+          } finally {
+            elSpeak.disabled = false; elSpeak.textContent = was;
+          }
+        });
+
+        // Load lazily: no point talking to the speech server before the tab is opened.
+        document.querySelectorAll('.art-tab-btn').forEach(b => {
+          if (b.dataset.tab === 'voice') b.addEventListener('click', () => { if (!loaded) refresh(); });
+        });
+      })();
 
       // ── Human (MakeHuman / MPFB2) panel ──────────────────────────────────────
       (function wireHumanPanel() {
@@ -1511,6 +2707,20 @@
             postAction('spawn_character', { name });
           });
 
+          // → Unreal sits here and not in the Mesh tab's "from Unreal" row on purpose: that row
+          // fetches meshes, and a character is the one thing it must NOT handle (a brush drops
+          // the armature). Same routing idea as Save character — the tab you are in is the
+          // answer to "what kind of thing is this", so no target picker is needed.
+          const unrealBtn = byId('hu-char-unreal');
+          if (unrealBtn) unrealBtn.addEventListener('click', () => {
+            const st = byId('hu-status');
+            // No rig name: the backend takes the first mixamorig armature in the scene, which is
+            // the same rule animate_human uses when no character is named. The character has to
+            // BE in the scene — a saved skin is a file, and Unreal cannot read a .blend.
+            if (st) st.textContent = 'Sending the character in the scene to Unreal…';
+            postAction('character_to_unreal', { name: charSel.value || undefined });
+          });
+
           if (saveBtn) saveBtn.addEventListener('click', () => {
             const name = window.prompt('Name this character (e.g. "hero", "guard_a"):', '');
             if (!name) return;
@@ -1837,6 +3047,13 @@
           document.getElementById('gate-vision').value =
             ['off', 'focused', 'full'].includes(g.vision) ? g.vision : 'focused';
           document.getElementById('gate-notool').checked = blenderOnly;
+          // Unreal group. GET /config already substitutes the defaults, so an unset value arrives
+          // as 'blender'/'camera' rather than empty — no second source of truth in the browser.
+          const u = c.unreal || {};
+          document.getElementById('gate-brush-target').value =
+            ['blender', 'unreal', 'both'].includes(u.brushTarget) ? u.brushTarget : 'blender';
+          document.getElementById('gate-unreal-vision').value =
+            ['off', 'camera', 'viewport'].includes(u.visionMode) ? u.visionMode : 'camera';
         } catch (_) {}
       }
 
@@ -1847,10 +3064,46 @@
           mesh:   document.getElementById('gate-mesh').checked,
           vision: document.getElementById('gate-vision').value,
         };
+        // Only the two switches this panel owns — the render SIZE lives in the Settings dialog and
+        // must not be sent from here, or one panel would overwrite the other's field.
+        const unreal = {
+          brushTarget: document.getElementById('gate-brush-target').value,
+          visionMode:  document.getElementById('gate-unreal-vision').value,
+        };
         try {
-          await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gates }) });
+          await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gates, unreal }) });
         } catch (_) {}
       }
+
+      // ── Info popups in the gates panel ───────────────────────────────────────
+      // Long explanations would flood a panel that is meant to be scanned at a glance, so they
+      // open on demand and close when you click anywhere else (user's call, 2026-07-31).
+      function closeGatePops() {
+        settingsPanel.querySelectorAll('.gate-pop').forEach(function (p) { p.hidden = true; });
+      }
+      settingsPanel.addEventListener('click', function (e) {
+        const btn = e.target.closest('.gate-info');
+        if (!btn) {
+          // A click anywhere else inside the panel closes an open bubble, so it can never sit
+          // there stale while the operator changes a different row.
+          if (!e.target.closest('.gate-pop')) closeGatePops();
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        const pop = document.getElementById(btn.dataset.pop);
+        if (!pop) return;
+        const wasOpen = !pop.hidden;
+        closeGatePops();
+        if (wasOpen) return;
+        // Align the bubble with its own row rather than a fixed offset — the panel's height
+        // changes with the gate list and a hard-coded top would drift.
+        pop.style.top = (btn.offsetTop - 4) + 'px';
+        pop.hidden = false;
+      });
+      document.addEventListener('click', function (e) {
+        if (!e.target.closest('#settings-panel')) closeGatePops();
+      });
 
       settingsBtn.addEventListener('click', function () {
         settingsPanel.hidden = !settingsPanel.hidden;
@@ -1861,6 +3114,8 @@
       document.getElementById('gate-image').addEventListener('change', saveGates);
       document.getElementById('gate-mesh').addEventListener('change', saveGates);
       document.getElementById('gate-vision').addEventListener('change', saveGates);
+      document.getElementById('gate-brush-target').addEventListener('change', saveGates);
+      document.getElementById('gate-unreal-vision').addEventListener('change', saveGates);
       document.getElementById('gate-notool').addEventListener('change', function () { setBlenderOnly(this.checked); });
 
       document.addEventListener('click', function (e) {
@@ -1899,7 +3154,10 @@
         if (which === 'feedback') return openFeedback();
         const titles = {};
         openModal(titles[which] || which);
-        toolBody.innerHTML = '<p class="modal-note">Geplant — kommt als Nächstes in dieser Reihenfolge: Troubleshooter ✓ · Settings ✓ · Themes ✓ · Feedback. Dieser Eintrag ist noch nicht gebaut.</p>';
+        // Fallback for a menu entry with no handler. The old text listed Troubleshooter, Settings,
+        // Themes and Feedback as "coming next" — all four return above, so it promised things that
+        // already exist. Say the one true thing instead of carrying a roadmap that goes stale.
+        toolBody.innerHTML = '<p class="modal-note">This entry is not built yet.</p>';
       });
 
       // ── Troubleshooter chat ──────────────────────────────────────────────────
@@ -2173,6 +3431,23 @@
         feedbackInp.placeholder = 'https://yourdomain/feedback.php (optional)';
         toolBody.appendChild(makeRow('Feedback endpoint', feedbackInp));
 
+        // ── Unreal render size ─────────────────────────────────────────────
+        // Only the SIZE lives here. Where a brush lands and which vision route is used sit in the
+        // gates panel next to Render vision, because that is where the other "how does the
+        // assistant look at things" switches are (user's call, 2026-07-31). A resolution is a
+        // set-once number, not something you flip between turns — so it belongs in the dialog.
+        const visionResWrap = document.createElement('span');
+        const visionW = document.createElement('input');
+        visionW.type = 'number'; visionW.id = 'set-vision-w'; visionW.min = '256'; visionW.max = '3840';
+        visionW.style.width = '84px';
+        const visionH = document.createElement('input');
+        visionH.type = 'number'; visionH.id = 'set-vision-h'; visionH.min = '144'; visionH.max = '2160';
+        visionH.style.width = '84px'; visionH.style.marginLeft = '6px';
+        visionResWrap.appendChild(visionW);
+        visionResWrap.appendChild(document.createTextNode(' × '));
+        visionResWrap.appendChild(visionH);
+        toolBody.appendChild(makeRow('Unreal render size', visionResWrap));
+
         // Actions row: [Save settings] button + status line
         const actRow = document.createElement('div');
         actRow.className = 'modal-actions';
@@ -2222,6 +3497,11 @@
           comfyOutputInp.value = apps.comfyOutput || '';
           const fb = c.feedback || {};
           feedbackInp.value = fb.endpointUrl || '';
+
+          // The server owns the defaults (GET /config fills them in), so nothing is guessed here.
+          const unr = c.unreal || {};
+          visionW.value = unr.visionWidth  || 1280;
+          visionH.value = unr.visionHeight || 720;
         } catch (_) {}
 
         saveBtn.addEventListener('click', async function () {
@@ -2239,6 +3519,14 @@
             endpoints: { local: localInp.value.trim(), comfyui: comfyInp.value.trim() },
             apps: { blender: blenderInp.value.trim(), comfyOutput: comfyOutputInp.value.trim() },
             feedback: { endpointUrl: feedbackInp.value.trim() },
+            // Only the size — brushTarget/visionMode are owned by the gates panel and would be
+            // clobbered if this dialog also sent them.
+            unreal: {
+              // parseInt, not Number: an empty field must reach the server as NaN and be REJECTED
+              // by its range check, rather than arriving as 0 and being stored as a valid size.
+              visionWidth:  parseInt(visionW.value, 10),
+              visionHeight: parseInt(visionH.value, 10),
+            },
           };
 
           try {
@@ -2570,21 +3858,18 @@
           res = await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
         } catch (err) {
           appendBubble('error', 'Network error: ' + err.message);
-          setActionsEnabled(true);
-          setInputEnabled(true);
+          releaseUi(action);
           return;
         }
         if (res.status === 409) {
           appendBubble('busy-note', 'busy… try again in a moment');
-          setActionsEnabled(true);
-          setInputEnabled(true);
+          releaseUi(action);
           return;
         }
         if (!res.ok) {
           const b = await res.text();
           appendBubble('error', 'Server error ' + res.status + ': ' + b);
-          setActionsEnabled(true);
-          setInputEnabled(true);
+          releaseUi(action);
           return;
         }
         // 202 — reply/error arrives via SSE, which re-enables.
@@ -2631,7 +3916,7 @@
 
         if (obj.kind === 'reply') {
           appendBubble('phoenix', obj.text);
-          releaseUi(obj.action);
+          if (!obj.background) releaseUi(obj.action);   // background notes (hy_motion) never held the lock
           refreshLibrary();
           // Namenskollision beim Brush-Speichern: der Server lehnt ab, statt still zu
           // ueberschreiben. Hier bekommt der Operator die Entscheidung, die der Text
@@ -2775,6 +4060,30 @@
             postAction('use_brush', input);
             return;
           }
+          if (cmd === '/stop') {
+            (async () => {
+              try {
+                const res  = await fetch('/stop', { method: 'POST' });
+                const data = await res.json();
+                if (data.stopped) {
+                  appendBubble('phoenix', 'Stopped the ' + (data.stage || 'running') + ' stage. ComfyUI: ' + data.comfyui + '.');
+                } else if (data.job) {
+                  // A job in the slot with no live stage child: between stages, or parked
+                  // at a gate. Say that, instead of claiming nothing is running.
+                  var secs = Math.round((data.job.runningMs || 0) / 1000);
+                  appendBubble('phoenix',
+                    'Job #' + data.job.id + ' (' + data.job.label + ') is still in the slot after ' + secs +
+                    's, but no compute stage is active right now — it is between stages or waiting at a gate. ' +
+                    'Nothing to interrupt at this moment; try again once a stage is running.');
+                } else {
+                  appendBubble('phoenix', 'Nothing is running — no job, no stage.');
+                }
+              } catch (e) {
+                appendBubble('error', 'Stop failed: ' + e.message);
+              }
+            })();
+            return;
+          }
           if (cmd === '/help') {
             appendBubble('phoenix', [
               'Commands:',
@@ -2784,11 +4093,12 @@
               '/import [raw|cleaned] — import the current mesh (default raw)',
               '/spawn <slug> [x y z] — place a brush from the library',
               '/notool [on|off|<desc>] — Blender-only mode (model with bpy)',
+              '/stop — abort the running stage (also interrupts ComfyUI)',
               '/help — this list',
             ].join('\n'));
             return;
           }
-          appendBubble('phoenix', 'Unknown command. Available: /generate /regenerate /make3d /import /spawn /notool /help');
+          appendBubble('phoenix', 'Unknown command. Available: /generate /regenerate /make3d /import /spawn /notool /stop /help');
           return;
         }
 
@@ -2875,9 +4185,11 @@
         const act = btn.dataset.action;
         if (act === 'import-raw') {
           if (!currentMesh) { appendBubble('error', 'No staged mesh to import yet.'); return; }
+          if (currentMesh.category === 'brush-cache') { appendBubble('phoenix', 'That’s a brush preview, not a staged mesh — place it with the brush tools, not Import.'); return; }
           postAction('import_asset', { name: currentMesh.name, cleanup: false });
         } else if (act === 'import-cleaned') {
           if (!currentMesh) { appendBubble('error', 'No staged mesh to import yet.'); return; }
+          if (currentMesh.category === 'brush-cache') { appendBubble('phoenix', 'That’s a brush preview, not a staged mesh — place it with the brush tools, not Import.'); return; }
           postAction('import_asset', { name: currentMesh.name, cleanup: true });
         } else if (act === 'regen-mesh') {
           if (meshFromLibrary) { appendBubble('phoenix', 'Can’t regenerate a library asset — it has no source image. Generate a new prop, or just import this one as-is.'); return; }
@@ -2894,6 +4206,34 @@
             window.__lastBrushSave = { name: nm.trim(), category: currentMesh.category };
             postAction('save_as_brush', window.__lastBrushSave);
           }
+        }
+      });
+
+      // The way back from Unreal. Its own listener because the row is a separate container —
+      // #mesh-actions' handler does not see it, and putting the field into that row would have
+      // pushed the four existing buttons out of the panel.
+      document.getElementById('mesh-unreal-row').addEventListener('click', function (e) {
+        const btn = e.target.closest('.art-btn');
+        if (!btn || btn.dataset.action !== 'from-unreal') return;
+        const pathEl = document.getElementById('mesh-unreal-path');
+        const asset  = (pathEl.value || '').trim();
+        if (!asset) {
+          appendBubble('error', 'Give the Unreal content path first, e.g. /Game/Props/SM_Crate.');
+          return;
+        }
+        if (!asset.startsWith('/')) {
+          appendBubble('error', 'An Unreal content path starts with a slash — /Game/… , not a file path.');
+          return;
+        }
+        if (document.getElementById('mesh-unreal-target').value === 'brush') {
+          // The asset's own name is the obvious default; asking with it prefilled keeps the
+          // rename possible without making it a chore.
+          const guess = asset.split('/').pop().split('.')[0];
+          const nm = prompt('Brush name (slug):', guess);
+          if (!nm) return;
+          postAction('unreal_to_brush', { asset, name: nm.trim() });
+        } else {
+          postAction('unreal_to_blender', { asset });
         }
       });
 
@@ -2925,7 +4265,7 @@
             const btn = document.createElement('button');
             btn.className = 'lib-act-btn';
             btn.dataset.act = act;
-            btn.textContent = act === 'rename' ? '✎' : '🗑';
+            btn.textContent = act === 'rename' ? '✎' : act === 'move' ? '🗀' : '🗑';
             btn.title = act;
             acts.appendChild(btn);
           });
@@ -2934,37 +4274,229 @@
         return el;
       }
 
+      // ── User folders over the library ──────────────────────────────────────
+      // The folders are a VIEW (see library-folders.js): an item filed into one appears there, an
+      // unfiled one stays under its palette category exactly as before. Nothing moves on disk, so
+      // import_asset and the palette relationship are untouched.
+
+      let LIB_FOLDERS = { folders: [], assignments: {}, collapsed: [] };
+
+      async function fetchLibFolders() {
+        try {
+          const r = await fetch('/library-folders');
+          if (r.ok) LIB_FOLDERS = await r.json();
+        } catch (_) {}
+      }
+
+      // Every mutation goes through the server and adopts the state it returns, rather than
+      // patching the local copy and hoping. A rejected move (e.g. a folder into its own subtree)
+      // must not leave the rail showing something the file does not contain.
+      async function libFolderOp(op) {
+        try {
+          const r = await fetch('/library-folders', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(op),
+          });
+          const d = await r.json();
+          if (!r.ok) { appendBubble('sys', 'Library folders: ' + (d.error || 'failed')); return false; }
+          LIB_FOLDERS = d;
+          return true;
+        } catch (e) { appendBubble('sys', 'Library folders: ' + e.message); return false; }
+      }
+
+      const libChildren = id => LIB_FOLDERS.folders.filter(f => (f.parent || null) === (id || null));
+      const libIsCollapsed = id => (LIB_FOLDERS.collapsed || []).includes(id);
+
+      // Flat, indented list of every folder — used by the picker so a deep tree stays choosable.
+      function libFolderOptions() {
+        const out = [];
+        (function walk(parent, depth) {
+          for (const f of libChildren(parent)) {
+            out.push({ id: f.id, label: ' '.repeat(depth * 2) + f.name, depth });
+            walk(f.id, depth + 1);
+          }
+        })(null, 0);
+        return out;
+      }
+
+      function openFolderPicker(itemKey, currentFolder) {
+        const back = document.createElement('div');
+        back.className = 'lib-pick-backdrop';
+        const box = document.createElement('div');
+        box.className = 'lib-pick';
+        const title = document.createElement('div');
+        title.className = 'lib-pick-title';
+        title.textContent = 'Move to folder';
+        box.appendChild(title);
+
+        const close = () => { back.remove(); box.remove(); };
+        const rows = [{ id: null, label: '— no folder (back to its category) —' }, ...libFolderOptions()];
+        for (const r of rows) {
+          const row = document.createElement('div');
+          row.className = 'lib-pick-row';
+          row.textContent = (r.id === (currentFolder || null) ? '• ' : '  ') + r.label;
+          row.addEventListener('click', async () => {
+            close();
+            if (await libFolderOp({ action: 'assign', key: itemKey, folder: r.id })) refreshLibraryTabs();
+          });
+          box.appendChild(row);
+        }
+        const mk = document.createElement('div');
+        mk.className = 'lib-pick-row';
+        mk.style.borderTop = '1px solid rgba(128,128,128,0.2)';
+        mk.style.marginTop = '4px';
+        mk.textContent = '+ new folder…';
+        mk.addEventListener('click', async () => {
+          const n = prompt('New folder name:');
+          close();
+          if (!n) return;
+          if (await libFolderOp({ action: 'create', name: n })) {
+            const created = LIB_FOLDERS.folders[LIB_FOLDERS.folders.length - 1];
+            if (created && await libFolderOp({ action: 'assign', key: itemKey, folder: created.id })) refreshLibraryTabs();
+          }
+        });
+        box.appendChild(mk);
+
+        back.addEventListener('click', close);
+        document.body.appendChild(back);
+        document.body.appendChild(box);
+      }
+
+      /**
+       * Render one library tab as folders + leftovers.
+       * items: [{ key, label, kind, dataset }] — `key` is the namespaced folder key.
+       * groupOf/groupOrder describe the fallback grouping for unfiled items.
+       */
+      function renderLibTree(container, items, groupOf, groupOrder, emptyText) {
+        container.innerHTML = '';
+        // Empty message ONLY when there is genuinely nothing — with folders present the tree still
+        // renders, otherwise an empty library would hide the folders the user built and offer no
+        // way to make new ones.
+        if (!items.length && !LIB_FOLDERS.folders.length) {
+          const empty = document.createElement('div');
+          empty.className = 'lib-empty';
+          empty.textContent = emptyText;
+          container.appendChild(empty);
+          const add0 = document.createElement('div');
+          add0.className = 'lib-newfolder';
+          add0.dataset.act = 'fcreate-root';
+          add0.textContent = '+ new folder';
+          container.appendChild(add0);
+          return;
+        }
+
+        const byFolder = new Map();
+        const loose = [];
+        for (const it of items) {
+          const fid = LIB_FOLDERS.assignments[it.key];
+          // An assignment pointing at a folder that no longer exists must not swallow the item.
+          if (fid && LIB_FOLDERS.folders.some(f => f.id === fid)) {
+            if (!byFolder.has(fid)) byFolder.set(fid, []);
+            byFolder.get(fid).push(it);
+          } else {
+            loose.push(it);
+          }
+        }
+
+        const mkItem = (it, depth) => {
+          const el = makeLibItem({ kind: it.kind, label: it.label, dataset: it.dataset, actions: ['move', 'rename', 'delete'] });
+          el.dataset.folderKey = it.key;
+          if (depth !== null) { el.classList.add('in-folder'); el.style.setProperty('--depth', depth); }
+          return el;
+        };
+
+        // Count everything below a folder, subfolders included — a collapsed folder showing "0"
+        // when it holds twenty items nested one level down would read as empty.
+        const deepCount = id => {
+          let n = (byFolder.get(id) || []).length;
+          for (const c of libChildren(id)) n += deepCount(c.id);
+          return n;
+        };
+
+        (function walk(parent, depth) {
+          for (const f of libChildren(parent)) {
+            const row = document.createElement('div');
+            row.className = 'lib-folder' + (libIsCollapsed(f.id) ? ' collapsed' : '');
+            row.style.setProperty('--depth', depth);
+            row.dataset.folderId = f.id;
+
+            const tri = document.createElement('span');
+            tri.className = 'lib-tri';
+            tri.textContent = '▾';
+            row.appendChild(tri);
+
+            const nm = document.createElement('span');
+            nm.className = 'lib-folder-name';
+            nm.textContent = f.name;
+            row.appendChild(nm);
+
+            const cnt = document.createElement('span');
+            cnt.className = 'lib-count';
+            cnt.textContent = deepCount(f.id) || '';
+            row.appendChild(cnt);
+
+            const acts = document.createElement('span');
+            acts.className = 'lib-actions';
+            for (const [act, glyph, tip] of [['fnew', '＋', 'new subfolder'], ['frename', '✎', 'rename'], ['fdelete', '🗑', 'delete folder']]) {
+              const b = document.createElement('button');
+              b.className = 'lib-act-btn'; b.dataset.act = act; b.textContent = glyph; b.title = tip;
+              acts.appendChild(b);
+            }
+            row.appendChild(acts);
+            container.appendChild(row);
+
+            if (!libIsCollapsed(f.id)) {
+              for (const it of (byFolder.get(f.id) || [])) container.appendChild(mkItem(it, depth));
+              walk(f.id, depth + 1);
+            }
+          }
+        })(null, 0);
+
+        // Unfiled items keep the original category grouping — that is what makes filing optional
+        // instead of a migration everything has to go through.
+        const grouped = {};
+        for (const it of loose) {
+          const g = groupOf(it);
+          (grouped[g] = grouped[g] || []).push(it);
+        }
+        const cats = [
+          ...groupOrder.filter(c => grouped[c] && grouped[c].length),
+          ...Object.keys(grouped).filter(c => !groupOrder.includes(c)),
+        ];
+        for (const cat of cats) {
+          const hdr = document.createElement('div');
+          hdr.className = 'lib-cat';
+          hdr.textContent = cat;
+          container.appendChild(hdr);
+          for (const it of grouped[cat]) container.appendChild(mkItem(it, null));
+        }
+
+        const add = document.createElement('div');
+        add.className = 'lib-newfolder';
+        add.dataset.act = 'fcreate-root';
+        add.textContent = '+ new folder';
+        container.appendChild(add);
+      }
+
+      function refreshLibraryTabs() { loadAssets(); loadBrushes(); }
+
       async function loadAssets() {
         try {
           const res = await fetch('/assets');
           const data = await res.json();
           const assets = data.assets || [];
-          libAssetsBody.innerHTML = '';
-          if (assets.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'lib-empty';
-            empty.textContent = 'no staged assets yet';
-            libAssetsBody.appendChild(empty);
-            return;
-          }
-          const grouped = {};
-          for (const asset of assets) {
-            if (!grouped[asset.category]) grouped[asset.category] = [];
-            grouped[asset.category].push(asset);
-          }
-          const cats = [
-            ...LIB_CAT_ORDER.filter(c => grouped[c] && grouped[c].length),
-            ...Object.keys(grouped).filter(c => !LIB_CAT_ORDER.includes(c)),
-          ];
-          for (const cat of cats) {
-            const hdr = document.createElement('div');
-            hdr.className = 'lib-cat';
-            hdr.textContent = cat;
-            libAssetsBody.appendChild(hdr);
-            for (const a of grouped[cat]) {
-              libAssetsBody.appendChild(makeLibItem({ kind: 'asset', label: a.label || a.name, dataset: { name: a.name, category: a.category }, actions: ['rename', 'delete'] }));
-            }
-          }
+          await fetchLibFolders();
+          renderLibTree(
+            libAssetsBody,
+            assets.map(a => ({
+              key: 'asset:' + a.category + '/' + a.name,
+              kind: 'asset',
+              label: a.label || a.name,
+              dataset: { name: a.name, category: a.category },
+            })),
+            it => it.dataset.category,
+            LIB_CAT_ORDER,
+            'no staged assets yet'
+          );
         } catch (_) {}
       }
 
@@ -2973,31 +4505,19 @@
           const res = await fetch('/brushes');
           const data = await res.json();
           const brushes = data.brushes || [];
-          libBrushesBody.innerHTML = '';
-          if (brushes.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'lib-empty';
-            empty.textContent = 'no brushes yet';
-            libBrushesBody.appendChild(empty);
-            return;
-          }
-          const grouped = { sci_fi: [], phoenix: [] };
-          for (const b of brushes) {
-            const key = b.type === 'sci_fi' ? 'sci_fi' : 'phoenix';
-            if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(b);
-          }
-          const order = [['sci_fi', 'Sci-Fi'], ['phoenix', 'Phoenix']];
-          for (const [key, label] of order) {
-            if (!grouped[key] || !grouped[key].length) continue;
-            const hdr = document.createElement('div');
-            hdr.className = 'lib-cat';
-            hdr.textContent = label;
-            libBrushesBody.appendChild(hdr);
-            for (const b of grouped[key]) {
-              libBrushesBody.appendChild(makeLibItem({ kind: 'brush', label: b.display, dataset: { slug: b.slug, display: b.display }, actions: ['rename', 'delete'] }));
-            }
-          }
+          await fetchLibFolders();
+          renderLibTree(
+            libBrushesBody,
+            brushes.map(b => ({
+              key: 'brush:' + b.slug,
+              kind: 'brush',
+              label: b.display,
+              dataset: { slug: b.slug, display: b.display, btype: b.type === 'sci_fi' ? 'Sci-Fi' : 'Phoenix' },
+            })),
+            it => it.dataset.btype,
+            ['Sci-Fi', 'Phoenix'],
+            'no brushes yet'
+          );
         } catch (_) {}
       }
 
@@ -3025,14 +4545,52 @@
       const libRoot = document.getElementById('library-list');
       let _libClickTimer = null;
 
-      libRoot.addEventListener('click', function (e) {
+      libRoot.addEventListener('click', async function (e) {
         const actBtn = e.target.closest('.lib-act-btn');
+
+        // ── Folder rows and the "+ new folder" control ────────────────────────
+        // Handled BEFORE the item branch: a folder row is not a .lib-item, so the early return
+        // below would otherwise swallow every click on it.
+        const newRoot = e.target.closest('.lib-newfolder');
+        if (newRoot) {
+          const n = prompt('New folder name:');
+          if (n && n.trim() && await libFolderOp({ action: 'create', name: n.trim() })) refreshLibraryTabs();
+          return;
+        }
+        const folderRow = e.target.closest('.lib-folder');
+        if (folderRow) {
+          const fid = folderRow.dataset.folderId;
+          const fname = folderRow.querySelector('.lib-folder-name').textContent;
+          if (actBtn) {
+            const act = actBtn.dataset.act;
+            if (act === 'fnew') {
+              const n = prompt('New subfolder inside "' + fname + '":');
+              if (n && n.trim() && await libFolderOp({ action: 'create', name: n.trim(), parent: fid })) refreshLibraryTabs();
+            } else if (act === 'frename') {
+              const n = prompt('Rename folder:', fname);
+              if (n && n.trim() && await libFolderOp({ action: 'rename', id: fid, name: n.trim() })) refreshLibraryTabs();
+            } else if (act === 'fdelete') {
+              // Say what deleting does NOT do. "Delete folder" next to a list of assets reads like
+              // it takes the assets with it, and it does not — nothing on disk is touched.
+              if (confirm('Delete folder "' + fname + '"?\n\nNo files are deleted. Its items go back to their categories and any subfolders move up one level.')
+                  && await libFolderOp({ action: 'delete', id: fid })) refreshLibraryTabs();
+            }
+            return;
+          }
+          if (await libFolderOp({ action: 'collapse', id: fid })) refreshLibraryTabs();
+          return;
+        }
+
         const item = e.target.closest('.lib-item');
         if (!item) return;
         if (actBtn) {
           clearTimeout(_libClickTimer);
           const act = actBtn.dataset.act;
           const kind = item.dataset.kind;
+          if (act === 'move') {
+            openFolderPicker(item.dataset.folderKey, LIB_FOLDERS.assignments[item.dataset.folderKey] || null);
+            return;
+          }
           if (act === 'rename') {
             if (kind === 'asset') {
               const nl = prompt('Label for ' + item.dataset.name + ':', item.querySelector('.lib-item-name').textContent);
@@ -3059,13 +4617,18 @@
             currentMesh = { name: item.dataset.name, category: item.dataset.category };
             const p = 'staging/' + item.dataset.category + '/' + item.dataset.name;
             fetch('/show', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot: 'mesh', p, source: 'library' }) }).catch(function () {});
+          } else if (kind === 'brush') {
+            // A brush has no preview of its own (Python + .blend), so this builds/reuses its
+            // cached GLB and the server pushes it into the mesh viewer. First click on a brush
+            // costs one Blender export; every one after that is instant.
+            postAction('brush_preview', { name: item.dataset.slug });
           } else if (kind === 'material') {
             postAction('apply_material', { name: item.dataset.name });
           }
         }, 250);
       });
 
-      libRoot.addEventListener('dblclick', function (e) {
+      libRoot.addEventListener('dblclick', async function (e) {
         if (e.target.closest('.lib-act-btn')) return;
         const item = e.target.closest('.lib-item');
         if (!item) return;
@@ -3077,7 +4640,25 @@
           currentMesh = { name: item.dataset.name, category: item.dataset.category };
           postAction('import_asset', { name: item.dataset.name, cleanup: false });
         } else if (kind === 'brush') {
-          postAction('use_brush', { name: item.dataset.slug });
+          // Where a double-clicked brush lands is a SETTING (Settings → Unreal). Read it fresh on
+          // every click instead of caching it: a cached copy that disagrees with what was saved is
+          // the kind of bug that gets debugged in the wrong file. One tiny GET per double-click.
+          let target = 'blender';
+          try {
+            const r = await fetch('/config');
+            const c = await r.json();
+            target = (c.unreal && c.unreal.brushTarget) || 'blender';
+          } catch (_) { /* server unreachable → the historical behaviour, not a silent no-op */ }
+
+          if (target === 'unreal') {
+            postAction('brush_to_unreal', { name: item.dataset.slug });
+          } else if (target === 'both') {
+            // "both" means it stays in Blender AND lands in Unreal — so the Blender copy must be
+            // kept explicitly; brush_to_unreal removes it by default.
+            postAction('brush_to_unreal', { name: item.dataset.slug, keep_in_blender: true });
+          } else {
+            postAction('use_brush', { name: item.dataset.slug });
+          }
         }
       });
 

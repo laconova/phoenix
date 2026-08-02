@@ -631,12 +631,17 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                fc.update()',
     '    _append = APPEND and bool(dst.animation_data and len(dst.animation_data.nla_tracks) > 0)',
     '    _root_action = None',
+    '    _root_fake = False',
     // DO NOT destroy the existing animation up front. This used to call animation_data_clear()
     // before a single clip had been imported, so a run where every clip failed to import or bake
     // left the character with NOTHING — the previous sequence and any hand-keyed action gone, in
     // exchange for an error message. The old action is stashed and put back if nothing bakes; the
     // existing NLA tracks are only removed once there is something to replace them with (below).
     '    _old_action = dst.animation_data.action if dst.animation_data else None',
+    // The fake user is a LOAN for the duration of the run, so remember what it was. Restoring it
+    // blindly to False at the end would be a new data-loss bug of its own: an action the user had
+    // deliberately marked would then be collected on the next reload. Put back is at the very end.
+    '    _old_fake = _old_action.use_fake_user if _old_action is not None else False',
     '    if _old_action is not None:',
     '        _old_action.use_fake_user = True   # survive losing the slot even if Blender reloads',
     '    if not _append:',
@@ -650,6 +655,7 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                _existing_end = max(_existing_end, int(_st.frame_end))',
     '        _track_off = len(dst.animation_data.nla_tracks)',
     '        _root_action = dst.animation_data.action        # existing root/location action',
+    '        _root_fake = _root_action.use_fake_user if _root_action is not None else False',
     '        if _root_action is not None:',
     '            _root_action.use_fake_user = True',
     '        bpy.context.scene.frame_set(_existing_end)',
@@ -874,6 +880,18 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '        bpy.context.scene.frame_start = 1; bpy.context.scene.frame_end = _total_end',
     '        bpy.context.scene.frame_set(1)',
     '        print("SEQ_DONE:" + dst.name + ":clips=" + str(len(baked)) + ":frames=1-" + str(_total_end) + ":blend=" + str(BLEND) + ":append=" + str(_append) + ":travel=" + ("%.3f" % _travel))',
+    // Give the borrowed fake user back exactly as it was found (see the note at the capture).
+    // Deliberately OUTSIDE both branches: the flag was set before we knew whether anything would
+    // bake, so it has to come off on the failure exit too — that path promises to hand the
+    // character back "exactly as it was", and a changed flag breaks that promise.
+    '    _restored = 0',
+    '    for _sa, _sfake in ((_old_action, _old_fake), (_root_action, _root_fake)):',
+    '        if _sa is not None:',
+    '            try:',
+    '                _sa.use_fake_user = _sfake; _restored += 1',
+    '            except Exception:',
+    '                pass',
+    '    print("SEQ_STASH:restored=" + str(_restored))',
   ].join('\n');
 }
 

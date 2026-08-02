@@ -255,27 +255,35 @@ async function saveCharacter(input = {}, cfg) {
   if (fs.existsSync(outAbs) && !input.overwrite) {
     return `ERROR: a character named "${safe}" already exists — pick another name (or delete it first).`;
   }
+  // Write to a temp .blend and only rename over the real character once the save is verified good.
+  // overwrite:true used to write straight onto outAbs, so a crash mid-write (disk full, Blender
+  // dying) destroyed the existing character; the temp keeps the old file intact until the last step.
+  const tmpAbs = outAbs + '.tmp-' + process.pid;
+  const _cleanTmp = () => { try { fs.unlinkSync(tmpAbs); } catch (_) { /* ignore */ } };
   let r;
   try {
     // A full MPFB human with clothes/hair is heavy to pack + write; give it the same headroom
     // as the custom-rig mesh save (a 70-bone creature took ~2 min on a busy scene).
-    r = await callBlender(buildSaveCharacterCode(outAbs), { cfg, timeoutMs: 180000 });
-  } catch (e) { return 'ERROR: ' + e.message; }
+    r = await callBlender(buildSaveCharacterCode(tmpAbs), { cfg, timeoutMs: 180000 });
+  } catch (e) { _cleanTmp(); return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
-  if (r.status === 'error') return 'ERROR: ' + (r.message || out);
+  if (r.status === 'error') { _cleanTmp(); return 'ERROR: ' + (r.message || out); }
   const err = out.split('\n').find(l => l.startsWith('CHAR_ERR:'));
-  if (err) return 'ERROR: ' + err.slice('CHAR_ERR:'.length);
+  if (err) { _cleanTmp(); return 'ERROR: ' + err.slice('CHAR_ERR:'.length); }
   const m = out.match(/CHAR_DONE:meshes=(\d+):arm=(.+?):bones=(\d+):bytes=(-?\d+)/);
-  if (!m) return out || 'Save character failed.';
+  if (!m) { _cleanTmp(); return out || 'Save character failed.'; }
   const sigLine = out.split('\n').find(l => l.startsWith('CHAR_SIG:'));
   const bones = sigLine ? sigLine.slice('CHAR_SIG:'.length).split(',').filter(Boolean) : [];
   // Belt and braces: Python already refused a non-Mixamo rig, so this only fires if the marker
   // parsing ever drifts. Cheap, and it keeps a broken character out of the library.
   if (!bones.includes(MIXAMO_ROOT)) {
-    try { fs.unlinkSync(outAbs); } catch (_) { /* ignore */ }
+    _cleanTmp();
     return `ERROR: that skeleton has no ${MIXAMO_ROOT} bone — it can't be animated in the Human tab. ` +
            'Use the Custom-Rig tab for non-Mixamo rigs.';
   }
+  // Commit: atomically replace the (possibly existing) character only now that it is verified good.
+  try { fs.renameSync(tmpAbs, outAbs); }
+  catch (e) { _cleanTmp(); return 'ERROR: character built but could not be finalized — ' + e.message; }
   try {
     fs.writeFileSync(sidecarPath(outAbs), JSON.stringify({
       bones, boneCount: bones.length, meshCount: Number(m[1]), rigObject: m[2],

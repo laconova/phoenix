@@ -63,8 +63,28 @@ def _run(code):
         with redirect_stdout(buf):
             exec(code, _ns)
         return {"status": "ok", "stdout": buf.getvalue(), "result": {}}
+    # 🔴 BaseException, NOT Exception — this catch is what stops a sent script from KILLING
+    # BLENDER. `raise SystemExit` (and a bare `exit()`/`quit()`, which raise it too) derives
+    # from BaseException, so an `except Exception` handler does not see it: it sails out of
+    # here, out of the bpy.app.timers callback, into the embedded interpreter, and the process
+    # goes down. No traceback, no .crash.txt — afterwards it does not even look like a script
+    # error. Measured the hard way on 2026-07-31: two crashes of a live session, both from a
+    # `raise SystemExit` used as an early exit in generated bridge code.
+    #
+    # KeyboardInterrupt is in the same family and equally not ours to let through.
+    # The gate belongs HERE rather than in a note asking callers to be careful, because a
+    # caller who forgets costs the operator his whole scene — a protection has to be code
+    # that refuses, not a document that requests.
     except Exception:
         return {"status": "error", "stdout": buf.getvalue(), "message": traceback.format_exc()}
+    except BaseException as exc:
+        return {
+            "status": "error",
+            "stdout": buf.getvalue(),
+            "message": "script raised %s — caught so it cannot terminate Blender. "
+                       "Use `return` from a function for early exits, never SystemExit/exit()/quit().\n%s"
+                       % (type(exc).__name__, traceback.format_exc()),
+        }
 
 
 def _tick():

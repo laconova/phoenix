@@ -32,6 +32,7 @@ Each stage has an optional **gate** (pause for your approval). The generation en
 - **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** running locally, with the models for the workflow you want to use (e.g. Flux, SD 1.5, Trellis).
 - **[Claude CLI](https://docs.claude.com/en/docs/claude-code)** (`claude`) — the assistant/orchestrator seats call it; sign in with your Anthropic account.
 - *Optional:* **[LM Studio](https://lmstudio.ai/)** (local model for the metaprompter), **Blender** (import / scene sync).
+- *Optional (for the 1.7.0 tabs):* **Unreal Engine 5.8+** with the Python plugin and a real `python` on your PATH (Unreal bridge — see **Connect Unreal**); a **CrispASR** speech server plus `.gguf` voice packs (Voice / SFX tabs); an **ffmpeg** binary for voice/SFX effects (auto‑detected from `imageio‑ffmpeg` if present, otherwise set `voice.ffmpeg`).
 
 ## Quickstart
 
@@ -67,6 +68,18 @@ With Blender open and the addon enabled, the import stage drops generated props 
 
 *Optional:* set `apps.blender` in `phoenix-config.json` to your Blender executable so Phoenix can launch it for you. Requires Blender 3.0+ (tested on 5.1).
 
+## Connect Unreal
+
+*(Optional — for the 1.7.0 Unreal bridge.)* Phoenix can drive an **already‑running** Unreal Engine editor: place brushes and spawn saved characters into the open level, pull assets back into Blender, and screenshot the viewport so the assistant can check its own work. **Phoenix never launches Unreal** — you keep the editor open and it connects over Unreal's Python remote execution.
+
+**One‑time setup, in Unreal:**
+
+1. **Enable the Python plugin:** *Edit ▸ Plugins ▸* search **"Python Editor Script Plugin"** ▸ enable ▸ restart the editor.
+2. **Enable remote execution:** *Edit ▸ Project Settings ▸ Plugins ▸ Python ▸* tick **"Enable Remote Execution"**.
+3. **A real `python` on your PATH.** The bridge shells out to a short Python helper that speaks Unreal's remote‑execution protocol — any Python 3 works. On Windows, make sure it is a *real* Python and not the Microsoft‑Store `python` app‑execution stub, which exits instantly. If `python` isn't on PATH, point Phoenix at one with `apps.python` in the config.
+
+With the editor open and a project loaded, the Unreal actions light up (a red/absent indicator means one of the three above is missing — the bridge's error message names which). Tested on **UE 5.8**. *Optional:* set `apps.unrealEngine` to your install folder (e.g. `C:\Program Files\Epic Games\UE_5.8`); left empty, Phoenix uses the newest `UE_*` it finds.
+
 ## Features
 
 - **Chat‑driven generation** with per‑stage gates (prompt / image / mesh).
@@ -75,6 +88,9 @@ With Blender open and the addon enabled, the import stage drops generated props 
 - **Asset library** — staged assets, brushes, materials.
 - **Troubleshooter** — an LLM assistant that checks your local stack (ComfyUI · models · Blender) and helps get missing dependencies running.
 - **Characters & animation** *(new in 1.6.0)* — build parametric people into your Blender scene, save them as reusable characters, and animate them from Mixamo clips or plain text. Creatures and machines get their own skeleton-bound workflow. Full guide: **[human-tab-guide.md](human-tab-guide.md)**.
+- **Voice & sound** *(new in 1.7.0)* — a baked voice pack speaks a line, plus a sound‑effects tab to generate, audition and edit SFX takes and bake them onto a character. Runs against a **CrispASR** speech server (local or on your GPU box).
+- **Unreal Engine bridge** *(new in 1.7.0)* — place brushes and spawn saved characters into an already‑running Unreal editor, pull Unreal assets back into Blender as glTF, and let the assistant screenshot the viewport to check its own work. See **Connect Unreal** below.
+- **Mesh preview** *(new in 1.7.0)* — inspect a brush's geometry right in the browser (a vendored model‑viewer, no CDN) before it goes anywhere.
 
 ### Characters and animation
 
@@ -127,6 +143,13 @@ when you need them:
 - **`contact_sheet.py`** — build a contact sheet from a batch of generated images.
 - **`check-refs.js`** — release gate: `node scripts/check-refs.js` verifies that every file the code
   reaches for actually exists in the tree. Useful before packaging, useless afterwards.
+- **`check-scaffold-parity.js`** — release gate: `node scripts/check-scaffold-parity.js` answers one
+  question — *is the brush runtime a fresh install gets the same one this machine runs?* There are two
+  copies of it: `brushes/phoenix_brushes.py` (gitignored user data) and the template inside
+  `brush-scaffold.js`. A fix to the live file does not reach the template on its own, and once that
+  drifted the fresh-install copy silently shipped bugs that had already been fixed. Exits 1 on drift
+  and prints the differing lines. **Run it where the brush system is actually used** — on a tree
+  without `brushes/` it has nothing to compare and says so.
 - **`hy-motion/`** — helpers for text→motion, including `make_tpose_char.py` (see above).
 
 One more lives in the repo root: **`node scene-sync.js`** polls your open Blender scene and keeps the
@@ -139,15 +162,25 @@ fresh as the last import or explicit refresh.
 
 Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on first run (or copy it yourself — `copy` on Windows, `cp` on macOS/Linux). Key fields:
 
-- **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`).
+- **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`, `vision`).
 - **`endpoints`** — ComfyUI + local‑model URLs.
 - **`hyMotion`** — text→motion: `api` (a ComfyUI with the HY‑Motion nodes installed — the same one as
   `endpoints.comfyui` is fine) and `template` (the T‑pose FBX it retargets against). See *Text → motion* above.
+- **`voice`** — the Voice/SFX tabs: `api` (a CrispASR speech server — local or on your GPU box, e.g.
+  `http://gpu-box.local:8090`; leave empty to hide the functions) and `ffmpeg` (path to an ffmpeg binary
+  for the effects; leave empty to auto‑detect the one bundled with `imageio‑ffmpeg`).
 - **`feedback.endpointUrl`** — optional. Set it to a URL that accepts a JSON `POST` and the in‑app
   Feedback form sends there; leave it empty and the form stays hidden.
-- **`gates`** — which stages pause for approval (`prompt` / `image` / `mesh`).
-- **`apps`** — local paths: `blender` (the Blender executable) and `comfyOutput` (the folder Phoenix
-  reads ComfyUI's generated files from; leave empty to use the default `~/Documents/ComfyUI/output`).
+- **`gates`** — which stages pause for approval (`prompt` / `image` / `mesh`), plus **`gates.vision`**
+  (`off` / `focused` / `full`) — after a scene‑changing action Phoenix renders the viewport and has a
+  model *look at it*, instead of reporting "fixed ✓" from text alone. `focused` is the default and
+  covers the animation/mesh/brush tools; `full` adds asset placement and `blender_run`. The seat that
+  does the looking is **`seats.vision`**.
+- **`apps`** — local paths: `blender` (the Blender executable), `comfyOutput` (the folder Phoenix
+  reads ComfyUI's generated files from; leave empty to use the default `~/Documents/ComfyUI/output`),
+  `unrealEngine` (your UE install folder — optional, Phoenix otherwise takes the newest `UE_*` it finds),
+  and `python` (a real Python 3 for the Unreal bridge if `python` isn't already on your PATH — see
+  **Connect Unreal**).
 
 Runtime/user files (`phoenix-config.json`, `workflows.json`, `palette.json`, `output/`, …) are git‑ignored — Phoenix recreates them on first run.
 

@@ -74,7 +74,11 @@ async function main() {
   // path.resolve keeps absolute entries as they are and anchors relative ones to Phoenix.
   const srcRaw = brush.type === 'phoenix'
     ? (registry.phoenix_source || path.join(BRUSHES_DIR, 'phoenix_brushes.py'))
-    : (registry.sci_fi_source  || path.join(path.dirname(BRUSHES_DIR), 'blender-brushes', 'sci_fi_v1.py'));
+    : registry.sci_fi_source;
+  if (!srcRaw) {
+    console.error(`ERROR: brush '${slug}' has type '${brush.type}' but the registry lists no source for it.`);
+    process.exit(1);
+  }
   const srcPath = path.resolve(__dirname, srcRaw);
 
   const srcFwd  = srcPath.replace(/\\/g, '/');

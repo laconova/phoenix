@@ -54,19 +54,34 @@ const DEFAULT_WORKFLOWS = {
  * returns a deep copy of DEFAULT_WORKFLOWS.
  */
 function loadRegistry() {
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(WORKFLOWS_FILE, 'utf8'));
+    raw = fs.readFileSync(WORKFLOWS_FILE, 'utf8');
+  } catch (e) {
+    // File genuinely absent → seed it (first run). Any OTHER read error (EBUSY/EPERM from AV or a
+    // concurrent writer on Windows) is TRANSIENT — return defaults WITHOUT touching the file, so a
+    // momentary read failure can never destroy the user's authored workflows. (Same rule as palette.js.)
+    if (e && e.code === 'ENOENT') {
+      try { fs.writeFileSync(WORKFLOWS_FILE, JSON.stringify(DEFAULT_WORKFLOWS, null, 2), 'utf8'); } catch { /* read-only FS */ }
+    }
+    return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
+  }
+  try {
+    return JSON.parse(raw);
   } catch {
-    try { fs.writeFileSync(WORKFLOWS_FILE, JSON.stringify(DEFAULT_WORKFLOWS, null, 2), 'utf8'); } catch { /* read-only FS */ }
+    // Parse failure (corruption / partial write) — do NOT overwrite; return defaults.
     return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
   }
 }
 
 /**
- * saveRegistry(reg) — writes registry object to workflows.json.
+ * saveRegistry(reg) — writes registry object to workflows.json atomically (tmp + rename), so a crash
+ * mid-write can never leave a truncated file that the next loadRegistry would treat as corrupt.
  */
 function saveRegistry(reg) {
-  fs.writeFileSync(WORKFLOWS_FILE, JSON.stringify(reg, null, 2));
+  const tmp = WORKFLOWS_FILE + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(reg, null, 2));
+  fs.renameSync(tmp, WORKFLOWS_FILE);
 }
 
 const DEFAULT_ACTIVE = { image: 'flux_klein', mesh: 'trellis2' };

@@ -26,20 +26,106 @@ const SCENE_FILE   = path.join(__dirname, 'session', 'scene.json');
 // ─── Phoenix stage spawn helper ───────────────────────────────────────────────
 // Mirrors the spawn/parse pattern in assistant.js toolGenerateImage / toolImageTo3d.
 
+// ─── Cancellation ─────────────────────────────────────────────────────────────
+// The running stage child is held here so /stop can reach it. Without this the
+// handle only ever lived inside the promise closure, so a run that had clearly
+// gone wrong could not be stopped from the UI — you could only wait out the
+// 11-minute mesh timeout (found 2026-08-01, an OOM'd Trellis run burned 7.5 min
+// with no way to abort).
+let _currentChild = null;
+let _currentStage = null;
+let _cancelled    = false;
+// The ComfyUI prompt_id the running stage queued (announced by phoenix.js on stdout). Null for
+// stages that never touch ComfyUI (prompt/import) — which is exactly why the cancel below is safe.
+let _currentPromptId = null;
+
+// Where ComfyUI lives. Read fresh (not cached at require time) so a config edit
+// does not need a restart to take effect here.
+function comfyBase() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'phoenix-config.json'), 'utf8'));
+    return ((cfg.endpoints || {}).comfyui || 'http://localhost:8188').replace(/\/$/, '');
+  } catch { return 'http://localhost:8188'; }
+}
+
+// Killing the local child does NOT stop the rig. phoenix.js has its own cancel, but it
+// never runs when WE kill the process — so the cancel has to happen here too.
+// This is the leak the user hit on 2026-08-01: the outer 11-min timeout killed the child
+// while ComfyUI kept sampling for minutes, holding the whole card for a dead job.
+//
+// ⚠️ /interrupt is GLOBAL — no prompt_id, it stops whatever the instance runs *right now*. The
+// laptop, the rig and the user's manual Trellis runs all share one ComfyUI, so firing it blind
+// aborts a foreign job (measured 2026-08-01). So this is TARGETED by the prompt_id phoenix.js
+// announced: dequeue ours if it is only pending, and interrupt ONLY when ours is the one running.
+// A stage that queued nothing (prompt/import) passes promptId=null and this never touches ComfyUI.
+async function cancelComfy(promptId, why) {
+  if (!promptId) return 'no ComfyUI prompt from this stage — left untouched';
+  const base = comfyBase();
+  // Remove it if still pending — targeted by id, cannot affect a foreign job.
+  try {
+    await fetch(base + '/queue', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete: [promptId] }), signal: AbortSignal.timeout(5000),
+    });
+  } catch (_) { /* best effort */ }
+  // Interrupt ONLY if OUR prompt is the one executing. queue_running items are
+  // [number, prompt_id, prompt, extra, outputs], so the id is a member of the tuple.
+  try {
+    const q = await (await fetch(base + '/queue', { signal: AbortSignal.timeout(5000) })).json();
+    const oursRunning = (q.queue_running || []).some(it => Array.isArray(it) && it.includes(promptId));
+    if (oursRunning) {
+      const r = await fetch(base + '/interrupt', { method: 'POST', signal: AbortSignal.timeout(5000) });
+      try { dbg.event('comfy', { phase: 'interrupted', why, promptId, ok: r.ok }); } catch {}
+      return r.ok ? 'interrupted (ours was running)' : 'interrupt HTTP ' + r.status;
+    }
+    try { dbg.event('comfy', { phase: 'dequeued', why, promptId }); } catch {}
+    return 'dequeued (ours was pending, not running) — foreign job left alone';
+  } catch (e) {
+    return 'queue-check unreachable: ' + String((e && e.message) || e);
+  }
+}
+
+// Kill the running stage child, if any, AND stop the rig-side job it was waiting on.
+// Returns what was actually stopped. Async: the caller wants to report the remote result.
+async function killCurrent(why = 'user stop') {
+  if (!_currentChild) return { stopped: false, stage: null, comfyui: 'not attempted' };
+  const stage = _currentStage;
+  const promptId = _currentPromptId;
+  _cancelled = true;
+  try { _currentChild.kill(); } catch (_) { /* already gone */ }
+  const comfyui = await cancelComfy(promptId, why);
+  return { stopped: true, stage, comfyui };
+}
+
+function currentStage() {
+  return _currentChild ? _currentStage : null;
+}
+
 function spawnPhoenixStage(args, timeoutMs) {
   return new Promise((resolve) => {
     const stdoutChunks = [];
     const stderrChunks = [];
     let partialLine = '';
+    let timedOut = false;      // set by the stage timeout; the close handler owns the single resolve
+    let cancelResult = null;   // the in-flight rig cancel, awaited in the close handler for its message
 
     const child = spawn('node', [PHOENIX_PATH, ...args], { encoding: 'utf8' });
+    // args is ['--stage', '<name>', ...] — index 1 is the stage being run.
+    _currentChild = child;
+    _currentStage = args[1] || 'unknown';
+    _cancelled    = false;
+    _currentPromptId = null;
 
     const timer = setTimeout(() => {
+      // Capture the prompt id before the kill so the cancel targets OUR job, not a foreign one,
+      // and kick the rig-side cancel now (killing the child alone leaves ComfyUI computing for
+      // minutes on a job nobody will collect). Do NOT resolve here: the kill triggers 'close',
+      // which used to win the race and report a nameless failure — the close handler owns the
+      // single resolve, and reads `timedOut` to tell a timeout from an ordinary exit.
+      const promptId = _currentPromptId;
+      timedOut = true;
+      cancelResult = cancelComfy(promptId, `stage timeout after ${Math.round(timeoutMs / 60000)} min`);
       child.kill();
-      resolve({
-        ok: false, timedOut: true,
-        stdout: stdoutChunks.join(''), stderr: stderrChunks.join(''),
-      });
     }, timeoutMs);
 
     child.stdout.on('data', chunk => {
@@ -49,6 +135,11 @@ function spawnPhoenixStage(args, timeoutMs) {
       partialLine = lines.pop();
       for (const line of lines) {
         if (line.trim()) {
+          // phoenix.js announces the ComfyUI prompt it queued; capture it so a later cancel
+          // targets our job instead of firing a global interrupt at a foreign one. NOT anchored:
+          // the spinner in withProgress can prefix the line with "\r  label Ns" before the marker.
+          const pm = line.match(/PHX_COMFY_PROMPT\s+(\S+)/);
+          if (pm) _currentPromptId = pm[1];
           try { if (dbg && typeof dbg.event === 'function') dbg.event('pipeline', { line: line.trim() }); } catch {}
         }
       }
@@ -58,17 +149,38 @@ function spawnPhoenixStage(args, timeoutMs) {
 
     child.on('error', err => {
       clearTimeout(timer);
+      if (_currentChild === child) { _currentChild = null; _currentStage = null; _currentPromptId = null; }
       resolve({ ok: false, stdout: '', stderr: err.message, error: err.message });
     });
 
-    child.on('close', code => {
+    child.on('close', async code => {
       clearTimeout(timer);
       if (partialLine.trim()) {
         try { if (dbg && typeof dbg.event === 'function') dbg.event('pipeline', { line: partialLine.trim() }); } catch {}
       }
+      const wasCancelled = _cancelled && _currentChild === child;
+      if (_currentChild === child) { _currentChild = null; _currentStage = null; _cancelled = false; _currentPromptId = null; }
+      if (timedOut) {
+        // Resolve the timeout HERE, the single place, so its diagnosis actually reaches the caller
+        // instead of losing the race to a bare close. Wait for the rig cancel so we can report it.
+        const comfyui = cancelResult
+          ? await cancelResult.catch(e => 'cancel failed: ' + ((e && e.message) || e))
+          : 'not attempted';
+        resolve({
+          ok: false, timedOut: true, comfyui,
+          stdout: stdoutChunks.join(''),
+          stderr: (stderrChunks.join('') +
+            `\n[pipeline] stage timed out after ${Math.round(timeoutMs / 60000)} min; ` +
+            `ComfyUI cancel: ${comfyui}`).trim(),
+        });
+        return;
+      }
       resolve({
-        ok: code === 0, code,
-        stdout: stdoutChunks.join(''), stderr: stderrChunks.join(''),
+        ok: code === 0, code, cancelled: wasCancelled,
+        // A cancelled run exits non-zero; say so plainly instead of letting it
+        // surface as a nameless "stage failed".
+        stdout: stdoutChunks.join(''),
+        stderr: wasCancelled ? 'cancelled by user' : stderrChunks.join(''),
       });
     });
   });
@@ -320,4 +432,4 @@ async function advance(ctx, cfg, runners) {
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
-module.exports = { STAGES, runPromptStage, runImageStage, runMeshStage, runImportStage, advance };
+module.exports = { STAGES, runPromptStage, runImageStage, runMeshStage, runImportStage, spawnPhoenixStage, advance, killCurrent, currentStage };

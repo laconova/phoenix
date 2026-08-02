@@ -8,10 +8,16 @@ const a         = require('./assistant.js');
 const dbg       = require('./debug-log.js');
 const lock      = require('./lock');
 const palette   = require('./palette');
+const libFolders = require('./library-folders');
 const workflows = require('./workflows');
 const animLib   = require('./animate_human');
 const customRig = require('./custom_rig');
 const characters = require('./characters');
+const voice     = require('./voice');
+const sfx       = require('./sfx');
+const unrealIpc = require('./unreal-ipc');
+const pipeline  = require('./pipeline');
+const jobs      = require('./jobs');
 
 // ─── Working dir (used for /file security checks) ─────────────────────────────
 
@@ -44,6 +50,30 @@ function broadcast(obj) {
 // works (hy_motion — see the /action route). Module-level because the route is re-entered per
 // request; a single boolean is enough, since exactly one action defers.
 let deferredInFlight = false;
+
+// ─── Unreal bridge status (for the header indicator) ──────────────────────────
+// The probe costs a Python start plus multicast discovery, so it is cached AND
+// shared: several open tabs plus a reload must not each spawn their own. The dot
+// is a hint, not a measurement — an answer up to 20 s stale is the right trade,
+// and it is exactly why the client may poll on a lazy tick.
+
+let unrealCache = { at: 0, val: null };
+let unrealInFlight = null;
+const UNREAL_TTL_MS = 20000;
+
+function unrealState() {
+  if (unrealCache.val && Date.now() - unrealCache.at < UNREAL_TTL_MS) {
+    return Promise.resolve(unrealCache.val);
+  }
+  if (unrealInFlight) return unrealInFlight;   // concurrent callers share one probe
+  unrealInFlight = unrealIpc.probeUnrealStatus({ cfg })
+    .catch(e => ({
+      state: 'unknown', engineVersion: null, projectFile: null, projectName: null,
+      message: String((e && e.message) || e),
+    }))
+    .then(v => { unrealCache = { at: Date.now(), val: v }; unrealInFlight = null; return v; });
+  return unrealInFlight;
+}
 
 // ─── Pipeline artifact parser (Phase 2b) ──────────────────────────────────────
 // Pure, exported-for-test function. Maintains module-level state between calls
@@ -184,6 +214,10 @@ function resolveFileParam(p) {
   const allowedRoots = [
     path.resolve(workingDir, 'output'),
     path.resolve(workingDir, 'staging'),
+    // Cached brush GLBs, so the mesh viewer can preview a brush. READ-ONLY like the others, and
+    // deliberately still outside staging/ — being servable and being listed as a staged asset are
+    // two different things, and conflating them is what produced phantom library entries.
+    path.resolve(workingDir, 'brush-cache'),
   ];
   const allowed = allowedRoots.some(root =>
     abs === root || abs.startsWith(root + path.sep)
@@ -440,6 +474,17 @@ async function handler(req, res) {
                 url: '/file?p=' + encodeURIComponent(art.rel) + '&t=' + Date.now() });
             } catch (_) { /* a broadcast must never break the turn */ }
           },
+          // onNote: the way back for work that outlives the turn. hy_motion runs its ~4 minutes as a
+          // background job so it does not hold the Blender lock for the whole turn; its result lands
+          // here, AFTER this turn's own reply. Same shape as that reply (no `action`, so the UI does
+          // not try to release a control) — a job's return value otherwise reaches only the debug log.
+          onNote: (text) => {
+            // `background: true` — this note arrives AFTER the turn's own reply, so the client must
+            // NOT run releaseUi for it: that would decrement the lock a second time and unlock the UI
+            // while a real turn is still holding it.
+            try { broadcast({ kind: 'reply', text: String(text), background: true }); }
+            catch (_) { /* a broadcast must never break the job */ }
+          },
         });
 
         // Mirror CLI post-turn persistence exactly
@@ -473,8 +518,13 @@ async function handler(req, res) {
 
     const { action, input } = body || {};
 
-    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'save_mesh', 'hy_motion',
-      'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render'];
+    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
+      'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render',
+      // Registering a tool in assistant.js is NOT enough — the UI posts through here, and this
+      // list is a second, independent gate. Missing it produced "unknown action" 400s on every
+      // double-click with the brush target set to Unreal (found live 2026-07-31).
+      'brush_to_unreal', 'brush_preview', 'inspect_unreal',
+      'unreal_to_blender', 'unreal_to_brush', 'character_to_unreal'];
     if (!ALLOWED.includes(action)) {
       sendJSON(res, 400, { error: 'unknown action' });
       return;
@@ -535,6 +585,28 @@ async function handler(req, res) {
             }
           } catch (_) { /* no render file — skip */ }
         }
+        // inspect_unreal renders the Unreal level to output/unreal-check.png — same Image tab, same
+        // freshness rule. Deliberately the identical shape to inspect_render above: a render the
+        // user cannot see is a render they have to take on trust, which is the whole failure mode
+        // the vision work exists to remove.
+        if (action === 'inspect_unreal') {
+          try {
+            const uAbs = path.join(workingDir, 'output', 'unreal-check.png');
+            const st = fs.statSync(uAbs);
+            if (st.mtimeMs >= t0 - 1000) {
+              broadcast({ kind: 'artifact', slot: 'image', url: '/file?p=' + encodeURIComponent('output/unreal-check.png') + '&t=' + Date.now() });
+            }
+          } catch (_) { /* vision off, or nothing written — skip */ }
+        }
+        // brush_preview built (or reused) the brush's GLB — put it in the mesh viewer.
+        // The path is read from the tool's OWN reply rather than rebuilt from the slug here: two
+        // places deriving the same filename is how they end up disagreeing after a rename.
+        if (action === 'brush_preview' && typeof result === 'string') {
+          const m = result.match(/^PREVIEW_READY\s+(\S+)/);
+          if (m) {
+            broadcast({ kind: 'artifact', slot: 'mesh', url: '/file?p=' + encodeURIComponent(m[1]) + '&t=' + Date.now(), source: 'library' });
+          }
+        }
         // The action name travels with the reply so the UI can react to WHAT finished instead of
         // sniffing the reply text. Text sniffing misfires on chat turns that happen to echo the
         // same wording, and it silently rots the moment a message is reworded.
@@ -592,6 +664,173 @@ async function handler(req, res) {
     const r = customRig.deleteFolder(body && body.name);
     if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
     sendJSON(res, 200, { ok: true, folders: customRig.listFolders() });
+    return;
+  }
+
+  // GET /unreal-state — the header indicator's one call. Cached server-side;
+  // see unrealState() for why the client is allowed to be lazy about polling.
+  if (method === 'GET' && urlPath === '/unreal-state') {
+    sendJSON(res, 200, await unrealState());
+    return;
+  }
+
+  // ── Voice tab ──────────────────────────────────────────────────────────────
+  // Speaking runs on whatever machine has the GPU: CrispASR's OpenAI-compatible
+  // speech server, addressed through voice.api in the config. Same shape as hyMotion —
+  // nothing here assumes it is local.
+
+  // GET /voice-state — everything the tab needs to draw itself in one round trip.
+  if (method === 'GET' && urlPath === '/voice-state') {
+    const [h, v] = await Promise.all([voice.health(), voice.listVoices()]);
+    sendJSON(res, 200, {
+      health: h,
+      voices: (v && v.voices) || [],
+      voicesError: (v && v.error) || null,
+      effects: voice.listEffects().map(e => ({ id: e.id, label: e.label })),
+      takes: voice.listTakes(),
+    });
+    return;
+  }
+
+  // POST /voice-speak {voice, text, effect, strength}
+  if (method === 'POST' && urlPath === '/voice-speak') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await voice.speak(body);
+    if (r.error && !r.ok) { sendJSON(res, 400, r); return; }
+    sendJSON(res, 200, r);
+    return;
+  }
+
+  // POST /voice-open — show the takes folder in the OS file browser.
+  if (method === 'POST' && urlPath === '/voice-open') {
+    sendJSON(res, 200, voice.openFolder());
+    return;
+  }
+
+  // GET /vo/<file>.wav — play back a produced take.
+  if (method === 'GET' && urlPath.startsWith('/vo/')) {
+    const f = voice.readOut(decodeURIComponent(urlPath.slice(4)));
+    if (!f) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': f.buf.length });
+    res.end(f.buf);
+    return;
+  }
+
+  // ── SFX tab — the clip workbench ───────────────────────────────────────────
+  // Three sources (generate SFX · generate VO · load a clip), edit at two depths,
+  // two exits (character .gguf · soundclip). Generation runs on the GPU machine;
+  // editing runs here because ffmpeg is here. See sfx.js for the why.
+
+  // GET /sfx-state — everything the tab needs to draw itself in one round trip.
+  if (method === 'GET' && urlPath === '/sfx-state') {
+    sendJSON(res, 200, await sfx.state());
+    return;
+  }
+
+  // POST /sfx-cast {instruction, text, n, advanced} — VO candidates
+  if (method === 'POST' && urlPath === '/sfx-cast') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await sfx.castStart(body);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-generate {prompt, seconds, n, seed, advanced} — SFX candidates
+  if (method === 'POST' && urlPath === '/sfx-generate') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await sfx.sfxStart(body);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // GET /sfx-job?id=… — poll. On completion the takes are pulled here once.
+  if (method === 'GET' && urlPath === '/sfx-job') {
+    const r = await sfx.jobStatus(parsedUrl.searchParams.get('id'));
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-adopt {take, kind, text} — put a candidate on the bench
+  if (method === 'POST' && urlPath === '/sfx-adopt') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = sfx.adopt(body);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-load {path} — the third source: an existing clip from disk
+  if (method === 'POST' && urlPath === '/sfx-load') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await sfx.loadFile(body.path);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-render {effect,strength} | {advanced,order} — re-render from source
+  if (method === 'POST' && urlPath === '/sfx-render') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await sfx.render(body);
+    sendJSON(res, (r.error && !r.bench) ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-save-clip {name} — exit 1: this is a line/sound, done
+  if (method === 'POST' && urlPath === '/sfx-save-clip') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = sfx.saveClip(body.name);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-save-character {name, transcript, iHaveRights, overwrite} — exit 2
+  if (method === 'POST' && urlPath === '/sfx-save-character') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const r = await sfx.saveCharacter(body);
+    sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-open {which} — show a folder in the OS file browser
+  if (method === 'POST' && urlPath === '/sfx-open') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    sendJSON(res, 200, sfx.openFolder(body.which));
+    return;
+  }
+
+  // GET /sfx-bench.wav — what is currently on the bench (preview, else source)
+  if (method === 'GET' && urlPath === '/sfx-bench.wav') {
+    const buf = sfx.readBenchAudio();
+    if (!buf) { res.writeHead(404); res.end('nothing on the bench'); return; }
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': buf.length,
+                         'Cache-Control': 'no-store' });
+    res.end(buf);
+    return;
+  }
+
+  // GET /sfx-file/<take>.wav — a generated candidate
+  if (method === 'GET' && urlPath.startsWith('/sfx-file/')) {
+    const buf = sfx.readTake(decodeURIComponent(urlPath.slice(10)));
+    if (!buf) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': buf.length });
+    res.end(buf);
+    return;
+  }
+
+  // GET /sfx-clip/<file>.wav — a saved soundclip
+  if (method === 'GET' && urlPath.startsWith('/sfx-clip/')) {
+    const buf = sfx.readClip(decodeURIComponent(urlPath.slice(10)));
+    if (!buf) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': buf.length });
+    res.end(buf);
     return;
   }
 
@@ -728,6 +967,14 @@ async function handler(req, res) {
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
+      // Defaults land HERE, not in the browser: the double-click handler reads brushTarget on
+      // every use, and a client-side fallback would silently disagree with what was saved.
+      unreal: {
+        brushTarget:  (fresh.unreal && fresh.unreal.brushTarget)  || 'blender',
+        visionMode:   (fresh.unreal && fresh.unreal.visionMode)   || 'camera',
+        visionWidth:  (fresh.unreal && fresh.unreal.visionWidth)  || 1280,
+        visionHeight: (fresh.unreal && fresh.unreal.visionHeight) || 720,
+      },
     });
     return;
   }
@@ -931,6 +1178,7 @@ async function handler(req, res) {
     if (!fresh.endpoints || typeof fresh.endpoints !== 'object') fresh.endpoints = {};
     if (!fresh.apps || typeof fresh.apps !== 'object') fresh.apps = {};
     if (!fresh.feedback || typeof fresh.feedback !== 'object') fresh.feedback = {};
+    if (!fresh.unreal || typeof fresh.unreal !== 'object') fresh.unreal = {};
 
     const hasGates = body && typeof body.gates === 'object' && body.gates !== null;
     const hasOrch  = body && typeof body.orchestrator === 'object' && body.orchestrator !== null;
@@ -938,14 +1186,15 @@ async function handler(req, res) {
     const hasEps   = body && typeof body.endpoints === 'object' && body.endpoints !== null;
     const hasApps  = body && typeof body.apps === 'object' && body.apps !== null;
     const hasFb    = body && typeof body.feedback === 'object' && body.feedback !== null;
+    const hasUnreal = body && typeof body.unreal === 'object' && body.unreal !== null;
 
-    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb) {
+    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb && !hasUnreal) {
       sendJSON(res, 400, { error: 'No settings provided.' });
       return;
     }
 
     // Stage validated changes (only applied on full success)
-    const staged = { gates: {}, orchestrator: {}, metaprompter: {}, endpoints: {}, apps: {}, feedback: {} };
+    const staged = { gates: {}, orchestrator: {}, metaprompter: {}, endpoints: {}, apps: {}, feedback: {}, unreal: {} };
 
     if (hasGates) {
       for (const k of ['prompt', 'image', 'mesh']) {
@@ -1078,6 +1327,36 @@ async function handler(req, res) {
       staged.feedback.endpointUrl = t;
     }
 
+    // ── Unreal ───────────────────────────────────────────────────────────────
+    // Enumerations are validated here rather than defaulted silently: an unknown value read back
+    // as "the default" is exactly the kind of drift that later gets debugged in the wrong place.
+    if (hasUnreal && 'brushTarget' in body.unreal) {
+      const t = String(body.unreal.brushTarget);
+      if (!['blender', 'unreal', 'both'].includes(t)) {
+        sendJSON(res, 400, { error: 'Brush target must be blender, unreal or both.', field: 'brushTarget' });
+        return;
+      }
+      staged.unreal.brushTarget = t;
+    }
+    if (hasUnreal && 'visionMode' in body.unreal) {
+      const m = String(body.unreal.visionMode);
+      if (!['off', 'camera', 'viewport'].includes(m)) {
+        sendJSON(res, 400, { error: 'Vision route must be off, camera or viewport.', field: 'visionMode' });
+        return;
+      }
+      staged.unreal.visionMode = m;
+    }
+    for (const [key, min, max] of [['visionWidth', 256, 3840], ['visionHeight', 144, 2160]]) {
+      if (hasUnreal && key in body.unreal) {
+        const n = body.unreal[key];
+        if (!Number.isInteger(n) || n < min || n > max) {
+          sendJSON(res, 400, { error: `${key} must be an integer between ${min} and ${max}.`, field: key });
+          return;
+        }
+        staged.unreal[key] = n;
+      }
+    }
+
     // All validations passed — apply staged changes (isolated-field merge)
     Object.assign(fresh.gates, staged.gates);
     Object.assign(fresh.seats.orchestrator, staged.orchestrator);
@@ -1086,10 +1365,17 @@ async function handler(req, res) {
     if ('blender' in staged.apps) fresh.apps.blender = staged.apps.blender;
     if ('comfyOutput' in staged.apps) fresh.apps.comfyOutput = staged.apps.comfyOutput;
     if ('endpointUrl' in staged.feedback) fresh.feedback.endpointUrl = staged.feedback.endpointUrl;
+    Object.assign(fresh.unreal, staged.unreal);
 
     a.saveConfig(fresh);
     cfg = fresh;
     sendJSON(res, 200, {
+      unreal: {
+        brushTarget:  fresh.unreal.brushTarget  || 'blender',
+        visionMode:   fresh.unreal.visionMode   || 'camera',
+        visionWidth:  fresh.unreal.visionWidth  || 1280,
+        visionHeight: fresh.unreal.visionHeight || 720,
+      },
       gates: fresh.gates,
       orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages },
       metaprompter: { model: fresh.seats.metaprompter.model, ejectAfterUse: !!fresh.seats.metaprompter.ejectAfterUse },
@@ -1097,6 +1383,29 @@ async function handler(req, res) {
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
+    return;
+  }
+
+  // ── Library folders ──────────────────────────────────────────────────────
+  // A VIEW over the library, not storage — see library-folders.js. Nothing on disk moves, so an
+  // asset keeps working with import_asset and keeps its palette category whatever folder it is
+  // filed under.
+  if (method === 'GET' && urlPath === '/library-folders') {
+    sendJSON(res, 200, libFolders.load());
+    return;
+  }
+
+  if (method === 'POST' && urlPath === '/library-folders') {
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+
+    let r;
+    try { r = libFolders.apply(body || {}); }
+    catch (e) { sendJSON(res, 500, { error: 'Could not write library-folders.json: ' + e.message }); return; }
+
+    if (!r.ok) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, Object.assign({ created: r.created || null }, r.data));
     return;
   }
 
@@ -1572,6 +1881,39 @@ async function handler(req, res) {
     cfg.onboarding.completed = completed;
     a.saveConfig(cfg);
     sendJSON(res, 200, { completed });
+    return;
+  }
+
+  // ── POST /stop ─────────────────────────────────────────────────────────────
+  // Abort the running stage. Two things have to die, not one: the LOCAL
+  // phoenix.js stage child, and the job ComfyUI is computing on the rig.
+  // Killing only the local child leaves the GPU busy for minutes on a result
+  // nobody will collect (observed 2026-08-01).
+  if (method === 'POST' && urlPath === '/stop') {
+    // TWO layers, not one. jobs.js owns the background slot; pipeline.js owns the
+    // stage child process. A job waiting at a gate, or sitting between stages, has
+    // NO child — reporting "nothing is running" there is a lie the user can see
+    // through, because their job list still shows it (found 2026-08-01).
+    const stage = pipeline.currentStage();
+    const job   = jobs.info();
+    // killCurrent stops BOTH ends now (local child + ComfyUI interrupt) — the remote
+    // half used to live here, which meant only /stop cleaned up and the timeout path
+    // did not.
+    const local = await pipeline.killCurrent('user pressed /stop');
+
+    const remote = local.comfyui;
+
+    if (local.stopped) {
+      broadcast({ kind: 'notice', text: `⛔ Stopped the ${stage || 'running'} stage (ComfyUI: ${remote}).` });
+    }
+    sendJSON(res, 200, {
+      stopped:  local.stopped,
+      stage:    stage || null,
+      comfyui:  remote,
+      // Reported even when nothing was killed, so the UI can say WHY it could not stop.
+      job:      job ? { id: job.id, kind: job.kind, label: job.label,
+                        runningMs: Date.now() - job.startedAt } : null,
+    });
     return;
   }
 

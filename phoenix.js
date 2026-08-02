@@ -213,7 +213,56 @@ async function comfyQueue(workflow) {
   if (!res.ok) throw new Error(`Queue failed ${res.status}: ${await res.text()}`);
   const d = await res.json();
   if (d.error) throw new Error(`ComfyUI rejected workflow: ${d.error.message || JSON.stringify(d.error)}`);
+  // Announce the queued prompt on stdout so pipeline.js — which spawns this stage as a child and
+  // cannot see promptId directly — can target its cancel at OUR prompt. Without this it fired a
+  // GLOBAL /interrupt that aborts a foreign job sharing this ComfyUI instance (burned the user
+  // 2026-08-01). A line the parent parses; harmless to a human reader.
+  // Leading \n is load-bearing: this runs inside withProgress, whose spinner writes "\r  label Ns"
+  // with NO newline, so without it the marker glues onto the spinner line and the parent never
+  // parses it. Own line in, own line out.
+  try { process.stdout.write(`\nPHX_COMFY_PROMPT ${d.prompt_id}\n`); } catch (_) {}
   return d.prompt_id;
+}
+
+// Tell ComfyUI to actually stop working on a prompt we have given up on.
+//
+// Without this, a Phoenix-side timeout only ends the WAITING — the rig keeps computing
+// the mesh for minutes afterwards, burns the whole card, and delivers into the void
+// (observed 2026-08-01: job reported failed at ~660 s while Trellis was still sampling
+// texture SLat two minutes later, blocking every following job).
+//
+// Two calls, because a prompt can be in one of two places:
+//   /queue {delete:[id]}  removes it if it is still PENDING
+//   /interrupt            stops it if it is already EXECUTING
+// ⚠️ /interrupt has no prompt_id — it stops whatever that instance runs right now, and this
+// ComfyUI is shared (laptop + rig + the user's manual Trellis runs). Firing it blind aborts a
+// foreign job (burned the user 2026-08-01), and "we polled this prompt so it IS the running one"
+// is false when ours was only PENDING (history has no entry, so the poll times out the same way).
+// So interrupt ONLY when queue_running actually holds our id; otherwise the dequeue above sufficed.
+async function comfyCancel(promptId, why) {
+  const results = {};
+  try {
+    const r = await fetch(`${COMFY_BASE}/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delete: [promptId] }),
+      signal: AbortSignal.timeout(5000),
+    });
+    results.dequeued = r.ok;
+  } catch (e) { results.dequeued = 'unreachable'; }
+  try {
+    const q = await (await fetch(`${COMFY_BASE}/queue`, { signal: AbortSignal.timeout(5000) })).json();
+    const oursRunning = (q.queue_running || []).some(it => Array.isArray(it) && it.includes(promptId));
+    if (oursRunning) {
+      const r = await fetch(`${COMFY_BASE}/interrupt`, { method: 'POST', signal: AbortSignal.timeout(5000) });
+      results.interrupted = r.ok;
+    } else {
+      results.interrupted = 'skipped (ours not running — foreign job left alone)';
+    }
+  } catch (e) { results.interrupted = 'unreachable'; }
+  dbg.event('comfy', { phase: 'cancelled', promptId, why, ...results });
+  console.log(`  ⛔ ComfyUI abbestellt (${why}) — dequeue=${results.dequeued} interrupt=${results.interrupted}`);
+  return results;
 }
 
 async function comfyPoll(promptId, timeoutMs = 600000) {
@@ -279,7 +328,17 @@ async function comfyPoll(promptId, timeoutMs = 600000) {
   // inside the loop body it would be skipped and we'd report a bogus "timed out" instead
   // of the real cause.
   if (fatal) throw fatal;   // ComfyUI said the job failed: stop now, don't poll a corpse
-  throw new Error(`ComfyUI timed out after ${timeoutMs / 60000} min — check the UI`);
+
+  // Giving up on OUR side is not the same as the work stopping on the rig. Cancel first,
+  // then report — otherwise the card stays busy on a result nobody will ever collect.
+  await comfyCancel(promptId, `timeout after ${timeoutMs / 60000} min`);
+  throw new Error(
+    `ComfyUI timed out after ${timeoutMs / 60000} min — the job was cancelled on the rig ` +
+    `(dequeued, and interrupted only if it was still the running job). If this keeps happening ` +
+    `on the same image, the object is ` +
+    `likely too heavy: check "Number of voxels (Nvox)" in the ComfyUI log — above ~6 M this ` +
+    `card runs out of memory.`
+  );
 }
 
 async function comfyDownload(filename, subfolder = '', type = 'output') {
@@ -641,7 +700,10 @@ async function finalizeMesh(session, headless = false) {
 // ─── Stage entry points ───────────────────────────────────────────────────────
 
 async function runImageStage(userPrompt, categoryOverride, literalPos = null, literalNeg = null) {
-  const category = categoryOverride || inferCategory(userPrompt);
+  // Validate the override against the palette: an unknown category (LLM invented one, or a custom
+  // category deleted after the image step) would make CATEGORIES[category] undefined → empty params →
+  // undefined workflow inputs → a raw ComfyUI 400. inferCategory always returns a real category.
+  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
   const params   = { ...CATEGORIES[category] };
   const session  = {
     userPrompt,
@@ -685,7 +747,7 @@ async function runMeshStage(imagePath, userPrompt, categoryOverride, targetFaceN
     process.exit(1);
   }
 
-  const category = categoryOverride || inferCategory(userPrompt);
+  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
   const params   = { ...CATEGORIES[category] };
   if (Number.isFinite(targetFaceNum) && targetFaceNum > 0) {
     params.target_face_num = Math.round(Math.min(300000, Math.max(200, targetFaceNum)));
@@ -730,7 +792,7 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
 
   // Category
   process.stdout.write('  Detecting category...');
-  session.category = categoryOverride || inferCategory(userPrompt);
+  session.category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
   session.params   = { ...CATEGORIES[session.category] };
   console.log(` ${session.category}  (${CATEGORY_LABELS[session.category]})`);
   console.log(`  Defaults → ${session.params.target_face_num} faces | CFG ${session.params.cfg} | ${session.params.steps} steps\n`);

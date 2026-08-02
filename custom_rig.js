@@ -236,22 +236,32 @@ async function assignSkeleton(input = {}, cfg) {
   if (!abs) return 'ERROR: invalid folder.';
   if (!fs.existsSync(abs)) return 'ERROR: folder does not exist — create it first.';
   const rigBlend = path.join(abs, 'rig.blend');
+  // Write to a temp .blend and rename on success. Re-assign is the documented repair/update path, so
+  // this overwrites an existing rig.blend — an in-place write that crashed mid-way corrupted it and
+  // cost every variant/clip in the folder its spawn template. (Same fix as saveCharacter.)
+  const tmpBlend = rigBlend + '.tmp-' + process.pid;
+  const _cleanTmp = () => { try { fs.unlinkSync(tmpBlend); } catch (_) { /* ignore */ } };
   let r;
   try {
-    r = await callBlender(buildAssignCode(rigBlend, input.folder), { cfg, timeoutMs: 120000 });
-  } catch (e) { return 'ERROR: ' + e.message; }
+    r = await callBlender(buildAssignCode(tmpBlend, input.folder), { cfg, timeoutMs: 120000 });
+  } catch (e) { _cleanTmp(); return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
-  if (r.status === 'error') return 'ERROR: ' + (r.message || out);
+  if (r.status === 'error') { _cleanTmp(); return 'ERROR: ' + (r.message || out); }
   const err = out.split('\n').find(l => l.startsWith('CRIG_ERR:'));
-  if (err) return 'ERROR: ' + err.slice('CRIG_ERR:'.length);
+  if (err) { _cleanTmp(); return 'ERROR: ' + err.slice('CRIG_ERR:'.length); }
   const m = out.match(/CRIG_ASSIGN:rig=(.+?):bones=(\d+):bytes=(-?\d+)/);
-  if (!m) return out || 'Assign failed.';
+  if (!m) { _cleanTmp(); return out || 'Assign failed.'; }
   const sigLine = out.split('\n').find(l => l.startsWith('CRIG_SIG:'));
   const bones = sigLine ? sigLine.slice('CRIG_SIG:'.length).split(',').filter(Boolean) : [];
+  // Commit the rig only now that it exported cleanly.
+  try { fs.renameSync(tmpBlend, rigBlend); }
+  catch (e) { _cleanTmp(); return 'ERROR: skeleton exported but could not be finalized — ' + e.message; }
   try {
-    fs.writeFileSync(path.join(abs, 'signature.json'), JSON.stringify({
+    const sigTmp = path.join(abs, 'signature.json.tmp-' + process.pid);
+    fs.writeFileSync(sigTmp, JSON.stringify({
       bones, boneCount: bones.length, rigObject: m[1], source: 'custom',
     }, null, 2), 'utf8');
+    fs.renameSync(sigTmp, path.join(abs, 'signature.json'));
   } catch (e) { return 'ERROR: skeleton exported but signature could not be written — ' + e.message; }
   return `Assigned "${m[1]}" to folder "${safeFolder(input.folder)}" — ${m[2]} bones. The folder is now unlocked.`;
 }

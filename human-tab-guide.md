@@ -19,8 +19,7 @@ or figures come out grey and bald, see `troubleshooting/entries/human-tab-mpfb-m
 
 ## Opening the tab
 
-1. **Restart the Phoenix server** (backend code is only picked up on restart), then reload
-   <http://127.0.0.1:7777> in the browser.
+1. Open <http://127.0.0.1:7777> in the browser.
 2. Pick the **Human** tab in the artifact bar.
 
 ---

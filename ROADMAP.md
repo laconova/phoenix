@@ -8,7 +8,9 @@ Phoenix is **alpha**: usable, but early.
 
 The core text → 3D prop pipeline, driven from one browser UI:
 
-- **Chat-driven generation** with per-stage gates (prompt · image · mesh).
+- **Chat-driven generation** with per-stage gates (prompt · image · mesh) — plus a **vision gate**
+  (`off` / `focused` / `full`) that renders the viewport after a scene-changing action and has a model
+  look at it, so "fixed ✓" has to be *seen* rather than assumed.
 - **Field-aware, workflow-agnostic engine** — every workflow is a small *node-map*, so Phoenix
   can drive any ComfyUI graph.
 - **Workflow registry** — *Verified* (shipped) workflows + **add your own** (upload an API-format
@@ -36,6 +38,20 @@ New in **1.6.0** — characters and animation, alongside the prop pipeline:
   same animations play on every variant. Includes **rig-to-mesh**: voxel-remesh a generated mesh and
   bind it with automatic weights, with the result measured rather than assumed.
 
+New in **1.7.0** — the Unreal bridge and audio:
+
+- **Unreal Engine bridge** — drive an *already-running* Unreal editor from Phoenix: place a brush or
+  spawn a saved character straight into the open level, pull an Unreal asset back out into Blender as
+  glTF, and have the assistant screenshot the viewport to check its own work. It talks to Unreal over
+  the editor's Python remote execution — Phoenix never launches Unreal. See **Connect Unreal** in the
+  README.
+- **Voice tab** — a baked voice pack speaks a line, with optional effects. Runs against a CrispASR
+  speech server (local or on your GPU box).
+- **Sound effects** — generate, audition and edit SFX takes, then save them to a clip or bake them
+  onto a character.
+- **Mesh preview** — inspect a brush's geometry in the browser (a vendored model-viewer, no CDN)
+  before it goes anywhere.
+
 ## Near future
 
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf
@@ -43,7 +59,8 @@ New in **1.6.0** — characters and animation, alongside the prop pipeline:
   Leaf size becomes a **dial** instead of a property baked into the mesh. This exists today as a
   script beside Phoenix; the next update brings it *into* Phoenix as a first-class step.
 - **PBR material generator** — generate physically-based material sets, not just meshes.
-- **Unreal Engine connection** — export / hand assets straight into Unreal.
+- **Deeper Unreal integration** — the 1.7.0 bridge places assets into a running editor; next is a
+  fuller round trip (materials, level layout) and hardening the editor-side setup.
 - **Client access** — a thin client that connects to a remote Phoenix server (run the heavy
   stack on one machine, drive it from another).
 - **Rigid binding for machines** — robots, vehicles and other hard-surface rigs want each part
@@ -55,7 +72,6 @@ New in **1.6.0** — characters and animation, alongside the prop pipeline:
 ## Middle future
 
 - **Video generation** — a video stage beyond the current image/mesh pipeline.
-- **AI sound generation & editing** — generate and edit audio alongside the visuals.
 - **Live motion capture** — drive animation from live mocap.
 - **Depth-to-video** — depth-conditioned video generation.
 
