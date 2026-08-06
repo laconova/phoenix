@@ -62,15 +62,18 @@ function callBlender(code, opts = {}) {
   const id        = crypto.randomUUID();
 
   return new Promise((resolve, reject) => {
+    // Prepare the command in our OWN per-call .tmp first (unique via `id`), then atomically rename it
+    // onto cmd.json. The per-id name matters because the publish retry below backs off for up to ~0.5s,
+    // and two callers can be live at once across PROCESSES the lock doesn't cover — a detached job's
+    // phoenix.js child and the preflight probe (spawned during a held lock). A shared .tmp name would let
+    // one caller overwrite the other's payload mid-backoff (lost command, or publishing a foreign payload).
+    const tmp = cmdFile + '.' + id + '.tmp';
     try {
       fs.mkdirSync(dir, { recursive: true });
-      const tmp = cmdFile + '.tmp';
       fs.writeFileSync(tmp, JSON.stringify({ id, type: 'execute', code }), 'utf8');
-      fs.renameSync(tmp, cmdFile);          // atomic publish — addon never sees a partial command
     } catch (e) {
       return reject(new Error('Blender IPC: cannot write command in ' + dir + ' — ' + e.message));
     }
-    try { dbg.ipc('send', { id, code }); } catch (_) {}
 
     const deadline = Date.now() + timeoutMs;
     const poll = () => {
@@ -89,7 +92,24 @@ function callBlender(code, opts = {}) {
       try { dbg.ipc('recv', raw); } catch (_) {}
       resolve(obj);
     };
-    setTimeout(poll, 100);
+
+    // Publishing (rename over cmd.json) is the Windows race: it throws EPERM/EBUSY/EACCES when the addon
+    // holds cmd.json open mid-read at that instant. It's transient — retry with a short backoff instead of
+    // failing the whole call, exactly as the result-read side above already retries (fixed 2026-08-02).
+    const TRANSIENT = new Set(['EPERM', 'EBUSY', 'EACCES']);
+    let publishTries = 0;
+    const publish = () => {
+      try {
+        fs.renameSync(tmp, cmdFile);          // atomic publish — addon never sees a partial command
+      } catch (e) {
+        if (TRANSIENT.has(e.code) && ++publishTries < 25) return setTimeout(publish, 20);  // ~0.5s window
+        try { fs.unlinkSync(tmp); } catch (_) {}   // don't leave a .tmp behind on a hard failure
+        return reject(new Error('Blender IPC: cannot write command in ' + dir + ' — ' + e.message));
+      }
+      try { dbg.ipc('send', { id, code }); } catch (_) {}
+      setTimeout(poll, 100);                   // start polling only once the command is actually published
+    };
+    publish();
   });
 }
 

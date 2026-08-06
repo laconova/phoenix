@@ -25,6 +25,7 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const { execFile } = require('child_process');
 const soundFx = require('./sound-fx');
 
@@ -61,8 +62,12 @@ function request(urlStr, { method = 'GET', body = null, timeoutMs = 300000 } = {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(urlStr); } catch (e) { reject(new Error('bad url: ' + urlStr)); return; }
-    const req = http.request({
-      hostname: u.hostname, port: u.port || 80, path: u.pathname + u.search, method,
+    // Scheme-aware: an https voice.api used to fail — request() only ever spoke http and defaulted the
+    // port to 80, so a TLS endpoint got a plaintext request on the wrong port (fixed 2026-08-02).
+    const isHttps = u.protocol === 'https:';
+    const lib = isHttps ? https : http;
+    const req = lib.request({
+      hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, method,
       headers: body ? { 'Content-Type': 'application/json',
                         'Content-Length': Buffer.byteLength(body) } : {},
     }, res => {
@@ -143,6 +148,9 @@ async function speak({ voice, text, effect, strength } = {}) {
   const base = apiBase();
   if (!base) return { error: 'voice.api is not set in phoenix-config.json' };
   if (!voice) return { error: 'pick a voice pack first' };
+  // A pack name is a NAME, never a path: `voice` goes into the output filename below (path.join). Without
+  // this guard a name like "../../characters/hero" would write the WAV outside OUT_DIR (fixed 2026-08-02).
+  if (/[\/\\]|\.\./.test(String(voice))) return { error: 'invalid voice pack name' };
   if (!text || !String(text).trim()) return { error: 'nothing to say — type a line' };
 
   fs.mkdirSync(OUT_DIR, { recursive: true });

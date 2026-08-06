@@ -52,6 +52,18 @@ New in **1.7.0** — the Unreal bridge and audio:
 - **Mesh preview** — inspect a brush's geometry in the browser (a vendored model-viewer, no CDN)
   before it goes anywhere.
 
+New in **1.8.0** — image editing between the stages:
+
+- **i2i / Edit tab** — a branch between the image and the mesh. Recolour or restyle a reference with
+  **Qwen-Image-Edit** (appearance / material / style — not structure removal or a new camera angle),
+  or isolate a part on white with **SAM3** for a cleaner mesh. Edits arrive as tiles you can refine
+  or send straight to Trellis; the reference is never overwritten. See **Edit an image (i2i)** in the
+  README.
+- **VRAM & concurrency hardening** — one heavy GPU job runs at a time, and Phoenix frees an idle
+  ComfyUI instance before a generation so an edit and a mesh can't collide on a single card. Multiple
+  ComfyUI instances (e.g. Qwen-Image-Edit and Trellis in separate environments) are supported via an
+  optional second endpoint, while a single-machine setup keeps working unchanged.
+
 ## Near future
 
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf

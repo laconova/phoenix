@@ -45,6 +45,38 @@ const DEFAULT_WORKFLOWS = {
       },
       builtin: true,
     },
+    // ── i2i category (v1.8) ─────────────────────────────────────────────────────
+    // Image-to-image editing between the image and mesh stages. Unlike image/mesh (both on
+    // COMFY_BASE), an i2i entry names its `instance`: 'bild' = the ComfyUI that hosts Qwen-Image-Edit,
+    // 'trellis' = the one that hosts the SAM3 / RMBG suite. The backend maps instance -> base URL via
+    // config (endpoints.comfyui / optional endpoints.comfyui_bild); with a single ComfyUI both map to
+    // the one endpoint. Entries without `instance` fall back to COMFY_BASE.
+    qwen_edit: {
+      label:    'Qwen Image Edit',
+      stage:    'i2i',
+      instance: 'bild',                 // the ComfyUI that hosts Qwen-Image-Edit-2509 (endpoints.comfyui_bild, or the single endpoint)
+      mode:     'edit',                 // appearance/material/style edit (NOT structure removal — measured 2026-08-05)
+      file:     path.join(__dirname, 'workflows', 'qwen_image_edit.json'),
+      nodes:    { input_image: '4', prompt: '6', cfg: '9', seed: '9', output: '11' },
+      deps:     {
+        custom_nodes: ['UnetLoaderGGUF', 'CLIPLoader', 'TextEncodeQwenImageEdit', 'ImageScaleToTotalPixels'],
+        models: ['Qwen-Image-Edit-2509-Q3_K_M.gguf', 'qwen_2.5_vl_7b_fp8_scaled.safetensors', 'qwen_image_vae.safetensors'],
+      },
+      builtin: true,
+    },
+    sam3_isolate: {
+      label:    'SAM3 Isolate',
+      stage:    'i2i',
+      instance: 'trellis',              // the ComfyUI that hosts the ComfyUI-RMBG suite (dev rig: :8000)
+      mode:     'segment',              // text-guided isolation — the reliable "cut a part out" engine (measured 2026-08-06)
+      file:     path.join(__dirname, 'workflows', 'sam3_segment.json'),
+      nodes:    { input_image: '1', prompt: '2', output: '3' },   // no cfg/seed: SAM3 is deterministic
+      deps:     {
+        custom_nodes: ['SAM3Segment'],  // sam3.pt loads internally (no model_name input) → not a dep-checkable model name
+        models: [],
+      },
+      builtin: true,
+    },
   },
 };
 
@@ -67,11 +99,28 @@ function loadRegistry() {
     return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
   }
   try {
-    return JSON.parse(raw);
+    return mergeMissingBuiltins(JSON.parse(raw));
   } catch {
     // Parse failure (corruption / partial write) — do NOT overwrite; return defaults.
     return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
   }
+}
+
+// Ensure every workflow the app SHIPS as builtin is present, without ever clobbering a user's own
+// entry of the same id. WHY: workflows.json is seeded from DEFAULT_WORKFLOWS only on first run
+// (ENOENT above). A user who already had the file from an earlier version would otherwise NEVER
+// receive builtins added in an update — e.g. the v1.8 i2i engines (qwen_edit, sam3_isolate), which
+// left the whole i2i/Edit engine picker empty and SAM3 isolation unreachable for every upgrader.
+// Safe against deliberate deletion: builtins cannot be deleted (deleteCustomWorkflow refuses them),
+// so a missing builtin is always "never delivered", never "removed on purpose". Merge is in-memory
+// (loadRegistry stays side-effect-light); it persists the next time the registry is saved anyway.
+function mergeMissingBuiltins(reg) {
+  if (!reg || typeof reg !== 'object') return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
+  if (!reg.workflows || typeof reg.workflows !== 'object') reg.workflows = {};
+  for (const [id, entry] of Object.entries(DEFAULT_WORKFLOWS.workflows)) {
+    if (!(id in reg.workflows)) reg.workflows[id] = JSON.parse(JSON.stringify(entry));
+  }
+  return reg;
 }
 
 /**
@@ -84,7 +133,7 @@ function saveRegistry(reg) {
   fs.renameSync(tmp, WORKFLOWS_FILE);
 }
 
-const DEFAULT_ACTIVE = { image: 'flux_klein', mesh: 'trellis2' };
+const DEFAULT_ACTIVE = { image: 'flux_klein', mesh: 'trellis2', i2i: 'qwen_edit' };
 
 /**
  * getActive(stage, cfg) — returns the active workflow entry for a given stage.
@@ -146,6 +195,10 @@ function checkDeps(entry, objectInfo) {
 const DEFAULT_FIELDS = {
   image: { positive: 'text', negative: 'text', cfg: 'cfg', steps: 'steps', seed: 'noise_seed', output: null },
   mesh:  { image: 'image', seed: 'seed', target_face_num: 'target_face_num', output_prefix: 'filename_prefix', output: null },
+  // i2i: input_image = the LoadImage node's `image` field; prompt/cfg/seed target the edit's
+  // sampler/encoder. cfg+seed are optional (a segmenter like SAM3 has neither) and are only
+  // injected when the node-map declares them.
+  i2i:   { input_image: 'image', prompt: 'prompt', cfg: 'cfg', seed: 'seed', output: null },
 };
 
 /**
@@ -295,6 +348,7 @@ function validateNodeMap(stage, nodes, obj) {
   const REQUIRED = {
     image: ['positive', 'output'],
     mesh:  ['image', 'output'],
+    i2i:   ['input_image', 'output'],
   };
   if (!(stage in REQUIRED)) {
     return { ok: false, error: 'Unknown stage: ' + stage };
@@ -362,8 +416,8 @@ function addCustomWorkflow(entry, jsonText) {
   if (!/^[a-z0-9_]+$/.test(id)) {
     throw new Error('Invalid id (use lowercase a-z, 0-9, _).');
   }
-  if (stage !== 'image' && stage !== 'mesh') {
-    throw new Error('stage must be "image" or "mesh".');
+  if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i') {
+    throw new Error('stage must be "image", "mesh" or "i2i".');
   }
   const { clean } = prepareWorkflowJson(jsonText);
   const vn = validateNodeMap(stage, nodes, clean);

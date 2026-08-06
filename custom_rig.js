@@ -235,6 +235,10 @@ async function assignSkeleton(input = {}, cfg) {
   const abs = folderPath(input && input.folder);
   if (!abs) return 'ERROR: invalid folder.';
   if (!fs.existsSync(abs)) return 'ERROR: folder does not exist — create it first.';
+  // Capture any skeleton already assigned here BEFORE the signature is overwritten. Re-assign is a valid
+  // repair/update path, but silently replacing a skeleton the folder's mesh variants and clips were bound
+  // to is a footgun — the caller should be told (fixed 2026-08-02).
+  const prior = readSig(abs);
   const rigBlend = path.join(abs, 'rig.blend');
   // Write to a temp .blend and rename on success. Re-assign is the documented repair/update path, so
   // this overwrites an existing rig.blend — an in-place write that crashed mid-way corrupted it and
@@ -263,7 +267,13 @@ async function assignSkeleton(input = {}, cfg) {
     }, null, 2), 'utf8');
     fs.renameSync(sigTmp, path.join(abs, 'signature.json'));
   } catch (e) { return 'ERROR: skeleton exported but signature could not be written — ' + e.message; }
-  return `Assigned "${m[1]}" to folder "${safeFolder(input.folder)}" — ${m[2]} bones. The folder is now unlocked.`;
+  let note = '';
+  if (prior && prior.boneCount) {
+    note = prior.boneCount === bones.length
+      ? ` ⚠ This replaced a skeleton already assigned to the folder (same bone count, ${prior.boneCount}). If it is a different rig, re-check the mesh variants and clips bound to it.`
+      : ` ⚠ This replaced the folder's previous skeleton (${prior.boneCount} → ${bones.length} bones). Mesh variants and clips already here were bound to the OLD skeleton and may no longer fit — re-bind or re-check them.`;
+  }
+  return `Assigned "${m[1]}" to folder "${safeFolder(input.folder)}" — ${m[2]} bones. The folder is now unlocked.${note}`;
 }
 
 async function spawnRig(input = {}, cfg) {

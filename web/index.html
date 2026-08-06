@@ -15,7 +15,7 @@
       --outline: #FF7A18;
       --border-soft: #D8D8D8;
       --text: #2A2A2A;
-      --muted: #6B6B6B;
+      --muted: #444444;   /* war #6B6B6B — auf dem hellen Panel #B3B3B3 nur 2.6:1; #444 ≈ 4.65:1 (05.08.) */
       --accent: #FF7A18;
       --accent-hover: #E2660D;
 
@@ -546,6 +546,125 @@
       display: block;
     }
 
+    /* ── i2i / Edit sub-tab (v1.8) ─────────────────────────────────────────── */
+    #image-subtabs {
+      display: flex;
+      gap: 6px;
+      width: 100%;
+      flex: 0 0 auto;
+      margin-bottom: 10px;
+    }
+    .img-subtab-btn {
+      background: var(--panel);
+      color: var(--text-dim, #B8B8B8);
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+      padding: 5px 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .img-subtab-btn:hover { border-color: var(--accent); }
+    .img-subtab-btn.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: var(--panel-2, var(--panel));
+    }
+
+    .img-subpanel { display: none; width: 100%; flex: 1 1 auto; min-height: 0; }
+    .img-subpanel.visible {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    #i2i-workspace {
+      display: flex;
+      gap: 14px;
+      width: 100%;
+      align-self: stretch;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    #i2i-left  { flex: 0 0 46%; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+    #i2i-right { flex: 1 1 auto; min-width: 0; position: relative; overflow: auto; }
+
+    .i2i-ref-wrap {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    #i2i-ref-img { max-width: 100%; max-height: 100%; object-fit: contain; display: none; }
+    #i2i-ref-img.loaded { display: block; }
+
+    .i2i-engine-row, .i2i-cfg-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-dim, #B8B8B8);
+      width: 100%;
+    }
+    .i2i-engine-row select { flex: 1 1 auto; background: var(--panel); color: var(--text); border: 1px solid var(--border-soft); border-radius: 7px; padding: 4px 6px; }
+    .i2i-cfg-row input[type=range] { flex: 1 1 auto; }
+    #i2i-cfg-val { min-width: 26px; text-align: right; color: var(--text); }
+
+    .i2i-presets { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+    .i2i-preset {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .i2i-preset:hover { border-color: var(--accent); }
+    #i2i-freetext { min-height: 64px; margin-top: 0; }
+
+    .i2i-status { width: 100%; font-size: 12px; color: var(--text-dim, #B8B8B8); min-height: 16px; }
+
+    #i2i-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; width: 100%; }
+    .i2i-tile {
+      position: relative;
+      border: 1px solid var(--border-soft);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel);
+      aspect-ratio: 1 / 1;
+    }
+    .i2i-tile img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .i2i-tile .i2i-tile-actions {
+      position: absolute;
+      inset: auto 0 0 0;
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+      background: rgba(0,0,0,0.55);
+      opacity: 0;
+      transition: opacity 0.12s;
+    }
+    .i2i-tile:hover .i2i-tile-actions { opacity: 1; }
+    .i2i-tile-actions button {
+      flex: 1 1 auto;
+      font-size: 11px;
+      padding: 3px 4px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    .i2i-tile-actions button.refine { background: var(--panel-2, #444); color: var(--text); }
+    .i2i-tile-meta { position: absolute; top: 0; left: 0; right: 0; font-size: 10px; padding: 2px 4px; background: rgba(0,0,0,0.45); color: #ddd; opacity: 0; transition: opacity 0.12s; }
+    .i2i-tile:hover .i2i-tile-meta { opacity: 1; }
+
     /* Mesh panel */
     #artMesh {
       width: 100%;
@@ -911,15 +1030,59 @@
 
         <!-- Image panel -->
         <div class="art-panel" id="panel-image">
-          <span class="art-placeholder" id="image-placeholder">no artifact yet</span>
-          <img id="artImage" alt="Generated image" />
-          <textarea id="image-prompt-edit" class="img-prompt-edit" placeholder="prompt (editable) — Regenerate uses this"></textarea>
-          <div class="art-actions" id="image-actions">
-            <button class="art-btn" data-action="load-image">Load image…</button>
-            <button class="art-btn" data-action="regen-image">Regenerate</button>
-            <button class="art-btn" data-action="make-3d">Make 3D</button>
+          <!-- Sub-tabs inside the image window: the generated image (view) and the i2i edit
+               workspace. Deliberately NOT a new top-level tab (spec 2026-08-04): the edit is an
+               optional branch OFF the image, so it lives with the image. The direct
+               Image → Make 3D path is untouched in the view sub-panel. -->
+          <div id="image-subtabs">
+            <button class="img-subtab-btn active" data-subtab="view">Image</button>
+            <button class="img-subtab-btn"        data-subtab="edit">Edit · i2i</button>
           </div>
-          <input type="file" id="image-file" accept="image/png,image/jpeg,image/webp" style="display:none;" />
+
+          <div class="img-subpanel visible" id="imgsub-view">
+            <span class="art-placeholder" id="image-placeholder">no artifact yet</span>
+            <img id="artImage" alt="Generated image" />
+            <textarea id="image-prompt-edit" class="img-prompt-edit" placeholder="prompt (editable) — Regenerate uses this"></textarea>
+            <div class="art-actions" id="image-actions">
+              <button class="art-btn" data-action="load-image">Load image…</button>
+              <button class="art-btn" data-action="regen-image">Regenerate</button>
+              <button class="art-btn" data-action="make-3d">Make 3D</button>
+            </div>
+            <input type="file" id="image-file" accept="image/png,image/jpeg,image/webp" style="display:none;" />
+          </div>
+
+          <!-- i2i / Edit workspace (v1.8): two columns — reference + options (left),
+               result tiles (right). Tiles are additive (never replace) — each edit is a new
+               variant. A tile can become the new reference (refine) or go to Trellis. -->
+          <div class="img-subpanel" id="imgsub-edit">
+            <div id="i2i-workspace">
+              <div id="i2i-left">
+                <div class="i2i-ref-wrap">
+                  <span class="art-placeholder" id="i2i-ref-ph">no reference — generate or load an image in the Image sub-tab first</span>
+                  <img id="i2i-ref-img" alt="i2i reference" />
+                </div>
+                <div class="i2i-engine-row">
+                  <label>engine
+                    <select id="i2i-engine" title="Which i2i workflow to run"></select>
+                  </label>
+                </div>
+                <div class="i2i-presets" id="i2i-presets"><!-- filled by JS per engine mode --></div>
+                <textarea id="i2i-freetext" class="img-prompt-edit"></textarea>
+                <label class="i2i-cfg-row">strength (CFG)
+                  <input type="range" id="i2i-cfg" min="1" max="8" step="0.5" value="4" />
+                  <span id="i2i-cfg-val">4.0</span>
+                </label>
+                <div class="art-actions">
+                  <button class="art-btn" id="i2i-apply">Apply edit</button>
+                </div>
+                <div id="i2i-status" class="i2i-status"></div>
+              </div>
+              <div id="i2i-right">
+                <span class="art-placeholder" id="i2i-gallery-ph">edits appear here as tiles</span>
+                <div id="i2i-gallery"></div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Mesh panel -->
@@ -1495,7 +1658,7 @@
       // ── Theme system ─────────────────────────────────────────────────────────
 
       const THEMES = {
-        'orange-light': { name: 'Orange (Light)', vars: { '--bg':'#737373','--panel':'#B3B3B3','--outline':'#FF7A18','--border-soft':'#D8D8D8','--text':'#2A2A2A','--muted':'#6B6B6B','--accent':'#FF7A18','--accent-hover':'#E2660D' } },
+        'orange-light': { name: 'Orange (Light)', vars: { '--bg':'#737373','--panel':'#B3B3B3','--outline':'#FF7A18','--border-soft':'#D8D8D8','--text':'#2A2A2A','--muted':'#444444','--accent':'#FF7A18','--accent-hover':'#E2660D' } },
         'dark-orange':  { name: 'Dark + Orange',  vars: { '--bg':'#1E1E1E','--panel':'#2A2A2A','--outline':'#FF7A18','--border-soft':'#3A3A3A','--text':'#E8E8E8','--muted':'#9A9A9A','--accent':'#FF7A18','--accent-hover':'#E2660D' } },
         'dark-teal':    { name: 'Dark + Teal',    vars: { '--bg':'#16191D','--panel':'#1F242A','--outline':'#1FB6A6','--border-soft':'#2D353D','--text':'#E6EDF3','--muted':'#8A98A6','--accent':'#1FB6A6','--accent-hover':'#17968A' } },
         'light-blue':   { name: 'Light + Blue',   vars: { '--bg':'#ECECEC','--panel':'#FFFFFF','--outline':'#2D7FF9','--border-soft':'#D0D0D0','--text':'#2A2A2A','--muted':'#6B6B6B','--accent':'#2D7FF9','--accent-hover':'#1C6AE0' } },
@@ -1716,6 +1879,161 @@
       tabBtns.forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
       });
+
+      // ── i2i / Edit sub-tab (v1.8) ─────────────────────────────────────────────
+      (function initI2I() {
+        const subBtns   = document.querySelectorAll('.img-subtab-btn');
+        const subView   = document.getElementById('imgsub-view');
+        const subEdit   = document.getElementById('imgsub-edit');
+        const refImg    = document.getElementById('i2i-ref-img');
+        const refPh     = document.getElementById('i2i-ref-ph');
+        const engineSel = document.getElementById('i2i-engine');
+        const freetext  = document.getElementById('i2i-freetext');
+        const cfgInput  = document.getElementById('i2i-cfg');
+        const cfgVal    = document.getElementById('i2i-cfg-val');
+        const applyBtn  = document.getElementById('i2i-apply');
+        const statusEl  = document.getElementById('i2i-status');
+        const gallery   = document.getElementById('i2i-gallery');
+        const galleryPh = document.getElementById('i2i-gallery-ph');
+        const artImg    = document.getElementById('artImage');
+        const presetsEl = document.getElementById('i2i-presets');
+        const cfgRow    = subEdit ? subEdit.querySelector('.i2i-cfg-row') : null;
+        if (!subEdit) return;   // defensive: markup not present
+
+        // Presets per engine MODE. edit = appearance/material quick-starts (fill the free-text and run);
+        // segment = common isolation targets (the prompt for SAM3 IS the thing to cut out).
+        const PRESETS = {
+          edit: [
+            ['Rusty / weathered', 'make the surface rusty, weathered and oxidized, keep the exact same shape and background'],
+            ['Bronze metal',      'change the material to dark oxidized bronze metal, keep the exact same shape and background'],
+            ['Carved stone',      'change the material to carved grey stone, keep the exact same shape and background'],
+          ],
+          segment: [
+            ['Isolate subject', 'the main subject'],
+            ['Clothing',        'the clothing'],
+            ['Held item',       'the held item'],
+            ['Head',            'the head'],
+          ],
+        };
+        function renderPresets(mode) {
+          if (!presetsEl) return;
+          presetsEl.innerHTML = '';
+          (PRESETS[mode === 'segment' ? 'segment' : 'edit'] || []).forEach(function (p) {
+            const b = document.createElement('button');
+            b.className = 'i2i-preset'; b.textContent = p[0]; b.dataset.instr = p[1];
+            b.addEventListener('click', function () { freetext.value = p[1]; doApply(p[1]); });
+            presetsEl.appendChild(b);
+          });
+        }
+        // Swap settings + text when the engine changes: an edit engine has a CFG/strength knob and
+        // appearance presets; a segmenter has neither — it takes only "what to isolate".
+        function applyEngineMode(mode) {
+          const seg = (mode === 'segment');
+          if (cfgRow) cfgRow.style.display = seg ? 'none' : '';
+          freetext.placeholder = seg
+            ? 'what to isolate, e.g. "the clothing", "a held weapon", "the head" — the segmenter cuts it out on white'
+            : 'free-text edit, e.g. "turn the cloak deep red" or "make it glow" — appearance / material / style (NOT removing parts or a new camera angle)';
+          renderPresets(mode);
+        }
+        function selectedEngineMode() {
+          const opt = engineSel.options[engineSel.selectedIndex];
+          return (opt && opt.dataset.mode) || 'edit';
+        }
+
+        let refPath = null;     // the `p` path of the current reference image (server-relative)
+
+        function pOf(url) {
+          try { return decodeURIComponent(new URL(url, window.location.href).searchParams.get('p') || ''); }
+          catch (_) { return ''; }
+        }
+
+        function setReference(url) {
+          if (!url) return;
+          refImg.src = url;
+          refImg.classList.add('loaded');
+          if (refPh) refPh.style.display = 'none';
+          refPath = pOf(url) || null;
+        }
+        // Called from setArtifact when a fresh main image lands — the newest image becomes the
+        // reference (and resets any refine chain). Exposed so setArtifact can reach it.
+        window.__i2iOnImage = function (url) { setReference(url); };
+
+        function switchSub(which) {
+          subBtns.forEach(b => b.classList.toggle('active', b.dataset.subtab === which));
+          subView.classList.toggle('visible', which === 'view');
+          subEdit.classList.toggle('visible', which === 'edit');
+          // Entering Edit with no reference yet but a main image present → adopt it.
+          if (which === 'edit' && !refPath && artImg && artImg.src && artImg.classList.contains('loaded')) {
+            setReference(artImg.src);
+          }
+        }
+        subBtns.forEach(b => b.addEventListener('click', () => switchSub(b.dataset.subtab)));
+
+        cfgInput.addEventListener('input', () => { cfgVal.textContent = Number(cfgInput.value).toFixed(1); });
+
+        // Populate the engine picker from the workflow registry (stage i2i). SAM3 shows up here
+        // automatically once its entry is registered — no UI change needed.
+        (async function loadEngines() {
+          try {
+            const r = await fetch('/workflows');
+            if (!r.ok) return;
+            const reg = await r.json();
+            const wfs = (reg && reg.workflows) || {};
+            const ids = Object.keys(wfs).filter(id => wfs[id].stage === 'i2i');
+            engineSel.innerHTML = '';
+            for (const id of ids) {
+              const o = document.createElement('option');
+              o.value = id; o.textContent = wfs[id].label || id;
+              o.dataset.mode = wfs[id].mode || 'edit';
+              engineSel.appendChild(o);
+            }
+            if (!ids.length) { const o = document.createElement('option'); o.textContent = '(no i2i workflow)'; o.value = ''; o.dataset.mode = 'edit'; engineSel.appendChild(o); }
+            applyEngineMode(selectedEngineMode());   // sync settings+text to the first engine
+          } catch (_) { /* leave empty */ }
+        })();
+        engineSel.addEventListener('change', function () { applyEngineMode(selectedEngineMode()); });
+
+        function doApply(instruction) {
+          const prompt = (instruction != null ? instruction : freetext.value).trim();
+          if (!refPath) { statusEl.textContent = 'No reference image — generate or load one in the Image sub-tab first.'; return; }
+          if (!prompt)  { statusEl.textContent = 'Type an instruction or pick a preset first.'; return; }
+          const input = { image: refPath, prompt, cfg: Number(cfgInput.value) };
+          if (engineSel.value) input.workflowId = engineSel.value;
+          statusEl.textContent = 'Editing… Qwen-Image-Edit takes a few minutes (≈3–4 min on a 10 GB card). A new tile appears when done.';
+          postAction('i2i_edit', input);
+        }
+        window.__i2iClearStatus = function () { statusEl.textContent = ''; };
+
+        applyBtn.addEventListener('click', () => doApply(null));
+
+        // A finished edit arrives as {kind:'artifact', slot:'i2i-tile', url, meta}. Add a tile —
+        // additive, never replacing. Exposed so the SSE handler can reach it.
+        window.__i2iAddTile = function (obj) {
+          if (galleryPh) galleryPh.style.display = 'none';
+          statusEl.textContent = '';
+          const meta = obj.meta || {};
+          const tile = document.createElement('div');
+          tile.className = 'i2i-tile';
+          const img = document.createElement('img');
+          img.src = obj.url; img.alt = meta.prompt || 'edit';
+          const label = document.createElement('div');
+          label.className = 'i2i-tile-meta';
+          label.textContent = (meta.workflowId || 'edit') + (meta.seconds ? ' · ' + meta.seconds + 's' : '');
+          const acts = document.createElement('div');
+          acts.className = 'i2i-tile-actions';
+          const refineB = document.createElement('button');
+          refineB.className = 'refine'; refineB.textContent = 'Refine';
+          refineB.title = 'Use this tile as the new reference';
+          refineB.addEventListener('click', () => { setReference(obj.url); switchSub('edit'); });
+          const to3dB = document.createElement('button');
+          to3dB.textContent = '→ 3D';
+          to3dB.title = 'Send this tile to Trellis (mesh stage)';
+          to3dB.addEventListener('click', () => { postAction('image_to_3d', { image: pOf(obj.url) }); });
+          acts.appendChild(refineB); acts.appendChild(to3dB);
+          tile.appendChild(img); tile.appendChild(label); tile.appendChild(acts);
+          gallery.appendChild(tile);
+        };
+      })();
 
       // Wording stays with each tab (packs vs voices); only the card part is shared.
       startCardStatusPoll('panel-sfx', 'sx-status', '/sfx-state', (j) =>
@@ -3772,6 +4090,10 @@
           switchTab('image');
           imageFromUser = (obj.source === 'upload');
           updateRegenImageLock();
+          // A generated/uploaded image becomes the i2i reference — but an inspect render-check must
+          // NOT: it would silently hijack an in-progress edit chain so the next Apply edits the
+          // diagnostic screenshot instead of the asset. (F3, 2026-08-06)
+          if (obj.source !== 'inspect' && window.__i2iOnImage) window.__i2iOnImage(obj.url);
         } else if (obj.slot === 'mesh') {
           artMeshEl.src = obj.url;
           artMeshEl.classList.add('loaded');
@@ -3832,7 +4154,10 @@
       // end, which is why the server defers the lock for it (server.js, defersLock). Greying the
       // whole UI out for that whole time would contradict the three places that promise "Phoenix
       // stays usable meanwhile" — and would be a lie about a server that is genuinely free.
-      const NON_BLOCKING_ACTIONS = ['hy_motion'];
+      // i2i_edit joins hy_motion here: it spends ~3–4 min generating in ComfyUI and never touches
+      // Blender, so the server defers the lock for it too — the UI must stay live meanwhile (a tile
+      // arrives via SSE when done), not grey out for the whole edit. (Q3, 2026-08-06)
+      const NON_BLOCKING_ACTIONS = ['hy_motion', 'i2i_edit'];
 
       // How many blocking operations are in flight. A non-blocking action finishing must NOT
       // re-enable the UI while a blocking one is still running — otherwise the buttons light up
@@ -3853,22 +4178,29 @@
           setInputEnabled(false);
         }
         clearGateWaiting();
+        // Any early return here means the run never got queued — the i2i "Editing… ~3–4 min" status
+        // (set in doApply BEFORE this call) would otherwise hang forever, since only a tile or an SSE
+        // error clears it. Clear it on every non-queued exit. (F5, 2026-08-06)
+        const bailI2i = () => { if (action === 'i2i_edit' && window.__i2iClearStatus) window.__i2iClearStatus(); };
         let res;
         try {
           res = await fetch('/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, input }) });
         } catch (err) {
           appendBubble('error', 'Network error: ' + err.message);
+          bailI2i();
           releaseUi(action);
           return;
         }
         if (res.status === 409) {
           appendBubble('busy-note', 'busy… try again in a moment');
+          bailI2i();
           releaseUi(action);
           return;
         }
         if (!res.ok) {
           const b = await res.text();
           appendBubble('error', 'Server error ' + res.status + ': ' + b);
+          bailI2i();
           releaseUi(action);
           return;
         }
@@ -3909,6 +4241,9 @@
         }
 
         if (obj.kind === 'artifact') {
+          // i2i result tiles are additive and belong to the Edit sub-tab's gallery — they must NOT
+          // go through setArtifact (which would hijack the main image slot and switch tabs away).
+          if (obj.slot === 'i2i-tile') { if (window.__i2iAddTile) window.__i2iAddTile(obj); return; }
           setArtifact(obj);
           if (obj.slot === 'mesh') refreshLibrary();
           return;
@@ -3918,6 +4253,10 @@
           appendBubble('phoenix', obj.text);
           if (!obj.background) releaseUi(obj.action);   // background notes (hy_motion) never held the lock
           refreshLibrary();
+          // A reply for i2i_edit means the run resolved WITHOUT a tile — an ERROR: string (bad
+          // reference, etc.) comes back as a reply, not kind:'error'. Clear the "Editing… ~3–4 min"
+          // status so it can't hang forever; the error text is already in the chat. (F5, 2026-08-06)
+          if (obj.action === 'i2i_edit' && window.__i2iClearStatus) window.__i2iClearStatus();
           // Namenskollision beim Brush-Speichern: der Server lehnt ab, statt still zu
           // ueberschreiben. Hier bekommt der Operator die Entscheidung, die der Text
           // vorschlaegt — sonst steht in der UI ein Vorschlag, den die UI nicht ausfuehren kann.
@@ -3954,6 +4293,7 @@
         if (obj.kind === 'error') {
           appendBubble('error', 'Error: ' + obj.message);
           releaseUi(obj.action);
+          if (obj.action === 'i2i_edit' && window.__i2iClearStatus) window.__i2iClearStatus();
           if (window.__phoenixStopGenClock) window.__phoenixStopGenClock();
           return;
         }
@@ -4743,10 +5083,10 @@
           addBtn.addEventListener('click', function () { openWorkflowEditor(null); });
           libWorkflowsBody.appendChild(addBtn);
 
-          for (const stage of ['image', 'mesh']) {
+          for (const stage of ['image', 'mesh', 'i2i']) {
             const hdr = document.createElement('div');
             hdr.className = 'lib-cat';
-            hdr.textContent = stage === 'image' ? 'Image' : '3D / Mesh';
+            hdr.textContent = stage === 'image' ? 'Image' : (stage === 'mesh' ? '3D / Mesh' : 'i2i / Edit');
             libWorkflowsBody.appendChild(hdr);
 
             const ids = Object.keys(workflowsMap).filter(function (id) { return workflowsMap[id].stage === stage; });
@@ -4879,13 +5219,17 @@
           stageControl = document.createElement('input'); stageControl.type = 'text'; stageControl.disabled = true;
         } else {
           stageControl = document.createElement('select');
-          [['image', 'Image'], ['mesh', '3D / Mesh']].forEach(function (o) {
+          [['image', 'Image'], ['mesh', '3D / Mesh'], ['i2i', 'i2i / Edit']].forEach(function (o) {
             const op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; stageControl.appendChild(op);
           });
           stageControl.addEventListener('change', function () { stage = stageControl.value; rebuildNodeMap({}); });
         }
 
-        function slotsFor(s) { return s === 'mesh' ? ['image', 'seed', 'target_face_num', 'output_prefix', 'output'] : ['positive', 'negative', 'cfg', 'steps', 'seed', 'output']; }
+        function slotsFor(s) {
+          if (s === 'mesh') return ['image', 'seed', 'target_face_num', 'output_prefix', 'output'];
+          if (s === 'i2i')  return ['input_image', 'prompt', 'cfg', 'seed', 'output'];
+          return ['positive', 'negative', 'cfg', 'steps', 'seed', 'output'];
+        }
 
         function rebuildNodeMap(prefill) {
           nodeMapContainer.innerHTML = '';
@@ -5022,7 +5366,7 @@
             const d = await r.json();
             if (r.ok) {
               uploadedJson = d.json; stage = d.entry.stage;
-              stageControl.value = stage === 'mesh' ? '3D / Mesh' : 'Image';
+              stageControl.value = stage === 'mesh' ? '3D / Mesh' : (stage === 'i2i' ? 'i2i / Edit' : 'Image');
               nodeChoices = d.nodeChoices || [];
               idInput.value = editId; idInput.disabled = true;
               labelInput.value = d.entry.label || '';

@@ -21,6 +21,7 @@ function loadConfig() {
 
 const { loadPalette } = require('./palette');
 const { getActive, resolveSlot, resolveWorkflowFile } = require('./workflows');
+const i2iEngine = require('./i2i');   // freeOtherInstances — evict an i2i model left resident on the OTHER instance before mesh/image
 
 const _cfg     = loadConfig();
 const _palette = loadPalette();
@@ -79,7 +80,7 @@ const CATEGORY_LABELS = Object.fromEntries(
 
 const randomSeed  = () => Math.floor(Math.random() * 0x7fffffff);
 const slug        = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 28);
-const nowStamp    = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+const nowStamp    = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19); // to the second
 
 async function withProgress(label, fn) {
   const start = Date.now();
@@ -190,6 +191,57 @@ async function comfyCheck() {
     const res = await fetch(`${COMFY_BASE}/queue`, { signal: AbortSignal.timeout(3000) });
     return res.ok;
   } catch { return false; }
+}
+
+// Lazy-Restore (2026-08-05): Das voice-service verdraengt idle ComfyUI-Instanzen,
+// um dem 8,6-GB-TTS-Modell die 10-GB-Karte ZUSAMMENHAENGEND zu geben (sonst
+// scheitert cuMemCreate trotz "genug frei"). Damit der Nutzer danach NICHTS von
+// Hand starten muss, faehrt Phoenix die ComfyUI-Instanz hinter COMFY_BASE hier
+// selbst wieder hoch, wenn sie unten ist. ADDITIV: liest nur den bestehenden
+// Endpoint, aendert keinen Wert; startet die passende Instanz per SSH auf dem Rig
+// (comfy-supervisor.js). Deckt zugleich "ComfyUI ueberlebte keinen Reboot" ab —
+// Phoenix heilt sich beim naechsten Auftrag selbst.
+// OPTIONAL remote-restart config. A user whose ComfyUI is managed by a supervisor on another host
+// (the dev rig) can set these to let Phoenix restart it over SSH when it is down. UNSET by default:
+// a single-machine user has no rig to SSH into, so we must NOT ship a hardcoded host/path — that
+// both leaks the dev's box and sends a normal user's failing generation on a doomed SSH detour.
+const RIG_SSH          = (_cfg.endpoints && _cfg.endpoints.rigSsh)         || null;
+const COMFY_SUPERVISOR = (_cfg.endpoints && _cfg.endpoints.comfySupervisor) || null;
+
+function comfyInstanceFor(base) {
+  // Port -> supervisor instance name (only meaningful for the configured remote supervisor).
+  if (/:8000(\D|$)/.test(base)) return 'trellis';
+  if (/:8188(\D|$)/.test(base)) return 'bild';
+  return null;
+}
+
+async function ensureComfyUp() {
+  if (await comfyCheck()) return;                   // fast path: it's up
+
+  // No remote supervisor configured → this is (or should be treated as) a local ComfyUI. Don't SSH
+  // anywhere; give a clear, actionable message. The generation that follows will fail fast with the
+  // same base in its error, so the user knows exactly what to start.
+  if (!RIG_SSH || !COMFY_SUPERVISOR) {
+    console.log(`  [comfy] ComfyUI not reachable at ${COMFY_BASE} — start ComfyUI (or set endpoints.comfyui to the right port).`);
+    return;
+  }
+
+  const inst = comfyInstanceFor(COMFY_BASE);
+  if (!inst) { console.log(`  [comfy] ${COMFY_BASE} is down and maps to no known supervisor instance — not auto-started.`); return; }
+  console.log(`  [comfy] ${inst} (${COMFY_BASE}) is down — restarting via ${RIG_SSH} (supervisor)…`);
+  try {
+    const { spawnSync } = require('child_process');
+    const r = spawnSync('ssh', ['-o', 'ConnectTimeout=10', RIG_SSH, `node ${COMFY_SUPERVISOR} up ${inst}`],
+      { encoding: 'utf8', timeout: 120000 });
+    const line = ((r.stdout || '') + (r.stderr || '')).trim();
+    if (line) console.log(`  [comfy] ${line.split('\n').pop()}`);
+  } catch (e) { console.log(`  [comfy] auto-start threw: ${e.message}`); }
+  // The server is back up rig-side; an SSH tunnel can lag a moment. Wait for the port before continuing.
+  for (let i = 0; i < 20; i++) {
+    if (await comfyCheck()) { console.log(`  [comfy] ${inst} reachable again.`); return; }
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+  console.log(`  [comfy] ${inst} still not reachable via ${COMFY_BASE} after restart — check the connection to ${RIG_SSH}.`);
 }
 
 async function comfyUploadImage(filePath) {
@@ -427,6 +479,10 @@ async function callClaudeMeta(systemPrompt, user, model) {
 // ─── Stage: Flux image gen ───────────────────────────────────────────────────
 
 async function runFlux(session) {
+  await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
+  // Free an i2i model (Qwen) left resident on the OTHER instance before loading Flux here — same
+  // one-GPU multi-instance OOM as the mesh path. Gated by the same switch, best-effort. (F2, 2026-08-06)
+  if (FREE_COMFY_BEFORE_MESH) { try { await i2iEngine.freeOtherInstances(_cfg, COMFY_BASE); } catch (_) {} }
   const wfEntry = getActive('image', _cfg);
   const n  = wfEntry.nodes;
   const wf = JSON.parse(fs.readFileSync(resolveWorkflowFile(wfEntry), 'utf8'));
@@ -456,7 +512,11 @@ async function runFlux(session) {
 
     const outDir  = path.join(OUTPUT_BASE, session.category);
     fs.mkdirSync(outDir, { recursive: true });
-    const outPath = path.join(outDir, `${slug(session.userPrompt)}_${nowStamp()}_flux.png`);
+    // Second-precision stamp + a short random token: two jobs with the same prompt slug in the same
+    // second (a background batch) otherwise built the SAME filename and one overwrote the other's PNG
+    // before the mesh stage picked it up (fixed 2026-08-02).
+    const rand    = Math.random().toString(36).slice(2, 6);
+    const outPath = path.join(outDir, `${slug(session.userPrompt)}_${nowStamp()}_${rand}_flux.png`);
     fs.writeFileSync(outPath, imgData);
     return outPath;
   });
@@ -465,6 +525,7 @@ async function runFlux(session) {
 // ─── Stage: Trellis 3D gen ────────────────────────────────────────────────────
 
 async function runTrellis(session) {
+  await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
   // Mesh OOMs on 10GB cards when the local metaprompter is still resident (LM Studio JIT
   // keeps it loaded ~1h). Eject it before dispatch — unconditionally, not gated by
   // ejectAfterUse, so the --stage/CLI paths are covered too. lmsUnload is best-effort:
@@ -472,6 +533,10 @@ async function runTrellis(session) {
   if (!/^claude/i.test(GEMMA_MODEL)) lmsUnload(GEMMA_MODEL);
 
   if (FREE_COMFY_BEFORE_MESH) {
+    // First free any OTHER instance: after an i2i edit, Qwen-Image-Edit (~9.8 GB) stays resident on
+    // the Bild instance (:8188) and would OOM the Trellis load on a one-GPU multi-instance box. No-op
+    // with a single instance. Best-effort — a failed free must never block the mesh. (F2, 2026-08-06)
+    try { await i2iEngine.freeOtherInstances(_cfg, COMFY_BASE); } catch (_) {}
     // Same juggle, other direction: on VRAM-poor boxes ComfyUI itself may still hold the
     // heavy image model (Flux) when the mesh model loads — ask it to free first (official
     // /free API, best-effort). Own switch (vram.freeComfyBeforeMesh), NOT the metaprompter's

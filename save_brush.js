@@ -346,9 +346,14 @@ else:
     const start = src.indexOf(marker);
     const nextDef = src.indexOf('\ndef ', start + 1);
     src = src.slice(0, start) + (nextDef >= 0 ? src.slice(nextDef) : '');
-    fs.writeFileSync(PHOENIX_PY, src, 'utf8');
   }
-  fs.appendFileSync(PHOENIX_PY, fnText, 'utf8');
+  src += fnText;
+  // Atomic write: assemble the whole file in memory, then tmp+rename. The old code wrote once to strip
+  // the stale def and appendFileSync'd again — a crash between the two left phoenix_brushes.py with the
+  // brush def gone entirely, and appendFileSync is itself non-atomic (fixed 2026-08-02).
+  const _pyTmpAdd = PHOENIX_PY + '.tmp';
+  fs.writeFileSync(_pyTmpAdd, src, 'utf8');
+  fs.renameSync(_pyTmpAdd, PHOENIX_PY);
   console.log(`  add_${slug}() → phoenix_brushes.py`);
 
   // Step 2b: solid materials → palette lambdas; procedural materials → real material library.

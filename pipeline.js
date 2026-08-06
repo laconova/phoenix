@@ -112,7 +112,10 @@ function spawnPhoenixStage(args, timeoutMs) {
     const child = spawn('node', [PHOENIX_PATH, ...args], { encoding: 'utf8' });
     // args is ['--stage', '<name>', ...] — index 1 is the stage being run.
     _currentChild = child;
-    _currentStage = args[1] || 'unknown';
+    // Normal stages arrive as ['--stage', '<name>', ...]; generate_prop arrives as ['--headless',
+    // <description>, ...] where args[1] is the PROMPT, not a stage — using it made /stop announce
+    // "Stopped the <prompt> stage". Map the headless (prop) form to a real label (fixed 2026-08-02).
+    _currentStage = args[0] === '--headless' ? 'prop' : (args[1] || 'unknown');
     _cancelled    = false;
     _currentPromptId = null;
 
@@ -257,7 +260,10 @@ async function runMeshStage(ctx) {
   if (ctx.cat)   args.push('--cat',   ctx.cat);
   if (ctx.faces) args.push('--faces', String(ctx.faces));
 
-  const res = await spawnPhoenixStage(args, 660000);
+  // The outer wall MUST exceed the inner mesh poll (phoenix.js comfyPoll = 30 min) plus headroom for
+  // one OOM-retry rung — otherwise it kills the child mid-run before the inner timeout can cancel the
+  // ComfyUI job and the retry ladder never fires. 11 min < 30 min was exactly that bug (fixed 2026-08-02).
+  const res = await spawnPhoenixStage(args, 2400000); // 40 min
 
   if (!res.ok) {
     const tail = (res.stderr || res.stdout || '').trim().slice(-500);

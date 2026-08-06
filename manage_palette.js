@@ -68,7 +68,10 @@ if (delName) {
   const m = src.match(lineRe);
   if (m) {
     src = src.slice(0, m.index) + src.slice(m.index + m[0].length);
-    fs.writeFileSync(PHOENIX_PY, src, 'utf8');
+    // Atomic write: tmp+rename so a crash mid-write can't truncate phoenix_brushes.py (fixed 2026-08-02).
+    const _pyTmp = PHOENIX_PY + '.tmp';
+    fs.writeFileSync(_pyTmp, src, 'utf8');
+    fs.renameSync(_pyTmp, PHOENIX_PY);
     console.log(`deleted "${delName}" from palette`);
   } else {
     // 2) saved library material?

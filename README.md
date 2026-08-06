@@ -51,7 +51,7 @@ needed. To customize endpoints/models, edit that file, or pre-create it yourself
 `copy phoenix-config.example.json phoenix-config.json` (Windows) /
 `cp phoenix-config.example.json phoenix-config.json` (macOS/Linux).
 
-On first run, Phoenix seeds its registry with three built‑in ("Verified") workflows — **Flux Klein** and **SD 1.5** (image) and **Trellis2‑GGUF** (mesh). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
+On first run, Phoenix seeds its registry with five built‑in ("Verified") workflows — **Flux Klein** and **SD 1.5** (image), **Trellis2‑GGUF** (mesh), and **Qwen Image Edit** and **SAM3 Isolate** (i2i / edit). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
 
 ## Connect Blender
 
@@ -91,6 +91,7 @@ With the editor open and a project loaded, the Unreal actions light up (a red/ab
 - **Voice & sound** *(new in 1.7.0)* — a baked voice pack speaks a line, plus a sound‑effects tab to generate, audition and edit SFX takes and bake them onto a character. Runs against a **CrispASR** speech server (local or on your GPU box).
 - **Unreal Engine bridge** *(new in 1.7.0)* — place brushes and spawn saved characters into an already‑running Unreal editor, pull Unreal assets back into Blender as glTF, and let the assistant screenshot the viewport to check its own work. See **Connect Unreal** below.
 - **Mesh preview** *(new in 1.7.0)* — inspect a brush's geometry right in the browser (a vendored model‑viewer, no CDN) before it goes anywhere.
+- **Image editing (i2i)** *(new in 1.8.0)* — a branch between the image and the mesh: recolour or restyle a reference with **Qwen‑Image‑Edit**, or isolate a part on white with **SAM3** for a cleaner mesh. Edits arrive as tiles you can refine or send straight to 3D. See **[Edit an image (i2i)](#edit-an-image-i2i)** below.
 
 ### Characters and animation
 
@@ -124,9 +125,20 @@ A **brush** is a reusable asset saved from your Blender scene — one `.blend` l
 
 Phoenix reports how many meshes went into the brush — if that's not what you expected, adjust the selection/collection and save again. Place it later with *"use the campfire brush"*.
 
+### Edit an image (i2i)
+
+The **Edit · i2i** sub‑tab (inside the Image window) is a branch between the image and the mesh: take a generated or loaded reference and either **change how it looks** or **cut a part out**, then send the result to Trellis or refine it further. Two engines, picked from a dropdown:
+
+- **Qwen Image Edit** — appearance, material and style edits (*"make it rusty and weathered"*, *"turn the cloak deep red"*). It does **not** remove structure and does **not** produce a new camera angle, and the shipped Q3 quant has a material ceiling: a full material swap (wood → cast bronze) may come back unchanged or black, while recolour / weathering / surface detail land. Needs the Qwen‑Image‑Edit model set in your ComfyUI (the ~10 GB Q3 gguf plus its VL text encoder and VAE — more than 10 GB of downloads in total).
+- **SAM3 Isolate** — text‑guided isolation (*"the head"*, *"the held item"*): cuts the named part out onto a white background, ready to mesh. Needs the ComfyUI‑RMBG suite with `sam3.pt`.
+
+Each edit is a **new tile** — the reference is never overwritten. A tile can become the new reference (**Refine**) or go straight to **→ 3D**.
+
+Both engines are heavy and share your GPU, so Phoenix runs one heavy job at a time. If Qwen‑Image‑Edit and Trellis live in **separate ComfyUI instances** (they often need incompatible CUDA/Python), set the optional `endpoints.comfyui_bild` to the second one; otherwise everything runs on your single `endpoints.comfyui`.
+
 ### Add your own workflow
 
-Workflows tab → **+ Add workflow** → pick the stage (image / mesh) → upload a ComfyUI workflow exported as **"Save (API Format)"** → **Analyze with Phoenix**. Phoenix proposes the node‑map (which node receives the prompt, seed, steps, output, …) and the required custom nodes / models from the graph. Review the dropdowns, give it a name, and save. Only `positive` + `output` (image) / `image` + `output` (mesh) are required; anything you don't map keeps the workflow's own built‑in value.
+Workflows tab → **+ Add workflow** → pick the stage (image / mesh / i2i) → upload a ComfyUI workflow exported as **"Save (API Format)"** → **Analyze with Phoenix**. Phoenix proposes the node‑map (which node receives the prompt, seed, steps, output, …) and the required custom nodes / models from the graph. Review the dropdowns, give it a name, and save. Only `positive` + `output` (image) / `image` + `output` (mesh) / `input_image` + `output` (i2i) are required; anything you don't map keeps the workflow's own built‑in value.
 
 ### Bundled scripts
 
@@ -163,7 +175,10 @@ fresh as the last import or explicit refresh.
 Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on first run (or copy it yourself — `copy` on Windows, `cp` on macOS/Linux). Key fields:
 
 - **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`, `vision`).
-- **`endpoints`** — ComfyUI + local‑model URLs.
+- **`endpoints`** — ComfyUI + local‑model URLs. `comfyui` runs your image, mesh **and** i2i/edit
+  workflows; optional **`comfyui_bild`** is a *second* ComfyUI instance for i2i workflows tagged
+  `instance:'bild'` — only needed if you run Qwen‑Image‑Edit and Trellis in separate environments
+  (see *Edit an image (i2i)*). Leave it out and everything runs on the one `comfyui`.
 - **`hyMotion`** — text→motion: `api` (a ComfyUI with the HY‑Motion nodes installed — the same one as
   `endpoints.comfyui` is fine) and `template` (the T‑pose FBX it retargets against). See *Text → motion* above.
 - **`voice`** — the Voice/SFX tabs: `api` (a CrispASR speech server — local or on your GPU box, e.g.

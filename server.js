@@ -18,6 +18,7 @@ const sfx       = require('./sfx');
 const unrealIpc = require('./unreal-ipc');
 const pipeline  = require('./pipeline');
 const jobs      = require('./jobs');
+const i2iEngine = require('./i2i');   // baseForInstance — so the deps check hits each workflow's own instance
 
 // ─── Working dir (used for /file security checks) ─────────────────────────────
 
@@ -447,6 +448,14 @@ async function handler(req, res) {
       return;
     }
 
+    // A chat turn can trigger a heavy generation (image/mesh/text→motion). A deferred edit
+    // (i2i / hy_motion) in flight holds no lock, so without this the turn would run and its
+    // generation's pre-run VRAM free (freeOtherInstances) would evict the running edit's model.
+    // Block chat for the edit's duration — the /action tab actions stay usable. (Q3 follow-up, 2026-08-06)
+    if (deferredInFlight) {
+      sendJSON(res, 409, { error: 'a background generation (i2i edit / text→motion) is running — chat is blocked until it finishes' });
+      return;
+    }
     if (!lock.tryAcquire()) {
       sendJSON(res, 409, { error: 'busy' });
       return;
@@ -470,7 +479,9 @@ async function handler(req, res) {
           onArtifact: (art) => {
             try {
               if (!art || !art.rel) return;
-              broadcast({ kind: 'artifact', slot: art.slot || 'image',
+              // Forward `source` so the UI can tell an inspect/gate render from a real image and
+              // NOT adopt it as the i2i edit reference (F3). Undefined source serializes away.
+              broadcast({ kind: 'artifact', slot: art.slot || 'image', source: art.source,
                 url: '/file?p=' + encodeURIComponent(art.rel) + '&t=' + Date.now() });
             } catch (_) { /* a broadcast must never break the turn */ }
           },
@@ -518,7 +529,7 @@ async function handler(req, res) {
 
     const { action, input } = body || {};
 
-    const ALLOWED = ['generate_image', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
+    const ALLOWED = ['generate_image', 'i2i_edit', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
       'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render',
       // Registering a tool in assistant.js is NOT enough — the UI posts through here, and this
       // list is a second, independent gate. Missing it produced "unknown action" 400s on every
@@ -530,26 +541,39 @@ async function handler(req, res) {
       return;
     }
 
-    // hy_motion spends most of its ~4 minutes generating in ComfyUI and does not touch
-    // Blender until it applies the result. Holding the lock for all of it would freeze
-    // Phoenix for the whole wait, so this action takes the lock late, itself, and only
-    // for the Blender part (see toolHyMotion in assistant.js).
-    const defersLock = action === 'hy_motion';
-    if (!defersLock && !lock.tryAcquire()) {
-      sendJSON(res, 409, { error: 'busy' });
-      return;
-    }
-    // ...but "does not hold the lock" must not mean "may run twice". Because it takes no lock
-    // and does not go through the single-slot job registry, nothing else stops a second click
-    // during the four-minute wait from starting a second GPU generation. The UI used to prevent
-    // that only by accident, by greying itself out — and that accident disappeared the moment the
-    // UI stopped lying about staying usable. So the guard lives here, where it belongs.
+    // hy_motion and i2i_edit each spend ~3–4 minutes generating in ComfyUI and do NOT hold the
+    // Blender lock for that wait — holding it would freeze Phoenix the whole time (hy_motion takes
+    // the lock late for its Blender-apply; i2i never touches Blender at all). So they "defer" the
+    // lock and instead guard a single-slot flag. (i2i joined this path 2026-08-06 — Q3.)
+    const defersLock = (action === 'hy_motion' || action === 'i2i_edit');
+    // The heavy LOCK-BASED generations. They call freeOtherInstances() before running, which would
+    // evict a deferred edit's model mid-flight — so they and the deferred ops must be mutually
+    // exclusive on the single GPU. Light Blender actions (rename, material, blender_run) are NOT
+    // here: they stay usable during a deferred edit, which is the whole point of deferring.
+    const heavyLockBased = (action === 'generate_image' || action === 'image_to_3d');
+
     if (defersLock) {
-      if (deferredInFlight) {
-        sendJSON(res, 409, { error: 'a text→motion generation is already running — it takes about four minutes' });
+      // Refuse if ANY heavy job holds the GPU: another deferred generation (deferredInFlight); a
+      // DETACHED background image/mesh job (jobs.isRunning() — these release the Blender lock seconds
+      // after the click but keep generating for minutes, so lock.isHeld() alone misses them); or a
+      // lock-based action currently holding the lock. "Does not hold the lock" must never mean
+      // "may run twice" — one heavy GPU job at a time.
+      if (deferredInFlight || jobs.isRunning() || lock.isHeld()) {
+        sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' });
         return;
       }
       deferredInFlight = true;
+    } else {
+      // A heavy lock-based generation must not start while a deferred edit (i2i / text→motion) holds
+      // the GPU — its pre-run VRAM free would kill the running edit. Light actions skip this and stay live.
+      if (heavyLockBased && deferredInFlight) {
+        sendJSON(res, 409, { error: 'a background generation (i2i edit / text→motion) is using the GPU — try again when it finishes' });
+        return;
+      }
+      if (!lock.tryAcquire()) {
+        sendJSON(res, 409, { error: 'busy' });
+        return;
+      }
     }
 
     cfg = a.loadConfig();
@@ -581,7 +605,7 @@ async function handler(req, res) {
             const rcAbs = path.join(workingDir, 'output', 'render-check.png');
             const st = fs.statSync(rcAbs);
             if (st.mtimeMs >= t0 - 1000) {
-              broadcast({ kind: 'artifact', slot: 'image', url: '/file?p=' + encodeURIComponent('output/render-check.png') + '&t=' + Date.now() });
+              broadcast({ kind: 'artifact', slot: 'image', source: 'inspect', url: '/file?p=' + encodeURIComponent('output/render-check.png') + '&t=' + Date.now() });
             }
           } catch (_) { /* no render file — skip */ }
         }
@@ -594,7 +618,7 @@ async function handler(req, res) {
             const uAbs = path.join(workingDir, 'output', 'unreal-check.png');
             const st = fs.statSync(uAbs);
             if (st.mtimeMs >= t0 - 1000) {
-              broadcast({ kind: 'artifact', slot: 'image', url: '/file?p=' + encodeURIComponent('output/unreal-check.png') + '&t=' + Date.now() });
+              broadcast({ kind: 'artifact', slot: 'image', source: 'inspect', url: '/file?p=' + encodeURIComponent('output/unreal-check.png') + '&t=' + Date.now() });
             }
           } catch (_) { /* vision off, or nothing written — skip */ }
         }
@@ -607,10 +631,26 @@ async function handler(req, res) {
             broadcast({ kind: 'artifact', slot: 'mesh', url: '/file?p=' + encodeURIComponent(m[1]) + '&t=' + Date.now(), source: 'library' });
           }
         }
+        // i2i_edit returns a NEW tile image (never mutates the reference). The tool marks its output
+        // with `I2I_TILE <abs-path>\t<meta-json>`; parse it, broadcast the tile to the Edit tab's
+        // gallery (its OWN slot, not the main image slot — the reference must stay put), and strip the
+        // marker from the chat reply so the raw path never shows up in the conversation.
+        let replyText = typeof result === 'string' ? result : JSON.stringify(result);
+        if (action === 'i2i_edit' && typeof result === 'string') {
+          const m = result.match(/^I2I_TILE\s+(.+?)\t(.+?)(?:\n([\s\S]*))?$/);
+          if (m) {
+            let meta = {};
+            try { meta = JSON.parse(m[2]); } catch (_) { /* meta is best-effort */ }
+            const rel = path.relative(workingDir, m[1]).split(path.sep).join('/');
+            broadcast({ kind: 'artifact', slot: 'i2i-tile',
+              url: '/file?p=' + encodeURIComponent(rel) + '&t=' + Date.now(), meta });
+            replyText = (m[3] || '').trim() || ('i2i edit done (' + (meta.workflowId || 'edit') + ').');
+          }
+        }
         // The action name travels with the reply so the UI can react to WHAT finished instead of
         // sniffing the reply text. Text sniffing misfires on chat turns that happen to echo the
         // same wording, and it silently rots the moment a message is reworded.
-        broadcast({ kind: 'reply', action, text: typeof result === 'string' ? result : JSON.stringify(result) });
+        broadcast({ kind: 'reply', action, text: replyText });
       } catch (err) {
         broadcast({ kind: 'error', action, message: String(err.message || err) });
       } finally {
@@ -1154,6 +1194,12 @@ async function handler(req, res) {
 
     function validateClaudeModel(model) {
       return new Promise(resolve => {
+        // Guard: `model` is interpolated into a shell command line on Windows (shell:true below — needed
+        // to launch the `claude` .cmd shim). Reject anything outside the character set real model ids use,
+        // or a crafted model string becomes a command-injection vector (fixed 2026-08-02).
+        if (typeof model !== 'string' || !/^[A-Za-z0-9._:\/\[\]-]+$/.test(model)) {
+          return resolve({ ok: false, msg: 'invalid model name' });
+        }
         const { spawn } = require('child_process');
         let done = false;
         const finish = (ok, msg) => { if (!done) { done = true; resolve({ ok, msg }); } };
@@ -1559,6 +1605,7 @@ async function handler(req, res) {
     const active = {
       image: (cfg2.workflows && cfg2.workflows.image) || workflows.DEFAULT_ACTIVE.image,
       mesh:  (cfg2.workflows && cfg2.workflows.mesh)  || workflows.DEFAULT_ACTIVE.mesh,
+      i2i:   (cfg2.workflows && cfg2.workflows.i2i)   || workflows.DEFAULT_ACTIVE.i2i,
     };
     sendJSON(res, 200, { workflows: reg.workflows, active });
     return;
@@ -1580,8 +1627,8 @@ async function handler(req, res) {
 
     const { stage, id } = body || {};
 
-    if (stage !== 'image' && stage !== 'mesh') {
-      sendJSON(res, 400, { error: 'stage must be "image" or "mesh"', field: 'stage' });
+    if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i') {
+      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
       return;
     }
 
@@ -1618,6 +1665,7 @@ async function handler(req, res) {
     const REQUIRED = {
       image: ['positive', 'output'],
       mesh:  ['image', 'output'],
+      i2i:   ['input_image', 'output'],
     };
     for (const key of REQUIRED[stage]) {
       if (!entry.nodes || !entry.nodes[key]) {
@@ -1640,25 +1688,38 @@ async function handler(req, res) {
   // unreachable so the UI can render a graceful "offline" badge.
   if (method === 'GET' && urlPath === '/workflows/deps') {
     const localCfg = a.loadConfig();
-    const base = (localCfg.endpoints && localCfg.endpoints.comfyui) || 'http://localhost:8188';
-    let info;
-    try {
-      const r = await fetch(base + '/object_info', { signal: AbortSignal.timeout(8000) });
-      if (!r.ok) {
-        sendJSON(res, 200, { reachable: false, error: 'ComfyUI HTTP ' + r.status, base });
-        return;
-      }
-      info = await r.json();
-    } catch (e) {
-      sendJSON(res, 200, { reachable: false, error: (e && e.message) || String(e), base });
-      return;
-    }
+    const primaryBase = (localCfg.endpoints && localCfg.endpoints.comfyui) || 'http://localhost:8188';
     const reg  = workflows.loadRegistry();
-    const deps = {};
-    for (const [id, entry] of Object.entries(reg.workflows)) {
-      deps[id] = workflows.checkDeps(entry, info);
+
+    // Instance-aware: a workflow's deps must be checked against the ComfyUI it actually runs on.
+    // With several instances (Trellis on one port, Qwen-Image-Edit on another — a normal multi-env
+    // setup) checking everything against one port falsely reports the other instance's nodes as
+    // missing. baseForInstance maps each entry to its base (image/mesh have no `instance` → primary).
+    const infoCache = {};   // base -> { info } | { error }
+    async function infoFor(b) {
+      if (infoCache[b] !== undefined) return infoCache[b];
+      try {
+        const r = await fetch(b + '/object_info', { signal: AbortSignal.timeout(8000) });
+        infoCache[b] = r.ok ? { info: await r.json() } : { error: 'HTTP ' + r.status };
+      } catch (e) { infoCache[b] = { error: (e && e.message) || String(e) }; }
+      return infoCache[b];
     }
-    sendJSON(res, 200, { reachable: true, base, deps });
+
+    const deps = {};
+    let anyReachable = false;
+    for (const [id, entry] of Object.entries(reg.workflows)) {
+      const b = i2iEngine.baseForInstance(localCfg, entry.instance);
+      const got = await infoFor(b);
+      if (got.info) {
+        anyReachable = true;
+        deps[id] = workflows.checkDeps(entry, got.info);
+      } else {
+        // Instance offline: not "missing deps" but unreachable — say so in the node slot so the
+        // library renders a meaningful reason rather than a bare "missing deps".
+        deps[id] = { missing_nodes: ['ComfyUI ' + b + ' offline'], missing_models: [], ready: false };
+      }
+    }
+    sendJSON(res, 200, { reachable: anyReachable, base: primaryBase, deps });
     return;
   }
 
@@ -1687,8 +1748,8 @@ async function handler(req, res) {
     }
 
     const { stage } = body || {};
-    if (stage !== 'image' && stage !== 'mesh') {
-      sendJSON(res, 400, { error: 'stage must be "image" or "mesh"', field: 'stage' });
+    if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i') {
+      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
       return;
     }
 
@@ -1726,8 +1787,8 @@ async function handler(req, res) {
     }
 
     const { stage: custStage, id: custId } = body || {};
-    if (custStage !== 'image' && custStage !== 'mesh') {
-      sendJSON(res, 400, { error: 'stage must be "image" or "mesh"', field: 'stage' });
+    if (custStage !== 'image' && custStage !== 'mesh' && custStage !== 'i2i') {
+      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
       return;
     }
     if (!custId || typeof custId !== 'string') {

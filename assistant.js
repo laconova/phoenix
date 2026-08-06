@@ -1,7 +1,7 @@
 'use strict';
 
 const readline = require('readline');
-const { spawnSync, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const { spawnNode } = require('./spawn-node');   // async spawn so a ~2-3 min brush child never freezes the loop
 const fs   = require('fs');
 const path = require('path');
@@ -27,6 +27,7 @@ const lock = require('./lock');
 const palette = require('./palette');
 const wf = require('./workflows');
 const workflows = require('./workflows');
+const i2iEngine = require('./i2i');
 const { makeHuman, placeHuman } = require('./make_human');
 const { animateHuman, sequenceAnimations, saveAnimation } = require('./animate_human');
 const { generateMotion } = require('./hy_motion');
@@ -131,7 +132,7 @@ TOOLS:
 - character_to_unreal carries a RIGGED character from the Human tab into Unreal as SkeletalMeshes with their skeleton — the counterpart to brush_to_unreal, which cannot do this because a brush is meshes only. INPUT: {"rig": "Human.rig" (optional — omitted takes the first mixamorig armature in the scene), "name": "my_char" (optional), "unreal_path": "/Game/PhoenixCharacters" (optional), "with_animation": true (optional)}. Two things worth relaying: characters built in the Human tab are HIDDEN (staged) and are unhidden for the export and re-hidden afterwards; and every import creates its OWN skeleton asset, so several characters imported this way do not share an animation library until their skeletons are merged. For animation work FBX is the right carrier, not glTF — with_animation is preview-grade.
 - brush_to_unreal carries a brush from the library into Unreal as a placed ACTOR TREE (hierarchy and relative transforms intact), not loose meshes. Blender is used only the first time per brush; afterwards a cached GLB is imported directly, so this works with Blender closed. INPUT: {"name": "slug", "unreal_path": "/Game/PhoenixBrushes" (optional), "refresh": true (optional — rebuild the cached GLB), "keep_in_blender": true (optional)}. By default the brush is removed from the Blender scene again AFTER the export is verified — never before, so a failed export cannot cost the placed objects. Reports how many parameters each imported material carries; a material with 0 renders black and the call fails rather than shipping it.
 - inspect_unreal   renders the Unreal level AND LOOKS AT IT — returns a description written by a vision model that actually saw the image, not a file path. INPUT: {"focus": "ActorLabel" (optional — frames that actor and its children automatically), "question": "what to check" (optional), "mode": "camera" (default) | "viewport", "width": 1280, "height": 720}. The camera route works no matter which window is in focus but carries NO post-processing, so emissive materials do not glow in it — judge placement/material/breakage from it, not final looks. "viewport" is the real editor view including bloom and FAILS with a clear error unless the Unreal window is in the foreground. If this tool returns an error, or if Unreal vision is switched off, you have NOT seen the level: say so plainly and never describe its contents from memory or inference.
-- read_state      reads session state: sceneObjects (what was in the Blender scene at the last sync — refreshed by imports, by an explicit refresh, and by the optional scene-sync poller if it is running; treat it as possibly stale and verify with blender_run when it matters), stagedFiles (GLB FILES on disk in staging/, ready to import), lastTask, sceneUpdatedAt. INPUT: {}
+- read_state      reads session state: sceneObjects (what was in the Blender scene at the last sync — refreshed by imports, by an explicit refresh, and by the optional scene-sync poller if it is running; treat it as possibly stale and verify with blender_run when it matters), stagedFiles (GLB FILES on disk in staging/, ready to import), lastCompletedTask (historical — the last generation that finished this session; context only, NEVER a command to re-run), sceneUpdatedAt. INPUT: {}
 - list_assets     lists staged GLB FILES on disk (in staging/). These are assets ready to import — they are NOT necessarily in the Blender scene. INPUT: {}
 - read_palette    returns the current style palette (each category's style text + params). Use ONLY when the user asks you to help draft or choose a category. INPUT: {}
 - list_materials   lists the shared MATERIAL palette (reusable materials that brushes share) — NOT the style palette above. INPUT: {}
@@ -248,7 +249,7 @@ function saveHistory(history) {
 
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
-  catch { return { staged: [], lastTask: null, currentScene: 'untitled' }; }
+  catch { return { staged: [], lastCompletedTask: null, currentScene: 'untitled' }; }
 }
 
 function saveState(state) {
@@ -409,7 +410,7 @@ async function toolReadState(_input, state, _cfg) {
     sceneObjects:   scene.sceneObjects,   // Blender scene contents as of the last sync (see read_state)
     sceneUpdatedAt: scene.sceneUpdatedAt, // when the scene cache was last refreshed (null = never / poller off)
     stagedFiles:    listStagedFiles().map(a => `${a.category}/${a.name}`), // GLB files on disk, ready to import
-    lastTask:       state.lastTask,
+    lastCompletedTask: state.lastCompletedTask, // historical: the last generation that FINISHED this session — context only, NEVER a command to re-run
   }, null, 2);
 }
 
@@ -668,6 +669,15 @@ async function toolImportAsset(input, state, cfg) {
 async function toolGenerateProp(input, state, cfg) {
   const { description, category } = input;
   if (!description) return 'ERROR: description required';
+  // One heavy GPU job at a time. generate_prop spawns the FULL headless pipeline (Flux + Trellis) as
+  // a child that never registers in the jobs slot, so without this a chat prop could start while a
+  // detached image/mesh/text→motion job is still generating on the one shared GPU → the measured OOM
+  // (the prop's runFlux even frees the other instance first). The /chat door already blocks the
+  // deferredInFlight case; this covers the detached-job case it doesn't. (Q3 follow-up, 2026-08-06)
+  if (jobs.isRunning()) {
+    const j = jobs.info();
+    return `BUSY: a generation job is already running (#${j ? j.id : '?'}${j && j.label ? ': ' + j.label : ''}). Only one heavy GPU job runs at a time — wait for it to finish, then ask for the prop again.`;
+  }
   // One-shot bypasses the approval gates by construction (spawns --headless) — a gate the
   // orchestrator can route around is no gate, so hard-reject and steer to the staged path.
   const _g = (cfg && cfg.gates) || {};
@@ -675,7 +685,6 @@ async function toolGenerateProp(input, state, cfg) {
     return 'REJECTED: approval gates are enabled in Settings, and generate_prop would skip them. Call generate_image instead — the pipeline pauses at each enabled gate.';
   }
   const cat = category || 'item';
-  state.lastTask = `generate_prop: ${description}`;
 
   dbg.event('progress', { label: 'generate_prop', description, category: cat });
 
@@ -683,7 +692,10 @@ async function toolGenerateProp(input, state, cfg) {
   // registers the child so POST /stop can reach it, captures PHX_COMFY_PROMPT, and on timeout
   // cancels the ComfyUI job on the rig. A bare spawn here (the old code) left the GPU computing for
   // up to 20 min on a killed prop and made /stop report "nothing running".
-  const res = await pipeline.spawnPhoenixStage(['--headless', description, '--cat', cat], 900000);
+  // 45 min: this one process runs the FULL pipeline (image poll ≤10 min + mesh poll ≤30 min, both in
+  // phoenix.js). The old 15 min killed it before the mesh could finish — same class as the mesh-stage
+  // timeout mismatch (fixed 2026-08-02). Outer wall > sum of the inner polls it wraps.
+  const res = await pipeline.spawnPhoenixStage(['--headless', description, '--cat', cat], 2700000);
 
   if (!res.ok) {
     const tail = (res.stderr || res.stdout || '').trim().slice(0, 500);
@@ -691,6 +703,10 @@ async function toolGenerateProp(input, state, cfg) {
     return `Pipeline failed (${how}):\n${tail}`;
   }
 
+  // Record only on SUCCESS. This used to be set at the top of the function, so a FAILED prop still
+  // looked "completed" in read_state — exactly what let the orchestrator re-run a dead task. Structured
+  // + timestamped so it reads as history, not as a command (fixed 2026-08-02).
+  state.lastCompletedTask = { tool: 'generate_prop', description, at: new Date().toISOString() };
   const m = res.stdout.match(/RESULT_GLB:\s*(.+)/);
   if (m) {
     const glbPath = m[1].trim();
@@ -727,7 +743,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
     // Remember for the approve / regenerate round-trip
     state.lastImageDesc     = description;
     state.lastImageCategory = pr.category || category || null;
-    state.lastTask          = 'generate_prompt: ' + description;
+    state.lastCompletedTask = { tool: 'generate_prompt', description, at: new Date().toISOString() };
 
     const adv = await pipeline.advance(pctx, cfg); // gates.prompt===true → stops awaiting 'prompt'
     return describeAdvance(adv);
@@ -779,7 +795,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
       state.lastImage         = r.artifact;
       state.lastImageCategory = r.category || category || null;
       state.lastImageDesc     = description;
-      state.lastTask          = 'generate_image: ' + description;
+      state.lastCompletedTask = { tool: 'generate_image', description, at: new Date().toISOString() };
 
       // Mesh-locked cfg: background job must never auto-import (no Blender IPC during detached run)
       const bgCfg = Object.assign({}, cfg, { gates: Object.assign({}, cfg.gates, { mesh: true }) });
@@ -829,7 +845,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
   state.lastImage         = r.artifact;
   state.lastImageCategory = r.category || category || null;
   state.lastImageDesc     = description;
-  state.lastTask          = 'generate_image: ' + description;
+  state.lastCompletedTask = { tool: 'generate_image', description, at: new Date().toISOString() };
 
   // Advance — checks gates.image; auto-runs mesh→import if gate is off
   const adv = await pipeline.advance(ctx, cfg);
@@ -1126,22 +1142,21 @@ async function toolDeleteBrush(input) {
 }
 
 async function toolListPalette() {
-  const r = spawnSync('node', [path.join(__dirname, 'manage_palette.js'), '--list'], {
-    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 15000,
-  });
-  if (r.error)        return `ERROR: ${r.error.message}`;
-  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  // spawnNode (async), not spawnSync: this runs in the single-threaded server and a sync child would
+  // freeze the event loop (SSE / status / stop) for the duration of manage_palette.js (fixed 2026-08-02).
+  const r = await spawnNode(path.join(__dirname, 'manage_palette.js'), ['--list'], { maxBuffer: 1024 * 1024, timeoutMs: 15000 });
+  if (r.error)      return `ERROR: ${r.error.message}`;
+  if (r.code !== 0) return `ERROR (exit ${r.code}): ${(r.stderr || r.stdout || '').trim()}`;
   return (r.stdout || '').trim() || '(palette empty)';
 }
 
 async function toolDeleteMaterial(input) {
   const name = input && input.name;
   if (!name) return 'ERROR: name required';
-  const r = spawnSync('node', [path.join(__dirname, 'manage_palette.js'), '--delete', name], {
-    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 15000,
-  });
-  if (r.error)        return `ERROR: ${r.error.message}`;
-  if (r.status !== 0) return `ERROR (exit ${r.status}): ${(r.stderr || r.stdout || '').trim()}`;
+  // spawnNode (async), not spawnSync — same event-loop reason as toolListPalette (fixed 2026-08-02).
+  const r = await spawnNode(path.join(__dirname, 'manage_palette.js'), ['--delete', name], { maxBuffer: 1024 * 1024, timeoutMs: 15000 });
+  if (r.error)      return `ERROR: ${r.error.message}`;
+  if (r.code !== 0) return `ERROR (exit ${r.code}): ${(r.stderr || r.stdout || '').trim()}`;
   return (r.stdout || '').trim() || `deleted ${name}`;
 }
 
@@ -1296,8 +1311,42 @@ async function toolInspectRender(input, _state, cfg) {
   }
 }
 
+// ── i2i / Edit-Tab (v1.8) ─────────────────────────────────────────────────────
+// Run one image-to-image edit through the i2i engine (Qwen-Image-Edit on the Bild instance for
+// appearance/material/style; SAM3 on the Trellis instance for isolation). Single-shot: takes a
+// reference image + an instruction, returns a NEW tile image — never mutates the reference. The
+// server's /action handler parses the I2I_TILE marker and broadcasts the tile to the Edit tab.
+async function toolI2iEdit(input, state, cfg, opts = {}) {
+  const ref = input.image || state.lastImage;
+  if (!ref) return 'ERROR: no reference image for i2i. Generate an image first with generate_image.';
+  const abs = path.isAbsolute(ref) ? ref : path.join(__dirname, ref);
+  if (!fs.existsSync(abs)) return 'ERROR: i2i reference image not found: ' + ref;
+
+  const prompt = (typeof input.prompt === 'string') ? input.prompt.trim() : '';
+  const wfId   = input.workflowId || undefined;   // default = active i2i workflow (qwen_edit)
+  // cfg guidance is only meaningful for the edit engine; a segmenter ignores it.
+  const guidance = (input.cfg != null && Number.isFinite(Number(input.cfg))) ? Number(input.cfg) : undefined;
+  const seed = (input.seed != null && Number.isFinite(Number(input.seed))) ? Number(input.seed) : undefined;
+
+  dbg.event('progress', { label: 'i2i_edit', ref: path.basename(abs), workflow: wfId || 'active', cfg: guidance });
+
+  const r = await i2iEngine.runI2I(cfg, {
+    inputImagePath: abs,
+    prompt,
+    workflowId: wfId,
+    cfg: guidance,
+    seed,
+    onTick: (s) => { if (s % 15 === 0) dbg.event('progress', { label: 'i2i_edit', seconds: s }); },
+  });
+
+  // Marker line (parsed by server.js /action) + a human-readable tail. Tab-separated: path then meta JSON.
+  const meta = JSON.stringify({ seed: r.seed, workflowId: r.workflowId, seconds: r.seconds, instance: r.instance, prompt });
+  return `I2I_TILE ${r.outPath}\t${meta}\ni2i edit done in ${r.seconds}s (${r.workflowId}, seed ${r.seed}).`;
+}
+
 const TOOLS = {
   generate_image: toolGenerateImage,
+  i2i_edit:       toolI2iEdit,
   make_human:     toolMakeHuman,
   place_human:    toolPlaceHuman,
   animate_human:  toolAnimateHuman,
@@ -1562,7 +1611,14 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     dbg.tool(toolCall.name, 'call', toolCall.input);
     let toolResult;
     const fn = TOOLS[toolCall.name];
-    if (allowedTools && !allowedTools.includes(toolCall.name)) {
+    if (toolCall.name === 'i2i_edit') {
+      // i2i editing is a UI-tab action (Edit · i2i), decided UI-only (Q2, 2026-08-06). From a chat
+      // turn it would run 3–4 min holding the /chat lock (freezing the app), and its I2I_TILE marker
+      // is only parsed on the /action path — so the tile would never appear and the raw path would
+      // leak into the conversation. Refuse cleanly and point at the tab. (It is also not advertised
+      // in the system prompt, so the model should not reach here; this is the belt to that suspenders.)
+      toolResult = 'ERROR: image editing runs in the "Edit · i2i" tab, not from chat. Tell the user to open that tab, pick a reference image, and apply the edit there.';
+    } else if (allowedTools && !allowedTools.includes(toolCall.name)) {
       toolResult = `ERROR: tool "${toolCall.name}" is disabled in Blender-only mode. Model the asset directly with blender_run (bpy) instead — do not use generation tools.`;
     } else if (!fn) {
       toolResult = `ERROR: unknown tool "${toolCall.name}"`;
@@ -1593,7 +1649,9 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
       if (typeof opts.onArtifact !== 'function') return;
       try {
         if (fs.statSync(renderCheckAbs).mtimeMs >= since - 1000) {
-          opts.onArtifact({ slot: 'image', rel: RENDER_CHECK_REL });
+          // source:'inspect' — a diagnostic render must NOT become the i2i edit reference (F3). Covers
+          // the automatic vision gate too, which shows its render through this same helper.
+          opts.onArtifact({ slot: 'image', source: 'inspect', rel: RENDER_CHECK_REL });
         }
       } catch (_) { /* keine Datei = nichts zu zeigen */ }
     };
@@ -1636,7 +1694,7 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
       if (typeof opts.onArtifact === 'function') {
         try {
           if (fs.statSync(path.join(__dirname, UNREAL_CHECK_REL)).mtimeMs >= toolStart - 1000) {
-            opts.onArtifact({ slot: 'image', rel: UNREAL_CHECK_REL });
+            opts.onArtifact({ slot: 'image', source: 'inspect', rel: UNREAL_CHECK_REL });   // not an i2i reference (F3)
           }
         } catch (_) { /* vision off or nothing written — nothing to show */ }
       }
@@ -2273,6 +2331,13 @@ Stage "mesh" slots:
 - output_prefix   -> the filename/prefix field (optional)
 - output          -> the mesh export/output node
 
+Stage "i2i" slots (image-to-image edit / isolation):
+- input_image -> node+field that receives the REFERENCE image (usually a LoadImage 'image')
+- prompt      -> node+field holding the edit instruction / the thing to isolate (e.g. a text-encode 'prompt', or a segmenter's text field)
+- cfg         -> the sampler's CFG/guidance field, if the workflow has one (a pure segmenter has none — omit it)
+- seed        -> the seed field, if any (omit for a deterministic segmenter)
+- output      -> the image OUTPUT node (e.g. SaveImage)
+
 Output ONLY one JSON object, no prose, no markdown:
 {"nodes": {"<slot>": "<nodeId>" OR {"node":"<nodeId>","field":"<fieldName>"}}, "deps": {"custom_nodes": [], "models": []}, "label": "<short label>"}
 
@@ -2315,10 +2380,9 @@ Output ONLY the JSON object.`;
     }
   }
 
-  // 9. Clamp to stage contract
-  const ALLOWED = stage === 'mesh'
-    ? ['image', 'seed', 'target_face_num', 'output_prefix', 'output']
-    : ['positive', 'negative', 'cfg', 'steps', 'seed', 'output'];
+  // 9. Clamp to stage contract — the allowed slots ARE the DEFAULT_FIELDS keys for the stage,
+  // so a new stage (i2i) is covered the moment it is declared there, with no second list to sync.
+  const ALLOWED = Object.keys(workflows.DEFAULT_FIELDS[stage] || {});
 
   const nodes = {};
   for (const slot of ALLOWED) {

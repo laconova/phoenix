@@ -1,0 +1,28 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "example.png" }
+  },
+  "2": {
+    "class_type": "SAM3Segment",
+    "inputs": {
+      "image": ["1", 0],
+      "prompt": "subject",
+      "output_mode": "Merged",
+      "confidence_threshold": 0.5,
+      "max_segments": 0,
+      "segment_pick": 0,
+      "mask_blur": 0,
+      "mask_offset": 0,
+      "device": "Auto",
+      "invert_output": false,
+      "unload_model": true,
+      "background": "Color",
+      "background_color": "#FFFFFF"
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["2", 0], "filename_prefix": "phoenix_i2i_sam3" }
+  }
+}

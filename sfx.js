@@ -26,6 +26,7 @@
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const { execFile } = require('child_process');
 const soundFx = require('./sound-fx');
 const voice = require('./voice');
@@ -83,11 +84,11 @@ function rehydrate() {
 // sources differ (VO 24 kHz, SFX 48 kHz, a loaded clip anything), so guessing the
 // sample rate would quietly misreport every duration in the UI.
 function wavInfo(file) {
+  let fd = null;
   try {
-    const fd = fs.openSync(file, 'r');
+    fd = fs.openSync(file, 'r');
     const head = Buffer.alloc(44);
     const n = fs.readSync(fd, head, 0, 44, 0);
-    fs.closeSync(fd);
     if (n < 44 || head.toString('ascii', 0, 4) !== 'RIFF' || head.toString('ascii', 8, 12) !== 'WAVE') {
       return { ok: false };
     }
@@ -101,6 +102,9 @@ function wavInfo(file) {
       seconds: byteRate ? Math.round((bytes - 44) / byteRate * 100) / 100 : null,
     };
   } catch (_) { return { ok: false }; }
+  // The fd used to be closed mid-try; if readSync threw, closeSync was skipped and the descriptor
+  // leaked. finally closes it on every path (fixed 2026-08-02).
+  finally { if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} } }
 }
 
 function safeName(s, fallback) {
@@ -375,8 +379,11 @@ function uploadWav(urlStr, buf) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(urlStr); } catch (_) { reject(new Error('bad url')); return; }
-    const req = http.request({
-      hostname: u.hostname, port: u.port || 80, path: u.pathname + u.search, method: 'POST',
+    // Scheme-aware, same as voice.request: an https audio service needs the https lib and port 443,
+    // not a plaintext POST on port 80 (fixed 2026-08-02).
+    const isHttps = u.protocol === 'https:';
+    const req = (isHttps ? https : http).request({
+      hostname: u.hostname, port: u.port || (isHttps ? 443 : 80), path: u.pathname + u.search, method: 'POST',
       headers: { 'Content-Type': 'audio/wav', 'Content-Length': buf.length },
     }, res => {
       const chunks = [];
