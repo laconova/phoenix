@@ -19,6 +19,7 @@ const unrealIpc = require('./unreal-ipc');
 const pipeline  = require('./pipeline');
 const jobs      = require('./jobs');
 const i2iEngine = require('./i2i');   // baseForInstance — so the deps check hits each workflow's own instance
+const downloader = require('./downloader');   // workflow/engine acquisition core (Stage 1)
 
 // ─── Working dir (used for /file security checks) ─────────────────────────────
 
@@ -736,6 +737,12 @@ async function handler(req, res) {
   if (method === 'POST' && urlPath === '/voice-speak') {
     let body = {};
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    // #9 — a null / non-object JSON body (valid JSON like `null`, `42` or `"x"`) must be a clean 400,
+    // not a 500: voice.speak destructures its argument, and destructuring `null` throws a TypeError.
+    if (body === null || typeof body !== 'object') {
+      sendJSON(res, 400, { error: 'body must be a JSON object with at least { voice, text }' });
+      return;
+    }
     const r = await voice.speak(body);
     if (r.error && !r.ok) { sendJSON(res, 400, r); return; }
     sendJSON(res, 200, r);
@@ -1606,15 +1613,38 @@ async function handler(req, res) {
       image: (cfg2.workflows && cfg2.workflows.image) || workflows.DEFAULT_ACTIVE.image,
       mesh:  (cfg2.workflows && cfg2.workflows.mesh)  || workflows.DEFAULT_ACTIVE.mesh,
       i2i:   (cfg2.workflows && cfg2.workflows.i2i)   || workflows.DEFAULT_ACTIVE.i2i,
+      // Stage 2d follow-up: the persisted default voice engine (Library click-to-activate below),
+      // mirroring image/mesh/i2i exactly — read by the SFX picker + Voice-tab Speak on page load.
+      voice: (cfg2.workflows && cfg2.workflows.voice) || workflows.DEFAULT_ACTIVE.voice,
     };
-    sendJSON(res, 200, { workflows: reg.workflows, active });
+    // Config-capability gate for voice engines: availability depends on THIS install's voice.dispatcher
+    // capability (a rig-only /speak dispatcher, not shipped), which the raw registry entry can't know.
+    // Overlay the EFFECTIVE blocked/blockedReason (English) that the picker + library row already honor,
+    // so a dispatcher-gated engine greys out on a plain customer config with no client-side change.
+    const hasDispatcher = !!(cfg2.voice && cfg2.voice.dispatcher);
+    const outWorkflows = {};
+    for (const [id, entry] of Object.entries(reg.workflows || {})) {
+      if (entry && entry.stage === 'voice') {
+        const av = workflows.engineAvailability(entry, hasDispatcher);
+        outWorkflows[id] = Object.assign({}, entry, {
+          available:     av.available,
+          blocked:       av.available ? null : (entry.blocked || (entry.requiresDispatcher ? 'dispatcher' : true)),
+          blockedReason: av.available ? null : av.reason,
+        });
+      } else {
+        outWorkflows[id] = entry;
+      }
+    }
+    sendJSON(res, 200, { workflows: outWorkflows, active });
     return;
   }
 
   // ── POST /workflows ──────────────────────────────────────────────────────
-  // Sets the active workflow for a given stage (image or mesh).
-  // Validates that the entry exists, matches the stage, its file is present,
-  // and its node-map has all required keys.
+  // Sets the active workflow for a given stage (image, mesh, i2i or voice). The business rule (which
+  // stages exist, entry-exists/matches-stage, image/mesh/i2i's file+node-map completeness, voice's
+  // `blocked`-engine refusal) lives in workflows.validateActivate — a pure function (mirrors
+  // downloader.js's validateInstall) so it's testable without an HTTP round trip; this handler stays
+  // parse → validate → persist.
   if (method === 'POST' && urlPath === '/workflows') {
     let body;
     try {
@@ -1626,55 +1656,16 @@ async function handler(req, res) {
     }
 
     const { stage, id } = body || {};
-
-    if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i') {
-      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
-      return;
-    }
-
-    if (!id || typeof id !== 'string') {
-      sendJSON(res, 400, { error: 'id must be a non-empty string', field: 'id' });
-      return;
-    }
-
-    const reg   = workflows.loadRegistry();
-    const entry = reg.workflows[id];
-
-    if (!entry) {
-      sendJSON(res, 400, { error: 'unknown workflow id', field: 'id' });
-      return;
-    }
-
-    if (entry.stage !== stage) {
-      sendJSON(res, 400, { error: 'workflow is not for this stage', field: 'stage' });
-      return;
-    }
-
-    // resolveWorkflowFile, not a bare existsSync: entry.file is the absolute path recorded when
-    // the workflow was registered, and it goes stale the moment the tree moves or a registry is
-    // restored elsewhere. The resolver falls back to this install's own workflows/ — without it,
-    // reading and editing such a workflow works while ACTIVATING it fails, which is a confusing
-    // half-broken state (and the exact case entries/phoenix-workflow-stale-path.md documents).
-    try {
-      workflows.resolveWorkflowFile(entry);
-    } catch (_) {
-      sendJSON(res, 400, { error: 'workflow file not found: ' + entry.file, field: 'file' });
-      return;
-    }
-
-    const REQUIRED = {
-      image: ['positive', 'output'],
-      mesh:  ['image', 'output'],
-      i2i:   ['input_image', 'output'],
-    };
-    for (const key of REQUIRED[stage]) {
-      if (!entry.nodes || !entry.nodes[key]) {
-        sendJSON(res, 400, { error: 'nodes map missing key: ' + key, field: 'nodes' });
-        return;
-      }
-    }
-
+    const reg  = workflows.loadRegistry();
     const cfg2 = a.loadConfig();
+    // cfg2 carries voice.dispatcher — validateActivate refuses a dispatcher-gated engine on a config
+    // that doesn't declare it, the same way it already refuses a `blocked` one.
+    const v   = workflows.validateActivate(stage, id, reg, cfg2);
+    if (!v.ok) {
+      sendJSON(res, 400, { error: v.error, field: v.field });
+      return;
+    }
+
     cfg2.workflows = cfg2.workflows || {};
     cfg2.workflows[stage] = id;
     a.saveConfig(cfg2);
@@ -1720,6 +1711,104 @@ async function handler(req, res) {
       }
     }
     sendJSON(res, 200, { reachable: anyReachable, base: primaryBase, deps });
+    return;
+  }
+
+  // ── GET /workflows/acquire-plan ──────────────────────────────────────────
+  // Read-only: resolves the acquisition target + plan + preflight for one workflow (downloader.js —
+  // Stage 1 of the package-contract downloader). Same "always structured, never a bare error" shape
+  // as /workflows/deps: an unreachable/manual target is a normal 200 response, not a failure.
+  if (method === 'GET' && urlPath === '/workflows/acquire-plan') {
+    const id = parsedUrl.searchParams.get('id');
+    if (!id) { sendJSON(res, 400, { error: 'id required' }); return; }
+    const reg = workflows.loadRegistry();
+    const entry = reg.workflows && reg.workflows[id];
+    if (!entry) { sendJSON(res, 404, { error: 'no workflow "' + id + '"' }); return; }
+    try {
+      const localCfg = a.loadConfig();
+      const result = await downloader.plan(localCfg, { id, ...entry });
+      sendJSON(res, 200, result);
+    } catch (e) {
+      sendJSON(res, 500, { error: String((e && e.message) || e) });
+    }
+    return;
+  }
+
+  // ── POST /workflows/acquire ──────────────────────────────────────────────
+  // Runs downloader.acquire() as a background job on the existing single-slot job/broadcast
+  // machinery (jobs.js) — same shape as generate_image/image_to_3d: 202 accepted, progress +
+  // done/error land on the SSE stream (jobs.js's own dbg.event('job', …) already turns start/done/
+  // error into a broadcast notice; onProgress below adds the finer-grained per-step ticks).
+  if (method === 'POST' && urlPath === '/workflows/acquire') {
+    let body;
+    try {
+      const raw = await readBody(req);
+      body = JSON.parse(raw);
+    } catch (_) {
+      sendJSON(res, 400, { error: 'Invalid JSON body' });
+      return;
+    }
+    const id = body && body.id;
+    if (!id || typeof id !== 'string') { sendJSON(res, 400, { error: 'id required', field: 'id' }); return; }
+    const reg = workflows.loadRegistry();
+    const entry = reg.workflows && reg.workflows[id];
+    if (!entry) { sendJSON(res, 404, { error: 'no workflow "' + id + '"' }); return; }
+
+    const localCfg = a.loadConfig();
+
+    // #7 — route-level engine gate. The Library hides a dispatcher-gated / `blocked` voice engine, but a
+    // hidden control is not a gate: refuse the acquire server-side too, so no venv is ever built for an
+    // engine this install cannot use (the same engineAvailability rule GET /workflows + voice.js honor).
+    if (entry.stage === 'voice') {
+      const hasDispatcher = !!(localCfg.voice && localCfg.voice.dispatcher);
+      const av = workflows.engineAvailability({ id, ...entry }, hasDispatcher);
+      if (!av.available) {
+        sendJSON(res, 403, { error: 'voice engine "' + id + '" is not available (' + av.reason + ') — refusing to build a venv for an unusable engine' });
+        return;
+      }
+    }
+
+    // FIX #2 — acquire runs on the single-slot background job (jobs.js), which now hands `work` an
+    // AbortSignal so POST /workflows/acquire/cancel can stop it. downloader.acquire is fully async
+    // (cp.spawn, not spawnSync) so it no longer freezes chat/voice/library while a multi-minute clone/
+    // pip/weights fetch runs; progress + terminal state broadcast over SSE as `acquire-progress`.
+    const result = jobs.start({ kind: 'acquire', label: entry.label || id }, async (_jobId, signal) => {
+      try {
+        const r = await downloader.acquire(localCfg, { id, ...entry }, {
+          signal,
+          onProgress: (p) => broadcast({ kind: 'acquire-progress', id, ...p }),
+        });
+        const cancelled = !!(r.failed && r.failed.some(f => f.cancelled));
+        const hardFailed = !cancelled && r.failed && r.failed.length > 0;
+        broadcast({ kind: 'acquire-progress', id, phase: cancelled ? 'cancelled' : (hardFailed ? 'failed' : 'complete'),
+                    summary: { done: r.done, skipped: r.skipped, failed: r.failed, warnings: r.warnings || [] } });
+        if (hardFailed) throw new Error('acquire failed: ' + r.failed.map(f => f.name + ' (' + f.error + ')').join('; '));
+        return cancelled
+          ? 'acquire cancelled — ' + (entry.label || id)
+          : 'acquired ' + (entry.label || id) + ' — done:' + r.done.length + ' skipped:' + r.skipped.length + ((r.warnings && r.warnings.length) ? ' warnings:' + r.warnings.length : '');
+      } catch (e) {
+        broadcast({ kind: 'acquire-progress', id, phase: 'failed', error: String((e && e.message) || e) });
+        throw e;
+      }
+    });
+
+    if (!result.started) { sendJSON(res, 409, { error: result.reason }); return; }
+    sendJSON(res, 202, { accepted: true, id: result.id });
+    return;
+  }
+
+  // ── POST /workflows/acquire/cancel ────────────────────────────────────────
+  // Cancel the running acquire job (FIX #2). Body: { id } — the JOB id returned by POST
+  // /workflows/acquire. jobs.cancel fires the AbortSignal → downloader.acquire SIGKILLs its child and
+  // marks the run cancelled; a partial download left behind carries no completion marker, so the next
+  // plan()/status() reads it as NOT installed (never masked). id omitted → cancels whatever is running.
+  if (method === 'POST' && urlPath === '/workflows/acquire/cancel') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} — cancel the running job */ }
+    if (body === null || typeof body !== 'object') body = {};
+    const r = jobs.cancel(body.id);
+    if (!r.ok) { sendJSON(res, 409, { error: r.reason }); return; }
+    sendJSON(res, 200, { cancelled: true, id: r.id });
     return;
   }
 

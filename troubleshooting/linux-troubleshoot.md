@@ -80,14 +80,15 @@ ComfyUI, give it a different port and point the relevant setting at that one.
 
 ## 3. Image models — sources & exact target paths (VERIFIED, downloaded)
 
-These are **not** auto-downloaded; place the files yourself. Both workflows shipped in
-`workflows/` reference these exact filenames.
+The Workflow library's **⬇ Acquire** button fetches these for you when `comfyInstall` is configured
+(see the example config's `_comment_comfyInstall`); otherwise place the files yourself at the exact
+paths below. Both workflows shipped in `workflows/` reference these exact filenames.
 
 ### SD 1.5 (`workflows/sd15_txt2img.json`) — the easy, guaranteed path
 - File: `v1-5-pruned-emaonly-fp16.safetensors` (~2 GB) → `~/ComfyUI/models/checkpoints/`
 - Source (open, ungated):
   `https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors`
-- All-native nodes. Works on the current Python 3.12/cu130 venv. Config defaults `workflows.image` to `sd15`.
+- All-native nodes. Works on the current Python 3.12/cu130 venv. (The shipped default image workflow is `flux_klein`; set `workflows.image` to `sd15` to use this instead.)
 
 ### Flux 2 Klein (`workflows/flux2_klein_txt2img.json`) — higher quality, ~16 GB
 All three files live in ONE **open** Comfy-Org repo (the ComfyUI split mirror — **not** the gated
@@ -272,7 +273,7 @@ the viewport for the Phoenix tab. IPC dir defaults to `/tmp/phoenix-blender-ipc`
 - `preflight.expected.pytorch` → `2.12` (silences the drift WARN for the current image venv). Note:
   if/when you build the Trellis venv on torch 2.6/cu124, this "expected" block no longer matches that
   env — it only describes whichever ComfyUI is actually serving :8188.
-- `workflows.image` → `sd15` (default image workflow; sd15 works on the current venv today).
+- `workflows.image` → `sd15` (overrides the shipped default `flux_klein`; sd15 works on the current venv today).
 
 ---
 

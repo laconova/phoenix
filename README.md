@@ -32,7 +32,7 @@ Each stage has an optional **gate** (pause for your approval). The generation en
 - **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** running locally, with the models for the workflow you want to use (e.g. Flux, SD 1.5, Trellis).
 - **[Claude CLI](https://docs.claude.com/en/docs/claude-code)** (`claude`) — the assistant/orchestrator seats call it; sign in with your Anthropic account.
 - *Optional:* **[LM Studio](https://lmstudio.ai/)** (local model for the metaprompter), **Blender** (import / scene sync).
-- *Optional (for the 1.7.0 tabs):* **Unreal Engine 5.8+** with the Python plugin and a real `python` on your PATH (Unreal bridge — see **Connect Unreal**); a **CrispASR** speech server plus `.gguf` voice packs (Voice / SFX tabs); an **ffmpeg** binary for voice/SFX effects (auto‑detected from `imageio‑ffmpeg` if present, otherwise set `voice.ffmpeg`).
+- *Optional (for the Voice/Unreal tabs):* **Unreal Engine 5.8+** with the Python plugin and a real `python` on your PATH (Unreal bridge — see **Connect Unreal**); a **CrispASR** speech server plus `.gguf` voice packs (Voice / SFX tabs — this is what powers the integrated default engine); an **ffmpeg** binary for voice/SFX effects (auto‑detected from `imageio‑ffmpeg` if present, otherwise set `voice.ffmpeg`). The picker's other engines (Chatterbox, CosyVoice) additionally need a voice‑service dispatcher that a future version will ship.
 
 ## Quickstart
 
@@ -51,7 +51,7 @@ needed. To customize endpoints/models, edit that file, or pre-create it yourself
 `copy phoenix-config.example.json phoenix-config.json` (Windows) /
 `cp phoenix-config.example.json phoenix-config.json` (macOS/Linux).
 
-On first run, Phoenix seeds its registry with five built‑in ("Verified") workflows — **Flux Klein** and **SD 1.5** (image), **Trellis2‑GGUF** (mesh), and **Qwen Image Edit** and **SAM3 Isolate** (i2i / edit). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
+On first run, Phoenix seeds its registry with five built‑in ("Verified") ComfyUI workflows — **Flux Klein** and **SD 1.5** (image), **Trellis2‑GGUF** (mesh), and **Qwen Image Edit** and **SAM3 Isolate** (i2i / edit) — plus three **Voice** engines in the library's Voice section (**CrispASR**, the integrated default, alongside **Chatterbox** and **CosyVoice**). The Workflows tab shows a live dependency badge per workflow so you can see what actually runs on your machine.
 
 ## Connect Blender
 
@@ -84,11 +84,12 @@ With the editor open and a project loaded, the Unreal actions light up (a red/ab
 
 - **Chat‑driven generation** with per‑stage gates (prompt / image / mesh).
 - **Workflow registry** — *Verified* (shipped) workflows plus **add your own**: upload a ComfyUI **API‑format** workflow JSON, Phoenix infers the node‑map and dependencies, you review/correct it in a form, and it's saved as a *Custom* workflow. Live per‑workflow dependency status.
+- **Library that ships with nothing** *(new in 1.8.1)* — every built‑in workflow carries an **install manifest** (its license plus the exact models / custom nodes it needs), so a fresh install downloads no heavy weights. The library shows a **license badge** and a real *installed / not installed* status per workflow and offers **⬇ Acquire** to fetch what's missing — you pull only the workflows you actually use, and existing installs pick up newly‑shipped definitions on upgrade.
 - **Style palette** — editable per‑category style presets that shape the look of your props.
 - **Asset library** — staged assets, brushes, materials.
 - **Troubleshooter** — an LLM assistant that checks your local stack (ComfyUI · models · Blender) and helps get missing dependencies running.
 - **Characters & animation** *(new in 1.6.0)* — build parametric people into your Blender scene, save them as reusable characters, and animate them from Mixamo clips or plain text. Creatures and machines get their own skeleton-bound workflow. Full guide: **[human-tab-guide.md](human-tab-guide.md)**.
-- **Voice & sound** *(new in 1.7.0)* — a baked voice pack speaks a line, plus a sound‑effects tab to generate, audition and edit SFX takes and bake them onto a character. Runs against a **CrispASR** speech server (local or on your GPU box).
+- **Voice & sound** *(new in 1.7.0; multi‑engine in 1.8.1)* — a baked voice pack speaks a line, plus a sound‑effects tab to generate, audition and edit SFX takes and bake them onto a character. An **engine picker** in the Sound Design workbench shows the available voice engines. **CrispASR** (the default, integrated) runs against your own CrispASR speech server — local or on your GPU box — and works today. **Chatterbox** (MIT) and **CosyVoice** are shown in the picker but route through a **voice‑service dispatcher** that is not part of this release, so they appear greyed out ("requires the voice‑service dispatcher — coming in a future version") until that ships. Pick and activate an engine from the workflow library; the choice persists, and `/speak` never silently falls back to an unavailable engine — it tells you what's missing instead.
 - **Unreal Engine bridge** *(new in 1.7.0)* — place brushes and spawn saved characters into an already‑running Unreal editor, pull Unreal assets back into Blender as glTF, and let the assistant screenshot the viewport to check its own work. See **Connect Unreal** below.
 - **Mesh preview** *(new in 1.7.0)* — inspect a brush's geometry right in the browser (a vendored model‑viewer, no CDN) before it goes anywhere.
 - **Image editing (i2i)** *(new in 1.8.0)* — a branch between the image and the mesh: recolour or restyle a reference with **Qwen‑Image‑Edit**, or isolate a part on white with **SAM3** for a cleaner mesh. Edits arrive as tiles you can refine or send straight to 3D. See **[Edit an image (i2i)](#edit-an-image-i2i)** below.
@@ -183,7 +184,23 @@ Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on firs
   `endpoints.comfyui` is fine) and `template` (the T‑pose FBX it retargets against). See *Text → motion* above.
 - **`voice`** — the Voice/SFX tabs: `api` (a CrispASR speech server — local or on your GPU box, e.g.
   `http://gpu-box.local:8090`; leave empty to hide the functions) and `ffmpeg` (path to an ffmpeg binary
-  for the effects; leave empty to auto‑detect the one bundled with `imageio‑ffmpeg`).
+  for the effects; leave empty to auto‑detect the one bundled with `imageio‑ffmpeg`). The picker's
+  non‑default engines (Chatterbox, CosyVoice) additionally require `voice.dispatcher: true` **and** a
+  voice‑service dispatcher behind that `api` — not part of this release, so they stay greyed out by
+  default.
+- **`comfyInstall`** / **`voiceInstall`** — optional; what the Workflow Library's **⬇ Acquire** button
+  needs to fetch a workflow's missing models / custom nodes (or a voice engine) for you. One key per
+  instance → `{ root, via }`: `root` is the ComfyUI checkout (models land in `root/models`, custom nodes
+  in `root/custom_nodes`) or the voice/bench root; `via` is `"local"` (default — install onto **this**
+  machine) or `"supervisor"` (install on another host over `endpoints.rigSsh`). Image and mesh workflows
+  (no explicit instance) resolve under the **`trellis`** key, so a single‑machine user sets
+  `comfyInstall.trellis = { "root": "<your ComfyUI folder>", "via": "local" }`; i2i workflows tagged
+  `instance:'bild'` use `comfyInstall.bild`; the one voice endpoint uses `voiceInstall.voice`. **Left out
+  (or a workflow's instance absent), Acquire shows "manual" and you place the files yourself** — never a
+  silent install to some default location. Note: a **voice‑engine** Acquire runs its venv/pip/git steps
+  on a **Linux/macOS (POSIX)** target, and cancelling a `via:"local"` voice acquire *on a Windows host*
+  may not stop the in‑flight step (Windows has no process‑group kill); ComfyUI Acquire is portable
+  either way.
 - **`feedback.endpointUrl`** — optional. Set it to a URL that accepts a JSON `POST` and the in‑app
   Feedback form sends there; leave it empty and the form stays hidden.
 - **`gates`** — which stages pause for approval (`prompt` / `image` / `mesh`), plus **`gates.vision`**

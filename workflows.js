@@ -18,10 +18,30 @@ const DEFAULT_WORKFLOWS = {
       file:    path.join(__dirname, 'workflows', 'flux2_klein_txt2img.json'),
       nodes:   { positive: '4', negative: '14', cfg: '6', steps: '8', seed: '10', output: '13' },
       deps:    {
-        custom_nodes: ['EmptyFlux2LatentImage', 'Flux2Scheduler'],
+        // trimmed 2026-09-17 (shipmitnull-workflow-manifests): EmptyFlux2LatentImage/Flux2Scheduler are
+        // core ComfyUI nodes (comfy_extras/nodes_flux.py), not plugins — flux_klein needs ZERO custom
+        // nodes. Leaving them declared with no install.custom_nodes match would make plan()/status()
+        // report "manual" forever.
+        custom_nodes: [],
         models: ['flux-2-klein-base-4b.safetensors', 'qwen_3_4b.safetensors', 'flux2-vae.safetensors'],
       },
       builtin: true,
+      install: {
+        license: 'Apache-2.0',   // black-forest-labs FLUX.2-klein-base-4B model card
+        vram_gb: 10,             // estimated — runs on the rig's single 10GB card, no OOM documented, not live-measured
+        custom_nodes: [],
+        models: [
+          { filename: 'flux-2-klein-base-4b.safetensors',
+            source: { hf: 'Comfy-Org/vae-text-encorder-for-flux-klein-4b/split_files/diffusion_models/flux-2-klein-base-4b.safetensors' },
+            dir: 'diffusion_models', size_gb: 7.3 },
+          { filename: 'qwen_3_4b.safetensors',
+            source: { hf: 'Comfy-Org/vae-text-encorder-for-flux-klein-4b/split_files/text_encoders/qwen_3_4b.safetensors' },
+            dir: 'text_encoders', size_gb: 7.5 },
+          { filename: 'flux2-vae.safetensors',
+            source: { hf: 'Comfy-Org/vae-text-encorder-for-flux-klein-4b/split_files/vae/flux2-vae.safetensors' },
+            dir: 'vae', size_gb: 0.32 },
+        ],
+      },
     },
     sd15: {
       label:   'SD1.5',
@@ -30,6 +50,16 @@ const DEFAULT_WORKFLOWS = {
       nodes:   { positive: '6', negative: '7', cfg: '3', steps: '3', seed: { node: '3', field: 'seed' }, output: '9' },
       deps:    { custom_nodes: [], models: ['v1-5-pruned-emaonly-fp16.safetensors'] },
       builtin: true,
+      install: {
+        license: 'CreativeML Open RAIL-M',   // SD1.5's original license terms carry over to this archive — NOT MIT/Apache
+        vram_gb: 4,                          // estimated — 512x512 well below the rig's 10GB card, no OOM ever reported
+        custom_nodes: [],
+        models: [
+          { filename: 'v1-5-pruned-emaonly-fp16.safetensors',
+            source: { hf: 'Comfy-Org/stable-diffusion-v1-5-archive/v1-5-pruned-emaonly-fp16.safetensors' },
+            dir: 'checkpoints', size_gb: 2.0 },
+        ],
+      },
     },
     trellis2: {
       label:   'Trellis2-GGUF',
@@ -41,9 +71,31 @@ const DEFAULT_WORKFLOWS = {
           'Trellis2LoadModel_GGUF', 'Trellis2LoadImageWithTransparency_GGUF', 'Trellis2PreProcessImage_GGUF',
           'Trellis2MeshWithVoxelGenerator_GGUF', 'Trellis2PostProcessAndUnWrapAndRasterizer_GGUF', 'Trellis2ExportMesh_GGUF',
         ],
-        models: ['TRELLIS.2-4B'],
+        // trimmed 2026-09-17: the old symbolic 'TRELLIS.2-4B' matched no real file. Trellis2LoadModel_GGUF
+        // self-downloads its own weights on first run (product decision — see install.models below), so
+        // this stays [] — a non-empty entry here with no install.models match would fail validateInstall's
+        // "dep X has no install source" check.
+        models: [],
       },
       builtin: true,
+      install: {
+        // Plugin CODE license is MIT (LICENSE file, rig-verified). The MODEL WEIGHTS' license is stated
+        // honestly rather than guessed — no fabricated SPDX id; check the model card (Aero-Ex/Trellis2-GGUF).
+        license: 'MIT (plugin code) — model weights: see the model card (Aero-Ex/Trellis2-GGUF)',
+        vram_gb: 10,   // estimated — low_vram:true in the workflow JSON, runs on the rig's 10GB card today
+        custom_nodes: [
+          { classType: 'Trellis2LoadModel_GGUF',                         git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+          { classType: 'Trellis2LoadImageWithTransparency_GGUF',         git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+          { classType: 'Trellis2PreProcessImage_GGUF',                   git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+          { classType: 'Trellis2MeshWithVoxelGenerator_GGUF',            git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+          { classType: 'Trellis2PostProcessAndUnWrapAndRasterizer_GGUF', git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+          { classType: 'Trellis2ExportMesh_GGUF',                        git: 'https://github.com/Aero-Ex/ComfyUI-Trellis2-GGUF.git', ref: '6bd11ead7ab7976ec4b2c47db52701f4c76a54e2' },
+        ],
+        // self-download (product decision, task brief overrides the manifest's "pre-stage 11 files"
+        // recommendation): Trellis2LoadModel_GGUF pulls ~6.9GB of its own weights from Aero-Ex/Trellis2-GGUF
+        // + Aero-Ex/Dinov3 on first run — the current install.models[] contract has no bearing on that path.
+        models: [],
+      },
     },
     // ── i2i category (v1.8) ─────────────────────────────────────────────────────
     // Image-to-image editing between the image and mesh stages. Unlike image/mesh (both on
@@ -59,10 +111,35 @@ const DEFAULT_WORKFLOWS = {
       file:     path.join(__dirname, 'workflows', 'qwen_image_edit.json'),
       nodes:    { input_image: '4', prompt: '6', cfg: '9', seed: '9', output: '11' },
       deps:     {
-        custom_nodes: ['UnetLoaderGGUF', 'CLIPLoader', 'TextEncodeQwenImageEdit', 'ImageScaleToTotalPixels'],
+        // trimmed 2026-09-17 (shipmitnull-workflow-manifests): CLIPLoader/TextEncodeQwenImageEdit/
+        // ImageScaleToTotalPixels are core ComfyUI nodes, not plugins — only UnetLoaderGGUF (ComfyUI-GGUF)
+        // is a real installable dep. Leaving the core names declared with no install source would make
+        // plan()/status() report "manual" forever.
+        custom_nodes: ['UnetLoaderGGUF'],
         models: ['Qwen-Image-Edit-2509-Q3_K_M.gguf', 'qwen_2.5_vl_7b_fp8_scaled.safetensors', 'qwen_image_vae.safetensors'],
       },
       builtin: true,
+      install: {
+        license: 'Apache-2.0',   // Qwen-Image family license; ComfyUI-GGUF itself is also Apache-2.0
+        // measured live: VL text-encoder (9.4GB) +
+        // Unet (9.8GB) don't fit simultaneously on a 10GB card — ComfyUI swaps per run — but each fits
+        // individually, so 10 is the correct ceiling. The one workflow in this batch with a live measurement.
+        vram_gb: 10,
+        custom_nodes: [
+          { classType: 'UnetLoaderGGUF', git: 'https://github.com/city96/ComfyUI-GGUF', ref: '6ea2651e7df66d7585f6ffee804b20e92fb38b8a' },
+        ],
+        models: [
+          { filename: 'Qwen-Image-Edit-2509-Q3_K_M.gguf',
+            source: { hf: 'QuantStack/Qwen-Image-Edit-2509-GGUF/Qwen-Image-Edit-2509-Q3_K_M.gguf' },
+            dir: 'diffusion_models', size_gb: 9.1 },
+          { filename: 'qwen_2.5_vl_7b_fp8_scaled.safetensors',
+            source: { hf: 'Comfy-Org/Qwen-Image_ComfyUI/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors' },
+            dir: 'text_encoders', size_gb: 8.8 },
+          { filename: 'qwen_image_vae.safetensors',
+            source: { hf: 'Comfy-Org/Qwen-Image_ComfyUI/split_files/vae/qwen_image_vae.safetensors' },
+            dir: 'vae', size_gb: 0.24 },
+        ],
+      },
     },
     sam3_isolate: {
       label:    'SAM3 Isolate',
@@ -76,6 +153,115 @@ const DEFAULT_WORKFLOWS = {
         models: [],
       },
       builtin: true,
+      install: {
+        // Plugin code (ComfyUI-RMBG) is GPL-3.0 (LICENSE file, rig-verified) — new info, badge set
+        // honestly. Model weights (SAM3, via the 1038lab/sam3 mirror) are Meta's own release terms,
+        // redistributed ungated by the mirror but the underlying rights are Meta's, not 1038lab's.
+        license: 'GPL-3.0',
+        vram_gb: 4,   // estimated — sam3.pt is 3.2GB loaded, workflow sets unload_model:true after each run
+        custom_nodes: [
+          { classType: 'SAM3Segment', git: 'https://github.com/1038lab/ComfyUI-RMBG.git', ref: 'd7402513f23f58db7d56754b02a4f51a148b4941' },
+        ],
+        // sam3.pt self-downloads into the node's OWN dir (ComfyUI-RMBG/models/sam3/sam3.pt), not
+        // modelsRoot — the install.models[] contract has no way to express that destination. A hard
+        // architectural constraint (manifest), not a product choice like trellis2's.
+        models: [],
+      },
+    },
+    // ── voice category (v1.8.1) ─────────────────────────────────────────────────
+    // Engine picker entries for the voice-service's /speak dispatch. crispasr ships WITH the product
+    // (no install block, same pattern as flux_klein/trellis2 above); chatterbox/cosyvoice are the first
+    // DOWNLOADABLE voice engines — their `install` block uses the voice-engine form
+    // (`install.target:"voice-engine"`, validated by downloader.js validateInstall) instead of the
+    // comfyui custom_nodes/models form. Both are dispatcher-gated (requiresDispatcher) — see below.
+    crispasr: {
+      label:   'CrispASR',
+      stage:   'voice',
+      builtin: true,   // integrated — ships with the product, no acquire step
+    },
+    chatterbox: {
+      label:   'Chatterbox',
+      stage:   'voice',
+      builtin: true,
+      // Config-capability gate: engine=<id> is understood only by the voice-service /speak dispatcher,
+      // a Laconova rig-side service that is NOT shipped with the product. On a plain CrispASR speech
+      // server the picker can select this but nothing routes it, so it ships greyed BY DEFAULT and is
+      // enabled only where the config declares the dispatcher (voice.dispatcher truthy). See
+      // engineAvailability() below. Our own rig sets that flag in its gitignored phoenix-config.json.
+      requiresDispatcher: true,
+      install: {
+        license: 'MIT',
+        vram_gb: 4,        // measured live on the rig 2026-09-16 (manifest estimate was 3) — see dev-note
+        target:  'voice-engine',
+        engine: {
+          id:   'chatterbox',
+          kind: 'pip',
+          // NO engine.root here (release-blocker fix, 2026-09-17): the real install root is
+          // voiceInstall.<instance>.root from the CUSTOMER's phoenix-config.json (downloader.js
+          // resolveVoiceTarget) — same rule as comfyInstall. DEFAULT_WORKFLOWS must never hardcode an
+          // absolute per-user path; our own rig's path lives ONLY in our gitignored phoenix-config.json.
+          venv: { path: 'venv', python: '3.12', torch: '2.6.0', index_url: null, pins: [] },
+          pip:  'chatterbox-tts==0.1.7',
+          weights: {
+            source:  { hf: 'ResembleAI/chatterbox' },
+            // Relative — joined onto the resolved engineRoot by resolveVoiceTarget. Cosmetic/inert while
+            // lazy:true (chatterbox-tts manages its own real HF cache internally; acquire() never fetches
+            // a lazy weights step — see downloader.js's weights.lazy handling), but still a required,
+            // non-absolute, non-leaking field for validateInstall.
+            dir:     'hf-cache',
+            size_gb: 3.0,
+            lazy:    true,
+          },
+          adapter: 'chatterbox_adapter.py',   // the live adapter name, not the bench script it wraps
+        },
+      },
+    },
+    cosyvoice: {
+      label:   'CosyVoice',
+      stage:   'voice',
+      builtin: true,
+      // Same dispatcher gate as chatterbox — the governing PUBLIC reason it ships greyed (the /speak
+      // dispatcher is not shipped). See engineAvailability() below.
+      requiresDispatcher: true,
+      // Secondary reason (applies once the dispatcher IS present, e.g. on our rig): engine=cosyvoice
+      // fails in its own venv (venv-cosy) — a native pyworld build wall after the requirements surgery
+      // below, which is not a strip/pin fix. `blocked` is UI-only (the picker renders a disabled
+      // <option>); it does NOT gate acquire/dep-check, which stay honest to the manifest.
+      blocked:       'venv',
+      blockedReason: 'voice engine not installed',
+      install: {
+        license: 'Apache-2.0',
+        vram_gb: 4,   // estimated (unmeasured — engine has never completed a run, per dev-note)
+        target:  'voice-engine',
+        engine: {
+          id:   'cosyvoice',
+          kind: 'git+requirements',
+          // NO engine.root here — same rule as chatterbox above (root resolves from the customer's
+          // voiceInstall.<instance>.root, never hardcoded in the shipped manifest).
+          venv: { path: 'venv-cosy', python: '3.12', torch: '2.6.0', index_url: null, pins: ['setuptools<81'] },
+          repo: { url: 'https://github.com/FunAudioLLM/CosyVoice.git', commit: 'main', submodules: ['third_party/Matcha-TTS'] },
+          requirements: {
+            file:  'requirements.txt',
+            // strip + pre/post amended per the 2026-09-16 live recipe (dev-note): onnxruntime-gpu's
+            // fragile Azure extra-index-url never resolved — strip it and install plain CPU onnxruntime
+            // instead (post). The pyworld native-build wall (still open) is NOT encodable here — it isn't
+            // a strip/pin fix, which is exactly why this engine stays `blocked` instead of claiming a
+            // working recipe.
+            strip: ['pynini', 'wetextprocessing', 'grpcio', 'onnxruntime-gpu'],
+            pre:   ['setuptools<81', 'wheel', 'grpcio', 'grpcio-tools'],
+            post:  ['modelscope', 'onnxruntime'],
+          },
+          weights: {
+            source:  { modelscope: 'iic/CosyVoice2-0.5B' },
+            // Relative — joined onto the resolved engineRoot by resolveVoiceTarget (was previously the
+            // literal absolute path to OUR rig's bench install; now resolves per-customer).
+            dir:     'cosyvoice/pretrained_models/CosyVoice2-0.5B',
+            size_gb: 4.0,
+            lazy:    true,
+          },
+          adapter: 'cosyvoice_adapter.py',
+        },
+      },
     },
   },
 };
@@ -106,19 +292,38 @@ function loadRegistry() {
   }
 }
 
-// Ensure every workflow the app SHIPS as builtin is present, without ever clobbering a user's own
-// entry of the same id. WHY: workflows.json is seeded from DEFAULT_WORKFLOWS only on first run
-// (ENOENT above). A user who already had the file from an earlier version would otherwise NEVER
+// Ensure every workflow the app SHIPS as builtin is present AND up to date, without ever clobbering a
+// user's own entry of the same id. WHY: workflows.json is seeded from DEFAULT_WORKFLOWS only on first
+// run (ENOENT above). A user who already had the file from an earlier version would otherwise NEVER
 // receive builtins added in an update — e.g. the v1.8 i2i engines (qwen_edit, sam3_isolate), which
 // left the whole i2i/Edit engine picker empty and SAM3 isolation unreachable for every upgrader.
-// Safe against deliberate deletion: builtins cannot be deleted (deleteCustomWorkflow refuses them),
-// so a missing builtin is always "never delivered", never "removed on purpose". Merge is in-memory
-// (loadRegistry stays side-effect-light); it persists the next time the registry is saved anyway.
+//
+// 🔴 Two cases, not one (fixed 2026-09-17 — live-probe finding: `GET /workflows/acquire-plan` on the
+// running rig returned every step "manual" for flux_klein/sd15/etc, because their PRE-EXISTING
+// workflows.json entries never picked up the new `install` blocks / trimmed `deps` — only a WHOLLY
+// ABSENT id was ever backfilled):
+//   1. id absent from reg.workflows entirely → add a deep copy of the DEFAULT_WORKFLOWS entry (as before).
+//   2. id present AND still `builtin === true` → REPLACE it with a fresh deep copy of the
+//      DEFAULT_WORKFLOWS entry. Builtins are non-editable (updateCustomWorkflow refuses `builtin:true`
+//      entries), so the shipped definition is always authoritative for a still-builtin id — this is
+//      what actually delivers a shipped `install`/`deps`/`nodes`/`file` change to every upgrader, not
+//      just a first-run install.
+// A user's own entry (an id that shares a builtin's name but has `builtin: false` — the shape
+// updateCustomWorkflow leaves behind) is NEVER touched by either case. The active workflow/engine
+// PER STAGE is stored separately in phoenix-config.json (`cfg.workflows.<stage>`, read by getActive()
+// via server.js's own cfg, never in the registry entry itself — see getActive() below) — so wholesale-
+// replacing a builtin entry here can never lose a user's active selection.
+// Merge is in-memory (loadRegistry stays side-effect-light); it persists the next time the registry is
+// saved anyway.
 function mergeMissingBuiltins(reg) {
   if (!reg || typeof reg !== 'object') return JSON.parse(JSON.stringify(DEFAULT_WORKFLOWS));
   if (!reg.workflows || typeof reg.workflows !== 'object') reg.workflows = {};
   for (const [id, entry] of Object.entries(DEFAULT_WORKFLOWS.workflows)) {
-    if (!(id in reg.workflows)) reg.workflows[id] = JSON.parse(JSON.stringify(entry));
+    const existing = reg.workflows[id];
+    if (!existing || existing.builtin === true) {
+      reg.workflows[id] = JSON.parse(JSON.stringify(entry));
+    }
+    // else: a user's own non-builtin entry of this id — leave it exactly as they made it.
   }
   return reg;
 }
@@ -133,24 +338,109 @@ function saveRegistry(reg) {
   fs.renameSync(tmp, WORKFLOWS_FILE);
 }
 
-const DEFAULT_ACTIVE = { image: 'flux_klein', mesh: 'trellis2', i2i: 'qwen_edit' };
+// voice (Stage 2d follow-up): mirrors image/mesh/i2i — the Library's click-to-activate persists this
+// as cfg.workflows.voice (server.js POST /workflows), read back here as the fallback when unset.
+const DEFAULT_ACTIVE = { image: 'flux_klein', mesh: 'trellis2', i2i: 'qwen_edit', voice: 'crispasr' };
+
+/**
+ * engineAvailability(entry, hasDispatcher) → { available: bool, reason: string|null }
+ * The single source of truth for "can this (voice) engine be used / activated / acquired right now".
+ * Generalizes the old bare `blocked` check into an effective "unavailable + reason", combining the
+ * config-capability gate with the pre-existing per-engine block. Two gates, DISPATCHER FIRST (the
+ * governing PUBLIC gate):
+ *   1. requiresDispatcher && !hasDispatcher → unavailable. The engine=<id> the picker sends is
+ *      understood only by the voice-service /speak dispatcher — a rig-only Laconova service NOT shipped
+ *      with the product — so on a plain CrispASR server it is inert. Greyed until a future version.
+ *   2. entry.blocked (e.g. cosyvoice's venv wall — applies even WITH the dispatcher) → unavailable,
+ *      "voice engine not installed".
+ * Non-voice entries carry neither field, so this always returns available:true for them (a no-op for
+ * image/mesh/i2i — their activation path is unchanged).
+ * `hasDispatcher` is a plain boolean; each caller derives it from its own config shape
+ * (cfg.voice.dispatcher). English reasons only — these strings render in the shipped UI.
+ */
+function engineAvailability(entry, hasDispatcher) {
+  if (!entry) return { available: false, reason: 'unknown engine' };
+  if (entry.requiresDispatcher && !hasDispatcher) {
+    return { available: false, reason: 'requires the voice-service dispatcher — coming in a future version' };
+  }
+  if (entry.blocked) {
+    return { available: false, reason: 'voice engine not installed' };
+  }
+  return { available: true, reason: null };
+}
 
 /**
  * getActive(stage, cfg) — returns the active workflow entry for a given stage.
  * Attaches `id` to the returned object. Never throws on a bad/missing id —
  * always returns a usable entry by falling back to DEFAULT_ACTIVE.
+ * An UNAVAILABLE entry (Stage 2d — e.g. cosyvoice's venv, or a dispatcher-gated engine on a config that
+ * doesn't declare the dispatcher) never resolves as active, even if it somehow ended up as the
+ * persisted id (a stale config, hand-edited outside the guarded POST /workflows path) — same "no
+ * silent substitute of a broken thing" rule as everywhere else; it falls through to the safe
+ * DEFAULT_ACTIVE the same way a missing/wrong-stage id already did.
  */
 function getActive(stage, cfg) {
   const activeId = (cfg && cfg.workflows && cfg.workflows[stage]) || DEFAULT_ACTIVE[stage];
   const reg      = loadRegistry();
   const entry    = reg.workflows && reg.workflows[activeId];
-  if (entry && entry.stage === stage) {
+  const hasDispatcher = !!(cfg && cfg.voice && cfg.voice.dispatcher);
+  if (entry && entry.stage === stage && engineAvailability(entry, hasDispatcher).available) {
     return { id: activeId, ...entry };
   }
   // Fallback to built-in default
   const fallbackId    = DEFAULT_ACTIVE[stage];
   const fallbackEntry = (reg.workflows && reg.workflows[fallbackId]) || DEFAULT_WORKFLOWS.workflows[fallbackId];
   return { id: fallbackId, ...fallbackEntry };
+}
+
+/**
+ * validateActivate(stage, id, reg, cfg) → { ok:true, entry } | { ok:false, error, field }
+ * Pure validation for "set the active workflow/engine for a stage" — the business rule server.js's
+ * POST /workflows enforces, factored out (mirrors downloader.js's validateInstall) so it's testable
+ * without an HTTP round trip and so the route handler stays a thin parse → validate → persist wrapper.
+ * image/mesh/i2i need the ComfyUI workflow FILE present + a complete node-map (unchanged, Stage 1) and
+ * ignore `cfg`; voice (Stage 2d) has neither concept — it refuses any UNAVAILABLE engine via
+ * engineAvailability (a `blocked` engine like cosyvoice, OR a dispatcher-gated one when cfg does not
+ * declare voice.dispatcher), same "no silent substitute" rule as voice.js's own resolveEngine().
+ */
+function validateActivate(stage, id, reg, cfg) {
+  if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i' && stage !== 'voice') {
+    return { ok: false, error: 'stage must be "image", "mesh", "i2i" or "voice"', field: 'stage' };
+  }
+  if (!id || typeof id !== 'string') {
+    return { ok: false, error: 'id must be a non-empty string', field: 'id' };
+  }
+
+  const entry = reg && reg.workflows && reg.workflows[id];
+  if (!entry) return { ok: false, error: 'unknown workflow id', field: 'id' };
+  if (entry.stage !== stage) return { ok: false, error: 'workflow is not for this stage', field: 'stage' };
+
+  if (stage === 'voice') {
+    const hasDispatcher = !!(cfg && cfg.voice && cfg.voice.dispatcher);
+    const av = engineAvailability(entry, hasDispatcher);
+    if (!av.available) {
+      return { ok: false, error: 'engine not available (' + av.reason + ')', field: 'id' };
+    }
+    return { ok: true, entry };
+  }
+
+  try {
+    resolveWorkflowFile(entry);
+  } catch (_) {
+    return { ok: false, error: 'workflow file not found: ' + entry.file, field: 'file' };
+  }
+
+  const REQUIRED = {
+    image: ['positive', 'output'],
+    mesh:  ['image', 'output'],
+    i2i:   ['input_image', 'output'],
+  };
+  for (const key of REQUIRED[stage]) {
+    if (!entry.nodes || !entry.nodes[key]) {
+      return { ok: false, error: 'nodes map missing key: ' + key, field: 'nodes' };
+    }
+  }
+  return { ok: true, entry };
 }
 
 /**
@@ -435,9 +725,13 @@ function addCustomWorkflow(entry, jsonText) {
     stage,
     file: filePath,
     nodes,
+    // #8 — type-filter to arrays of strings (mirrors updateCustomWorkflow). A hand-crafted entry whose
+    // deps.custom_nodes/models is a non-array (or holds non-strings) must not be stored as-is: GET
+    // /workflows/deps later does `entry.deps.custom_nodes.filter(...)` and a non-array there 500s the
+    // whole Library view. Coerce here so a malformed deps can never poison the registry.
     deps: {
-      custom_nodes: (deps && deps.custom_nodes) || [],
-      models:       (deps && deps.models)       || [],
+      custom_nodes: (deps && Array.isArray(deps.custom_nodes)) ? deps.custom_nodes.filter(x => typeof x === 'string') : [],
+      models:       (deps && Array.isArray(deps.models))       ? deps.models.filter(x => typeof x === 'string')       : [],
     },
     builtin: false,
   };
@@ -515,7 +809,7 @@ function updateCustomWorkflow(id, fields) {
 
 module.exports = {
   DEFAULT_WORKFLOWS, WORKFLOWS_FILE, DEFAULT_ACTIVE, DEFAULT_FIELDS,
-  loadRegistry, saveRegistry, getActive, resolveSlot, collectEnumValues, checkDeps,
+  loadRegistry, saveRegistry, mergeMissingBuiltins, getActive, validateActivate, engineAvailability, resolveSlot, collectEnumValues, checkDeps,
   MODEL_INPUT_FIELDS, validateWorkflowJson, stripNonNodeKeys, prepareWorkflowJson,
   collectNodeChoices, collectModelCandidates, missingModelsForWorkflow,
   listClassTypes, validateNodeMap, addCustomWorkflow, deleteCustomWorkflow, updateCustomWorkflow,

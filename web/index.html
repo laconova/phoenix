@@ -1405,7 +1405,7 @@
 
             <p class="cr-note" id="sx-setup" style="display:none">
               No audio service configured. Set <b>voice.api</b> in <code>phoenix-config.json</code>
-              to the running voice-service, e.g. <code>http://gpu-box.local:8090</code>.
+              to a running CrispASR server, e.g. <code>http://gpu-box.local:8090</code>.
             </p>
 
             <div id="sx-main" style="display:none">
@@ -1433,6 +1433,15 @@
                 </div>
 
                 <div class="sx-srcbody" data-body="vo" style="display:none">
+                  <!-- Voice engine picker (v1.8.1 Stage 2d) — lives here per build-spec decision #6:
+                       this tab MAKES voices (the Voice tab only USES a saved pack to speak a line).
+                       Mirrors the i2i engine picker (<select id="i2i-engine">): populated from the
+                       same GET /workflows registry, filtered to stage==='voice'. A `blocked` engine
+                       (e.g. CosyVoice — venv incomplete) renders disabled with its reason in the label. -->
+                  <div class="cr-row">
+                    <label>Engine</label>
+                    <select id="voice-engine" title="Which voice engine speaks this line"></select>
+                  </div>
                   <textarea id="sx-instr" class="img-prompt-edit" rows="2"
                             placeholder="describe the voice — e.g. an old man, gravelly and low, slow and weary"></textarea>
                   <textarea id="sx-line" class="img-prompt-edit" rows="2"
@@ -2100,6 +2109,56 @@
         document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
       })();
 
+      // ── Voice engine picker (v1.8.1 Stage 2d, + Library click-to-activate follow-up) ────────────
+      // Lives in the SFX/workbench tab's "Generate voice" body per build-spec decision #6
+      // ("that tab makes voices"), but the actual dispatch it selects (voice.js speak(), the rig
+      // /speak call) belongs to the Voice tab's Speak button — ONE picker feeding both, via
+      // window.__voiceEngine, rather than two disconnected pickers. Mirrors initI2I's loadEngines():
+      // fetch the same GET /workflows registry, filter client-side to stage==='voice'. A `blocked`
+      // entry renders as a disabled option carrying its reason in the label.
+      //
+      // Initial selection now prefers the PERSISTED default (active.voice — set by clicking a voice
+      // row in the Library, mirroring image/mesh/i2i's own active/select) over a hardcoded "crispasr",
+      // same as those other pickers reading cfg.workflows.<stage>. A persisted id that has since gone
+      // missing or blocked never wins silently — falls back to crispasr. window.__setVoiceEngineActive
+      // is the Library's hook to push a fresh click-to-activate choice into this SAME picker instead of
+      // running a second, disconnected selection.
+      (function initVoiceEnginePicker() {
+        const sel = document.getElementById('voice-engine');
+        if (!sel) return;
+        window.__voiceEngine = 'crispasr';   // default until the registry loads — matches the server's own default
+        window.__setVoiceEngineActive = function (id) {
+          if (!id) return;
+          window.__voiceEngine = id;
+          sel.value = id;   // no-op if `id` isn't a current <option> (e.g. picker hasn't loaded yet)
+        };
+        (async function loadVoiceEngines() {
+          try {
+            const r = await fetch('/workflows');
+            if (!r.ok) return;
+            const reg = await r.json();
+            const wfs   = (reg && reg.workflows) || {};
+            const active = (reg && reg.active) || {};
+            const ids = Object.keys(wfs).filter(id => wfs[id].stage === 'voice');
+            sel.innerHTML = '';
+            for (const id of ids) {
+              const e = wfs[id];
+              const o = document.createElement('option');
+              o.value = id;
+              o.textContent = e.blocked ? `${e.label || id} (${e.blockedReason || 'blocked'})` : (e.label || id);
+              if (e.blocked) o.disabled = true;
+              sel.appendChild(o);
+            }
+            if (!ids.length) { const o = document.createElement('option'); o.textContent = '(no voice engine)'; o.value = ''; sel.appendChild(o); }
+            const persisted   = active.voice;
+            const persistedOk = persisted && wfs[persisted] && wfs[persisted].stage === 'voice' && !wfs[persisted].blocked;
+            sel.value = persistedOk ? persisted : (ids.includes('crispasr') ? 'crispasr' : (ids.find(id => !wfs[id].blocked) || ids[0] || ''));
+            window.__voiceEngine = sel.value || 'crispasr';
+          } catch (_) { /* leave the default crispasr in place */ }
+        })();
+        sel.addEventListener('change', () => { window.__voiceEngine = sel.value || 'crispasr'; });
+      })();
+
       // ── SFX panel — the clip workbench ──────────────────────────────────────
       // Three sources, edit at two depths, two exits. The bench holds {source, chain}
       // and re-renders from the SOURCE on every Apply — never stacking onto the last
@@ -2660,6 +2719,9 @@
                 voice: elVoice.value, text,
                 effect: elEffect.value || null,
                 strength: Number(elStrength.value),
+                // Stage 2d: the engine picked in the SFX/workbench tab (window.__voiceEngine,
+                // default "crispasr" — see initVoiceEnginePicker above).
+                engine: window.__voiceEngine || 'crispasr',
               }),
             });
             const j = await r.json();
@@ -4300,6 +4362,35 @@
 
         if (obj.kind === 'notice') { appendBubble('phoenix', obj.text); refreshLibrary(); return; }
 
+        if (obj.kind === 'acquire-progress') {
+          const ui = window.__acqRows && window.__acqRows[obj.id];
+          if (!ui) return;
+          // Terminal events carry NO step (route-level complete/failed/cancelled) — tear the row down
+          // and re-run the plan/deps check so the row reflects reality. Per-step events carry `step`.
+          if (!obj.step && (obj.phase === 'complete' || obj.phase === 'failed' || obj.phase === 'cancelled')) {
+            try { if (ui.cancelBtn) ui.cancelBtn.remove(); } catch (_) {}
+            delete window.__acqRows[obj.id];
+            if (obj.phase === 'failed') appendBubble('error', 'Acquire failed for "' + obj.id + '"' + (obj.error ? ': ' + obj.error : ''));
+            else if (obj.phase === 'cancelled') appendBubble('phoenix', 'Acquire cancelled for "' + obj.id + '".');
+            else if (obj.summary && obj.summary.warnings && obj.summary.warnings.length) appendBubble('phoenix', 'Acquired "' + obj.id + '" with warnings: ' + obj.summary.warnings.join(' · '));
+            try { if (typeof loadWorkflowsTab === 'function') loadWorkflowsTab(); } catch (_) {}
+            refreshLibrary();
+            return;
+          }
+          const nm = (obj.step && obj.step.name) || '';
+          if (ui.lineEl) {
+            if (obj.phase === 'line')       ui.lineEl.textContent = (nm ? nm + ': ' : '') + String(obj.line || '').slice(0, 120);
+            else if (obj.phase === 'warn')  { ui.lineEl.textContent = '⚠ ' + obj.warning; ui.lineEl.style.color = '#c98a2b'; }
+            else if (obj.phase === 'done')  ui.lineEl.textContent = '✓ ' + nm;
+            else if (obj.phase === 'skip')  ui.lineEl.textContent = '✓ ' + nm + ' (already present)';
+            else if (obj.phase === 'manual') { ui.lineEl.textContent = '⚠ ' + nm + ' — install manually'; ui.lineEl.style.color = '#c98a2b'; }
+            else if (obj.phase === 'cancelled') ui.lineEl.textContent = '✕ ' + nm + ' cancelled';
+            else if (obj.phase === 'error') { ui.lineEl.textContent = '✕ ' + nm + ' failed'; ui.lineEl.style.color = '#e06c6c'; }
+            else if (obj.phase === 'step-start') ui.lineEl.textContent = '· ' + nm + '…';
+          }
+          return;
+        }
+
         // 'user' kind is ignored — we already appended optimistically on send
       };
 
@@ -5083,10 +5174,10 @@
           addBtn.addEventListener('click', function () { openWorkflowEditor(null); });
           libWorkflowsBody.appendChild(addBtn);
 
-          for (const stage of ['image', 'mesh', 'i2i']) {
+          for (const stage of ['image', 'mesh', 'i2i', 'voice']) {
             const hdr = document.createElement('div');
             hdr.className = 'lib-cat';
-            hdr.textContent = stage === 'image' ? 'Image' : (stage === 'mesh' ? '3D / Mesh' : 'i2i / Edit');
+            hdr.textContent = stage === 'image' ? 'Image' : (stage === 'mesh' ? '3D / Mesh' : (stage === 'i2i' ? 'i2i / Edit' : 'Voice'));
             libWorkflowsBody.appendChild(hdr);
 
             const ids = Object.keys(workflowsMap).filter(function (id) { return workflowsMap[id].stage === stage; });
@@ -5102,6 +5193,18 @@
             for (var wi = 0; wi < ids.length; wi++) {
               (function (id) {
                 const e        = workflowsMap[id];
+                // "active" (cfg.workflows.<stage>) now also covers voice (Stage 2d click-to-activate
+                // follow-up), persisted + guarded the same way as image/mesh/i2i (POST /workflows,
+                // server.js) — a `blocked` voice engine (e.g. cosyvoice) can never BE active (the
+                // server refuses to persist it). A NOT-YET-CONFIRMED-INSTALLED one (e.g. chatterbox
+                // before its acquire-plan check below resolves) starts inert too and is upgraded to
+                // activatable only once that check confirms it's really on disk — a not-installed
+                // engine must never become the persisted default (it would set a default that can't
+                // speak). validateActivate (server.js) has no cheap way to confirm real install status
+                // itself (that's an ssh `test -d`, not a sync check — same reason image/mesh/i2i's own
+                // activation never confirms a ComfyUI custom node is actually LOADED, only that the
+                // workflow file + node-map are complete), so this gate stays client-side: the row never
+                // offers the click, so the UI path never POSTs for a not-installed engine.
                 const isActive = active[stage] === id;
 
                 const row = document.createElement('div');
@@ -5115,19 +5218,65 @@
                 markerSpan.className = 'pal-marker';
                 markerSpan.style.fontStyle = 'normal';
                 markerSpan.style.fontWeight = '700';
+
+                // Click-to-activate, factored out so the voice branch can call it a second time, later
+                // — asynchronously, once the acquire-plan check below confirms the engine is actually
+                // installed. image/mesh/i2i call it once, synchronously, exactly as before. Self-guards
+                // on isActive so a stray extra call (e.g. an already-active engine that still runs the
+                // install check for its OWN "✓ installed" label) is always a safe no-op.
+                function makeActivatable() {
+                  if (isActive) return;
+                  markerSpan.textContent = 'select';
+                  markerSpan.style.color = 'var(--accent)';
+                  row.style.cursor = 'pointer';
+                  row.addEventListener('click', async function () {
+                    const r = await fetch('/workflows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage: stage, id: id }) });
+                    // Stage 2d follow-up: pushing a Library activation straight into the SAME picker
+                    // (window.__setVoiceEngineActive) instead of a disconnected second selection —
+                    // only once the server actually accepted + persisted it.
+                    if (stage === 'voice' && r.ok && window.__setVoiceEngineActive) window.__setVoiceEngineActive(id);
+                    loadWorkflowsTab();
+                  });
+                }
+
                 if (isActive) {
                   markerSpan.textContent = '● active';
                   markerSpan.style.color = '#4caf50';
                   row.style.background = 'rgba(76,175,80,0.10)';
-                } else {
-                  markerSpan.textContent = 'select';
-                  markerSpan.style.color = 'var(--accent)';
+                } else if (stage !== 'voice') {
+                  makeActivatable();
                 }
+                // stage==='voice', not active: marker stays blank here — crispasr claims it below
+                // immediately (synchronously); an installable engine claims it only if/when the
+                // acquire-plan check confirms "installed"; blocked never claims it at all.
 
                 const depSpan = document.createElement('span');
                 depSpan.style.fontSize = '11px';
                 depSpan.style.marginLeft = '6px';
-                if (!depData.reachable) {
+                let depMissing = false;
+                if (stage === 'voice') {
+                  // Voice engines don't run on ComfyUI — GET /workflows/deps' /object_info check (the
+                  // branch below) has nothing meaningful to say about them (no custom_nodes/models
+                  // declared). no install block = ships integrated (crispasr, always activatable);
+                  // `blocked` = not available yet (a dispatcher-gated engine on a config without the
+                  // dispatcher, or cosyvoice's venv wall) and must NOT offer Acquire or activation.
+                  // Anything else with an install block is UNKNOWN until the acquire-plan check resolves
+                  // (below) —
+                  // real filesystem status (venv+weights present), never a hardcoded guess (the bug
+                  // this fixes: chatterbox showed "not installed" forever even once it really was).
+                  if (!e.install) {
+                    depSpan.textContent = '✓ integrated';
+                    depSpan.style.color = '#4caf50';
+                    makeActivatable();
+                  } else if (e.blocked) {
+                    depSpan.textContent = '⛔ ' + (e.blockedReason || 'blocked');
+                    depSpan.style.color = '#e06c6c';
+                  } else {
+                    depMissing = true;   // renders the Acquire-block scaffold below; resolved for real there
+                    depSpan.textContent = 'checking…';
+                    depSpan.style.color = '#888';
+                  }
+                } else if (!depData.reachable) {
                   depSpan.textContent = 'deps: ComfyUI offline';
                   depSpan.style.color = '#888';
                 } else {
@@ -5136,6 +5285,7 @@
                     depSpan.textContent = '✓ ready';
                     depSpan.style.color = '#4caf50';
                   } else {
+                    depMissing = true;
                     const missing = [].concat(d ? d.missing_nodes : []).concat(d ? d.missing_models : []);
                     depSpan.textContent = '✗ ' + (missing.join(', ') || 'missing deps');
                     depSpan.style.color = '#e06c6c';
@@ -5145,6 +5295,166 @@
                 row.appendChild(nameSpan);
                 row.appendChild(markerSpan);
                 row.appendChild(depSpan);
+
+                // ── ⬇ Acquire (downloader.js, v1.8.1 Stage 1) ─────────────────────────
+                // Only workflows carrying an `install` block are auto-acquirable — Stage 1 ships the
+                // core + contract only, no packages populate `install` yet, so this stays dormant
+                // until Stage 2+ (Voice/Image/Mesh) registers real entries against it. On missing/
+                // partial deps: a button + the resolved target as TEXT (no picker — decision #8),
+                // fetched lazily so the row itself never blocks on a network round trip. A `manual`
+                // target replaces the button with its guidance text instead of hiding the row.
+                if (e.install && depMissing) {
+                  const acqWrap = document.createElement('span');
+                  acqWrap.style.marginLeft = '6px';
+                  acqWrap.style.fontSize = '11px';
+
+                  const lic = String(e.install.license || '').trim();
+                  if (lic) {
+                    const licBadge = document.createElement('span');
+                    licBadge.style.marginRight = '4px';
+                    licBadge.style.padding = '0 4px';
+                    licBadge.style.borderRadius = '3px';
+                    licBadge.style.border = '1px solid var(--muted)';
+                    licBadge.style.color = 'var(--muted)';
+                    licBadge.textContent = lic;
+                    acqWrap.appendChild(licBadge);
+                  }
+                  const isNC = lic.toLowerCase() === 'non-commercial';
+
+                  const targetSpan = document.createElement('span');
+                  targetSpan.style.color = 'var(--muted)';
+                  targetSpan.style.marginRight = '4px';
+                  targetSpan.textContent = '…';
+                  acqWrap.appendChild(targetSpan);
+
+                  const acqBtn = document.createElement('button');
+                  acqBtn.className = 'lib-act-btn';
+                  acqBtn.style.border = '1px solid var(--accent)';
+                  acqBtn.style.color = 'var(--accent)';
+                  acqBtn.style.borderRadius = '3px';
+                  acqBtn.style.padding = '1px 5px';
+                  acqBtn.style.display = 'none';   // shown once the target resolves to something acquirable
+                  acqBtn.textContent = '⬇ Acquire';
+                  acqBtn.title = 'Fetch this workflow\'s missing models / custom nodes';
+                  acqWrap.appendChild(acqBtn);
+                  row.appendChild(acqWrap);
+
+                  (async function () {
+                    let planData;
+                    try {
+                      const r = await fetch('/workflows/acquire-plan?id=' + encodeURIComponent(id));
+                      planData = await r.json();
+                    } catch (_) {
+                      targetSpan.textContent = '';
+                      if (stage === 'voice') { depSpan.textContent = 'not installed'; depSpan.style.color = '#c98a2b'; }
+                      return;
+                    }
+                    const target = planData && planData.target;
+                    const steps  = Array.isArray(planData && planData.steps) ? planData.steps : [];
+                    if (!target || target.kind === 'manual') {
+                      targetSpan.style.color = '#e06c6c';
+                      targetSpan.textContent = (target && target.reason) || 'no acquisition target configured';
+                      if (stage === 'voice') { depSpan.textContent = 'not installed'; depSpan.style.color = '#c98a2b'; }
+                      return;
+                    }
+
+                    // Stage 2d follow-up — real installed-vs-not for a voice engine, off the SAME plan
+                    // this Acquire button already fetched (one round trip, not two): mirrors
+                    // downloader.js's own status() derivation — a resolved (non-manual) target where
+                    // every step is already "skip" (or there are no steps at all) means it's really on
+                    // disk, not just declared in the manifest. Was the bug: chatterbox showed
+                    // "not installed" forever even once actually installed on the rig.
+                    if (stage === 'voice' && steps.every(function (s) { return s.action === 'skip'; })) {
+                      acqWrap.remove();   // not an install prompt after all — no Acquire button
+                      depSpan.textContent = '✓ installed';
+                      depSpan.style.color = '#4caf50';
+                      makeActivatable();
+                      return;
+                    }
+
+                    targetSpan.textContent = '→ ' + (target.kind === 'supervisor' ? 'remote' : 'local ComfyUI');
+                    acqBtn.style.display = '';
+                    if (stage === 'voice') { depSpan.textContent = 'not installed'; depSpan.style.color = '#c98a2b'; }
+
+                    // FIX #2 progress/cancel UI for THIS row — shared by the Acquire click and the
+                    // NEW-5 re-attach below. Hides ⬇ Acquire, shows a live line + a Cancel button, and
+                    // (re)registers the DOM refs under window.__acqRows[id] keyed to the running jobId.
+                    function attachAcqUI(jobId) {
+                      window.__acqRows = window.__acqRows || {};
+                      acqBtn.style.display = 'none';
+                      const lineEl = document.createElement('span');
+                      lineEl.style.marginLeft = '6px'; lineEl.style.color = 'var(--muted)'; lineEl.style.fontSize = '11px';
+                      lineEl.textContent = 'running…';
+                      acqWrap.appendChild(lineEl);
+                      const cancelBtn = document.createElement('button');
+                      cancelBtn.className = 'lib-act-btn'; cancelBtn.textContent = '✕ Cancel'; cancelBtn.style.marginLeft = '6px';
+                      cancelBtn.title = 'Stop this download';
+                      cancelBtn.addEventListener('click', async function (ev2) {
+                        ev2.stopPropagation();
+                        cancelBtn.disabled = true; cancelBtn.textContent = 'Cancelling…';
+                        try {
+                          await fetch('/workflows/acquire/cancel', {
+                            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: jobId }),
+                          });
+                        } catch (_) { /* the terminal SSE event still cleans the row up */ }
+                      });
+                      acqWrap.appendChild(cancelBtn);
+                      window.__acqRows[id] = { lineEl: lineEl, cancelBtn: cancelBtn, acqBtn: acqBtn, jobId: jobId };
+                    }
+
+                    // NEW-5: loadWorkflowsTab() rebuilds every row (innerHTML='') on each SSE notice, so a
+                    // row rebuilt WHILE its acquire job runs must re-attach the progress line + Cancel
+                    // instead of offering a fresh ⬇ Acquire (which would be unreachable-to-cancel). The
+                    // registry entry survives the rebuild (only its DOM refs went stale) → reuse its jobId.
+                    if (window.__acqRows && window.__acqRows[id] && window.__acqRows[id].jobId != null) {
+                      attachAcqUI(window.__acqRows[id].jobId);
+                    }
+
+                    // Surface preflight's unverified-resource warnings (e.g. no VRAM ledger on a plain
+                    // customer ComfyUI, or free disk that could not be read) — the whole point of the
+                    // *Verified flags is that an unmeasured resource is SHOWN, never silently assumed fine.
+                    const warnings = (planData.preflight && Array.isArray(planData.preflight.warnings)) ? planData.preflight.warnings : [];
+                    if (warnings.length) {
+                      const warnSpan = document.createElement('span');
+                      warnSpan.style.color = '#c98a2b';
+                      warnSpan.style.marginLeft = '4px';
+                      warnSpan.title = warnings.join(' · ');
+                      warnSpan.textContent = '⚠ ' + warnings.join(' · ');
+                      acqWrap.appendChild(warnSpan);
+                    }
+
+                    acqBtn.addEventListener('click', async function (ev) {
+                      ev.stopPropagation();
+                      if (isNC) {
+                        let acked = [];
+                        try { acked = JSON.parse(localStorage.getItem('phx-nc-acquire-ack') || '[]'); } catch (_) {}
+                        if (!acked.includes(id)) {
+                          const ok = confirm('"' + e.label + '" is licensed ' + lic + ' (non-commercial). ' +
+                            'Phoenix ships zero weights — this downloads it to YOUR machine, and your own use governs its licence. Continue?');
+                          if (!ok) return;
+                          acked.push(id);
+                          try { localStorage.setItem('phx-nc-acquire-ack', JSON.stringify(acked)); } catch (_) {}
+                        }
+                      }
+                      acqBtn.disabled = true;
+                      acqBtn.textContent = 'Acquiring…';
+                      try {
+                        const r = await fetch('/workflows/acquire', {
+                          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }),
+                        });
+                        const data = await r.json();
+                        if (!r.ok) { acqBtn.textContent = '⬇ Acquire'; acqBtn.disabled = false; alert(data.error || 'Could not start acquire.'); return; }
+                        // FIX #2 — live progress line + Cancel button, fed by `acquire-progress` SSE
+                        // events; the terminal event re-runs the plan check. (Shared with NEW-5 re-attach.)
+                        attachAcqUI(data.id);
+                      } catch (err) {
+                        acqBtn.textContent = '⬇ Acquire';
+                        acqBtn.disabled = false;
+                        alert('Network error: ' + err.message);
+                      }
+                    });
+                  })();
+                }
 
                 const tierSpan = document.createElement('span');
                 tierSpan.className = 'pal-marker';
@@ -5170,13 +5480,10 @@
                   row.appendChild(delBtn);
                 }
 
-                if (!isActive) {
-                  row.style.cursor = 'pointer';
-                  row.addEventListener('click', async function () {
-                    await fetch('/workflows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage: stage, id: id }) });
-                    loadWorkflowsTab();
-                  });
-                }
+                // Click-to-activate itself is wired above (makeActivatable()) — synchronously for
+                // image/mesh/i2i and crispasr, asynchronously for a voice engine once its acquire-plan
+                // check confirms it's really installed. A blocked or not-(yet-confirmed-)installed
+                // voice engine never gets a handler at all, so this row stays inert by omission.
 
                 libWorkflowsBody.appendChild(row);
               })(ids[wi]);

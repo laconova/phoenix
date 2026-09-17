@@ -28,6 +28,9 @@ const http = require('http');
 const https = require('https');
 const { execFile } = require('child_process');
 const soundFx = require('./sound-fx');
+// The voice-engine picker registry. Required the same way i2i.js pulls it in (workflows.js takes no
+// project-local requires itself, so no cycle).
+const wfLib = require('./workflows');
 
 const OUT_DIR = path.join(__dirname, 'sounds', 'vo');
 
@@ -125,6 +128,39 @@ async function listVoices() {
   }
 }
 
+// listVoice() — the voice-engine picker's data source (Stage 2d), mirroring i2i.js's listI2I(): reads
+// the SAME workflow registry i2i uses, filtered to stage==='voice'. Not wired to its own HTTP route —
+// like listI2I, the browser reads the generic GET /workflows response and filters client-side (see
+// web/index.html's loadEngines()/initVoiceEnginePicker()); this function is the programmatic/test seam.
+function listVoice() {
+  const reg = wfLib.loadRegistry();
+  const hasDispatcher = !!cfg().dispatcher;   // cfg() returns the `voice` sub-object → voice.dispatcher
+  return Object.entries(reg.workflows || {})
+    .filter(([, e]) => e.stage === 'voice')
+    .map(([id, e]) => {
+      const av = wfLib.engineAvailability(e, hasDispatcher);
+      return {
+        id,
+        label:              e.label || id,
+        builtin:            !!e.builtin,
+        requiresDispatcher: !!e.requiresDispatcher,
+        available:          av.available,
+        // Effective (post-gate) blocked/blockedReason — what the UI greys on. A dispatcher-gated engine
+        // on a config without the dispatcher reads as blocked here even though its own `blocked` field
+        // is unset; an available engine clears both. English reasons only.
+        // N2: the token reflects the EFFECTIVE governing gate, mirroring engineAvailability's precedence
+        // (dispatcher FIRST). Previously cosyvoice emitted 'venv' while chatterbox emitted 'dispatcher'
+        // for the SAME missing-dispatcher condition — confusing, since blockedReason already reports the
+        // dispatcher gate as the active one. Now: dispatcher gate active → 'dispatcher'; otherwise the
+        // engine's own block ('venv') or a plain truthy.
+        blocked:            av.available ? null : ((e.requiresDispatcher && !hasDispatcher) ? 'dispatcher' : (e.blocked || true)),
+        blockedReason:      av.available ? null : av.reason,
+        license:            (e.install && e.install.license) || null,
+        hasInstall:         !!e.install,
+      };
+    });
+}
+
 function listEffects() {
   // Only the ones that make sense on a spoken line. The cleanup/shaping blocks live
   // in the Sound-Design tab; here we offer character effects plus a level fix.
@@ -143,8 +179,29 @@ function runFfmpeg(inFile, outFile, chain) {
   });
 }
 
-// speak({voice, text, effect, strength}) -> { file, url, seconds, effect, filter }
-async function speak({ voice, text, effect, strength } = {}) {
+// Resolve+validate the requested engine against the stage:"voice" registry. Default (absent/empty
+// `engine`) is ALWAYS "crispasr" — the always-available, integrated default. An unknown id, a
+// dispatcher-gated engine on a config that doesn't declare the dispatcher, or a `blocked` entry (e.g.
+// cosyvoice — see workflows.js) is a loud error, never a silent fallback to crispasr (the same rule
+// the voice-service's own /speak dispatch enforces rig-side). Availability is computed by
+// workflows.engineAvailability against this install's voice.dispatcher capability.
+function resolveEngine(engine) {
+  const id = (engine == null || engine === '') ? 'crispasr' : String(engine);
+  if (id === 'crispasr') return { ok: true, id };
+  const reg = wfLib.loadRegistry();
+  const entry = reg.workflows && reg.workflows[id];
+  if (!entry || entry.stage !== 'voice') {
+    return { ok: false, error: `unknown voice engine "${id}" — no silent fallback to crispasr` };
+  }
+  const av = wfLib.engineAvailability(entry, !!cfg().dispatcher);
+  if (!av.available) {
+    return { ok: false, error: `voice engine "${id}" is not available yet (${av.reason}) — no silent fallback to crispasr` };
+  }
+  return { ok: true, id };
+}
+
+// speak({voice, text, effect, strength, engine}) -> { file, url, seconds, effect, filter }
+async function speak({ voice, text, effect, strength, engine } = {}) {
   const base = apiBase();
   if (!base) return { error: 'voice.api is not set in phoenix-config.json' };
   if (!voice) return { error: 'pick a voice pack first' };
@@ -152,6 +209,9 @@ async function speak({ voice, text, effect, strength } = {}) {
   // this guard a name like "../../characters/hero" would write the WAV outside OUT_DIR (fixed 2026-08-02).
   if (/[\/\\]|\.\./.test(String(voice))) return { error: 'invalid voice pack name' };
   if (!text || !String(text).trim()) return { error: 'nothing to say — type a line' };
+
+  const eng = resolveEngine(engine);
+  if (!eng.ok) return { error: eng.error };
 
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -162,7 +222,10 @@ async function speak({ voice, text, effect, strength } = {}) {
   try {
     r = await request(base + '/v1/audio/speech', {
       method: 'POST',
-      body: JSON.stringify({ model: 'tada', voice, input: String(text) }),
+      // `engine` (Stage 2d): default "crispasr" reproduces the exact prior body/behavior — the
+      // rig's /v1/audio/speech + /speak already default to "crispasr" when the field is absent
+      // (Part 2b, LIVE), so sending it explicitly here changes nothing for the default case.
+      body: JSON.stringify({ model: 'tada', voice, input: String(text), engine: eng.id }),
     });
   } catch (e) {
     return { error: 'speech server not reachable at ' + base + ' — ' + e.message };
@@ -246,5 +309,5 @@ function openFolder() {
 // `request`, `ffmpegPath` and `cfg` are shared with the SFX workbench (sfx.js) on
 // purpose. They resolve the same speech service and the same ffmpeg binary, and a
 // second copy would drift — the same reason sound-fx.js is one module for both tabs.
-module.exports = { health, listVoices, listEffects, speak, readOut, listTakes, openFolder, OUT_DIR,
+module.exports = { health, listVoices, listVoice, listEffects, speak, readOut, listTakes, openFolder, OUT_DIR,
                    request, ffmpegPath, cfg, apiBase, slug };

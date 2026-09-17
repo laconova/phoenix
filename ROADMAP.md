@@ -64,6 +64,26 @@ New in **1.8.0** — image editing between the stages:
   ComfyUI instances (e.g. Qwen-Image-Edit and Trellis in separate environments) are supported via an
   optional second endpoint, while a single-machine setup keeps working unchanged.
 
+New in **1.8.1** — a library that ships with nothing, and a choice of voice:
+
+- **Workflow library — "ship with nothing"** — every built-in workflow now carries an **install
+  manifest**: the license it runs under and the exact models / custom nodes it needs. On a fresh
+  machine the library shows each workflow with a **license badge** and a real *installed / not
+  installed* status, and offers **⬇ Acquire** to fetch what's missing — so nothing large is bundled
+  into the download, and you pull only the workflows you actually use. Shipped licenses: Flux-Klein
+  Apache-2.0, SD1.5 CreativeML Open RAIL-M, Qwen-Image-Edit Apache-2.0, Trellis2 MIT (plugin code;
+  model weights per their model card), SAM3 GPL-3.0. Trellis2 and SAM3 fetch their own weights on
+  first run.
+- **Voice — multiple engines** — an **engine picker** in the Sound Design workbench. **CrispASR**
+  (the default, integrated) works today against your own CrispASR speech server. **Chatterbox** (MIT)
+  and **CosyVoice** (Apache-2.0) are shown in the picker but route through a **voice-service
+  dispatcher** that isn't part of this release, so they appear greyed out ("coming in a future
+  version") for now. Choose and activate an engine from the workflow library and the choice persists
+  as your default; `/speak` never silently substitutes an unknown or unavailable engine — it tells you
+  what's missing instead.
+- **Upgrade pickup** — existing installs pick up newly-shipped built-in workflow definitions on
+  upgrade, rather than staying frozen at the set they first seeded.
+
 ## Near future
 
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf

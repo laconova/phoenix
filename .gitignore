@@ -63,3 +63,4 @@ CLAUDE.md
 # Internal working notes (traps, measurements, machine paths, session state). Deliberately
 # NOT shipped — decided 2026-07-28. They live in the dev tree only, where they are tracked.
 dev-notes/
+workflows/custom/

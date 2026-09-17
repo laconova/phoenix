@@ -280,11 +280,27 @@ function buildAnimateHumanCode(fbxAbs, characterName, hyFix) {
     '        # retarget: copy-rotation on every matching bone (suffix-robust) + hips copy-location',
     '        def _suf(n): return n.split(":")[-1]',
     '        _src_by = {_suf(b.name): b.name for b in src.pose.bones}',
+    // Per-bone retarget space, because the character's rest pose diverges from the Mixamo
+    // source unevenly. A full WORLD copy forces every bone to the source's ABSOLUTE orientation;
+    // where a bone's rest differs AND it barely moves, that bakes the rest DIFFERENCE in as a
+    // permanent offset (measured: Spine2 +45deg, Neck +48deg, LeftToe +152deg, all ~constant) —
+    // an arched back and toes curled under.
+    //   * Spine chain + neck/head  -> LOCAL (rest-relative) copy: the offset cancels, the small
+    //     real sway survives, back stays upright.
+    //   * Arms / legs / hips / etc -> WORLD copy: motion is absolute there and correct; LOCAL
+    //     would tilt the arm swing forward (A-pose char rest vs T-pose source).
+    //   * Toes -> NEUTRALIZE (no constraint): they keep the character rest and ride the animated
+    //     foot rigidly. WORLD curls them 152deg under; LOCAL removes the curl but the toe-off
+    //     residual maps through the toe's roll mismatch and twists the tips OUTWARD. A rigid toe
+    //     can do neither, and toe articulation is invisible on a background/statist walker.
+    // Verified per-bone on rendered walks 2026-08-18 — dev-notes/retarget-rest-offset-spine-toes-2026-08-18.md.
+    '        _LOCAL_BONES = {"Spine","Spine1","Spine2","Neck","Head"}',
+    '        _SKIP_BONES = {"LeftToeBase","RightToeBase"}',
     '        _m = 0',
     '        for pb in dst.pose.bones:',
     '            _s = _suf(pb.name)',
-    '            if _s in _src_by:',
-    '                c = pb.constraints.new("COPY_ROTATION"); c.target = src; c.subtarget = _src_by[_s]; _m += 1',
+    '            if _s in _src_by and _s not in _SKIP_BONES:',
+    '                c = pb.constraints.new("COPY_ROTATION"); c.target = src; c.subtarget = _src_by[_s]; c.owner_space = c.target_space = ("LOCAL" if _s in _LOCAL_BONES else "WORLD"); _m += 1',
     '        _hips = dst.pose.bones.get("mixamorig:Hips")',
     '        if _hips:',
     '            c = _hips.constraints.new("COPY_LOCATION"); c.target = src; c.subtarget = "mixamorig:Hips"',
@@ -478,15 +494,51 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     // diverge hard when the body is horizontal (a crawl points its hips at the floor):
     // matching the bone orientation there rotates the clip by tens of degrees for nothing.
     // Returns None when the clip barely moves — an idle has no heading to match.
+    // Two window sizes on purpose. The OUTGOING end-heading (what the chain is currently
+    // heading) is read over a full gait cycle so the ±10-degree pelvis sway averages out and does
+    // not bias the seam — a short window there is what let a straight chain accumulate a bow. The
+    // INCOMING start-heading is read over a short window so a clip that turns is aligned by the
+    // direction it actually LEAVES the seam on, not by its whole-clip chord (a full-cycle window
+    // there measures the turn's average heading and cancels the turn). Sway on the incoming side
+    // does not accumulate: it is a per-seam wobble against a stable reference, and the crossfade
+    // absorbs it, whereas a biased OUTGOING reference feeds forward into every later clip.
     '    _HEAD_WIN = 6',
-    '    def _travel_dir(fcs, f, back):',
-    '        _a1 = _val(fcs, f - _HEAD_WIN) if back else _val(fcs, f)',
-    '        _a2 = _val(fcs, f) if back else _val(fcs, f + _HEAD_WIN)',
+    '    _HEAD_WIN_OUT = 24',
+    '    def _travel_dir(fcs, f, back, win=None):',
+    '        _w = win if win is not None else _HEAD_WIN',
+    '        _a1 = _val(fcs, f - _w) if back else _val(fcs, f)',
+    '        _a2 = _val(fcs, f) if back else _val(fcs, f + _w)',
     '        _d = _RESTW @ Vector([_a2[_k] - _a1[_k] for _k in range(3)])',
     '        _d.z = 0.0',
     '        if _d.length < 0.02:',
     '            return None',
     '        return math.atan2(_d.y, _d.x)',
+    '    def _angwrap(_a):',
+    '        return (_a + math.pi) % (2.0 * math.pi) - math.pi',
+    // Start and end TRAVEL heading of a clip, robust to gait sway — the core of chaining without a
+    // bow. A Mixamo clip is ~one gait cycle, so any sub-window is maximally swayed; only the
+    // whole-clip path net (the CHORD) is sway-free, but the chord alone cannot separate a clip's
+    // start heading from its end heading. The clip's own internal rotation supplies that: the net
+    // FACING change over the clip (end facing - start facing). Because the clip loops (same gait
+    // phase at both ends) the ±sway cancels in that difference, leaving the true turn. Then
+    // start = chord - turn/2 and end = chord + turn/2. A straight walk has turn 0, so start = end =
+    // chord: two of them chain with zero rotation and cannot accumulate a bow. A left turn gets
+    // start = the direction it LEAVES on (so it continues the previous clip) and end = the new
+    // heading (so the chain follows the turn). Returns (None, None) for a clip that does not
+    // travel — an idle or a flip that lands where it took off — where the facing fallback takes over.
+    // Threshold is on the WHOLE-clip net, not the 6-frame _travel_dir window: a real walk covers
+    // >1 m over its cycle, an "in-place" clip (a hammer, an idle) drifts well under 0.3 m from mocap
+    // noise. Using _travel_dir\'s 0.02 here treated that noise as a heading and spun in-place clips by
+    // 100+ degrees. Below the threshold the clip is "not traveling" and the facing fallback handles it.
+    '    def _clip_head(fcs, qf, ef, f0, f1):',
+    '        _a = _val(fcs, f0); _b = _val(fcs, f1)',
+    '        _d = _RESTW @ Vector([_b[_k] - _a[_k] for _k in range(3)]); _d.z = 0.0',
+    '        if _d.length < 0.3:',
+    '            return None, None',
+    '        _c = math.atan2(_d.y, _d.x)',
+    '        _fs = _side_dir(qf, ef, f0); _fe = _side_dir(qf, ef, f1)',
+    '        _turn = _angwrap(_fe - _fs) if (_fs is not None and _fe is not None) else 0.0',
+    '        return _angwrap(_c - _turn / 2.0), _angwrap(_c + _turn / 2.0)',
     // Fallback for clips that barely travel -- a backflip lands where it took off, so there
     // is no travel direction to match, and matching nothing leaves the seam unfixed.
     // Reference then is the hip's SIDEWAYS axis (bone X). Deliberately not the bone's long
@@ -560,31 +612,12 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '        if _s.length < 0.15:',
     '            return None',
     '        return math.atan2(_s.y, _s.x)',
-    // Both ends of a seam must be measured the SAME way or the difference is meaningless.
-    // prev is a (travel, facing) pair — either sampled from the outgoing clip's curves or,
-    // when appending, off the live rig.
-    //
-    // FACING wins, travel is the fallback. Measured 2026-07-23 on three chained HY walks:
-    // matching travel left a +36.1 degree BODY snap in a single frame at every seam, because a
-    // clip's own start and the previous clip's end hold different body-to-path relations (a
-    // generated clip begins with a start-up transient: 125 degrees between body and path,
-    // against 92 degrees mid-stride). A rigid yaw can satisfy exactly one of the two, so the
-    // choice is which discontinuity the viewer gets — and the eye tracks the BODY, not the
-    // path. Facing also stays defined where travel does not: an idle, a clip that lands where
-    // it took off, and the airborne part of a jump all have no travel direction, and a
-    // run->jump->run chain is made of exactly those.
-    // Safe against the crawl case that made travel the original default: _side_dir reads the
-    // hip's SIDEWAYS axis, which stays horizontal even when the body is — it is the bone's
-    // long axis that points at the floor, and that one is deliberately not used here.
-    '    def _seam_from(prev, nf, nq, ne, nfr):',
-    '        _pt, _ps = prev',
-    '        _o = _side_dir(nq, ne, nfr)',
-    '        if _ps is not None and _o is not None:',
-    '            return _ps, _o, "facing"',
-    '        _o = _travel_dir(nf, nfr, False)',
-    '        if _pt is not None and _o is not None:',
-    '            return _pt, _o, "travel"',
-    '        return None, None, "none"',
+    // Seam heading is no longer chosen by a per-seam facing-vs-travel pick (that matched the hip's
+    // oscillating facing and accumulated a bow across a chain — see the 2026-08-17 dev-note). It now
+    // runs in the placement loop below: _clip_head gives each clip a gait-sway-robust start/end
+    // travel heading, a persistent _chain_head carries the direction forward, and _side_dir facing
+    // is the fallback only for clips that do not travel. _side_dir stays; the old _travel_dir helper
+    // above is kept as a small utility.
     '    def _rotate_clip(qf, ef, lfcs, ang, pivot):',
     '        if abs(ang) < 1e-6:',
     '            return',
@@ -705,10 +738,15 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '        # retarget WITH real root motion: rotation on every bone + hips location',
     '        _src_by = {_suf(b.name): b.name for b in src.pose.bones}',
     ...clipPlacePy,
+    // See the single-clip path for the full rationale: LOCAL (rest-relative) for the spine
+    // chain + neck/head to cancel the baked-in rest offset, WORLD for the high-motion bones,
+    // and toes NEUTRALIZED (no constraint) so they can neither curl under nor twist outward.
+    '        _LOCAL_BONES = {"Spine","Spine1","Spine2","Neck","Head"}',
+    '        _SKIP_BONES = {"LeftToeBase","RightToeBase"}',
     '        for pb in dst.pose.bones:',
     '            _s = _suf(pb.name)',
-    '            if _s in _src_by:',
-    '                c = pb.constraints.new("COPY_ROTATION"); c.target = src; c.subtarget = _src_by[_s]',
+    '            if _s in _src_by and _s not in _SKIP_BONES:',
+    '                c = pb.constraints.new("COPY_ROTATION"); c.target = src; c.subtarget = _src_by[_s]; c.owner_space = c.target_space = ("LOCAL" if _s in _LOCAL_BONES else "WORLD")',
     ...rootLocPy,
     '        # bake this clip into a fresh action',
     '        dst.animation_data.action = None',
@@ -753,6 +791,94 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                try: dst.animation_data.nla_tracks.remove(_tr)',
     '                except Exception: pass',
     '            dst.animation_data.action = None',
+    // A seam pops when the outgoing clip's END pose and the incoming clip's START pose differ. A walk
+    // looped into itself matches almost exactly (measured: summed bone-orientation delta ~0, a 0.02 m
+    // hand gap) so a hard cut there is clean; a walk into a turn does NOT (the arms are in a wholly
+    // different place — a 0.48 m hand jump) and pops. `_pose_dist_rot` scores that mismatch as the
+    // summed per-bone orientation difference between the two actions at the seam frames.
+    //
+    // The naive cure is a longer NLA crossfade, but that BLENDS THE ROOT: the incoming hips fade in
+    // against the outgoing clip's frozen HOLD_FORWARD pose, so the root creeps at a fraction of speed
+    // while the feet step at full — a moonwalk slide right at the seam (measured: stance-foot/hip
+    // ratio up to 3.8 across the blend). So instead of crossfading, `_pose_easein` BAKES the smoothing
+    // into the incoming clip: over the first N frames it slerps each bone's ROTATION from the outgoing
+    // end pose toward the clip's own, and leaves the hips LOCATION untouched. Body eases in (no pop),
+    // root runs at full clip speed (no slide). Only for mismatched seams; a matched walk stays a crisp
+    // hard cut. The user's BLEND still sets the NLA crossfade independently (default 0).
+    '        def _pose_dist_rot(a1, fa, a2, fb):',
+    '            _dsum = 0.0; _seen = set()',
+    '            _q1 = _quatgroups(a1); _q2 = _quatgroups(a2)',
+    '            for _dp, _c2 in _q2.items():',
+    '                _c1 = _q1.get(_dp)',
+    '                if _c1 and all(x is not None for x in _c1) and all(x is not None for x in _c2):',
+    '                    _qa = Quaternion([_c1[_k].evaluate(fa) for _k in range(4)])',
+    '                    _qb = Quaternion([_c2[_k].evaluate(fb) for _k in range(4)])',
+    '                    _dsum += abs(_qa.rotation_difference(_qb).angle); _seen.add(_dp)',
+    '            _e1 = _eulergroups(a1); _e2 = _eulergroups(a2)',
+    '            for _dp, _c2 in _e2.items():',
+    '                if _dp in _seen: continue',
+    '                _c1 = _e1.get(_dp)',
+    '                if _c1 and all(x is not None for x in _c1) and all(x is not None for x in _c2):',
+    '                    _qa = Euler([_c1[_k].evaluate(fa) for _k in range(3)], "XYZ").to_quaternion()',
+    '                    _qb = Euler([_c2[_k].evaluate(fb) for _k in range(3)], "XYZ").to_quaternion()',
+    '                    _dsum += abs(_qa.rotation_difference(_qb).angle)',
+    '            return _dsum',
+    // Ease the incoming clip\'s body ROTATIONS from the outgoing end pose into its own over n frames.
+    // Rotations only — hips LOCATION (the root travel) is deliberately left alone, so the pose smooths
+    // without diluting the root (that is what stops the moonwalk). One key per frame after nla.bake.
+    // Ease ONLY the upper body. Easing a leg/foot bone drags a PLANTED foot toward the walk pose over
+    // the ease frames — a moonwalk slide (measured: both feet moving, min-foot speed up to 0.10). The
+    // legs/feet barely mismatch at a walk->turn seam anyway (~0.15 m, natural step level); the pop is
+    // all arms/hands (~0.48 m). So skip Hips + the whole leg chain; smooth spine/arms/hands/head only.
+    '        def _pose_easein(prev_a, seam_f, next_a, f0, n):',
+    '            if prev_a is None or n < 1:',
+    '                return',
+    '            def _skip(dp): return any(_b in dp for _b in ("Hips", "Leg", "Foot", "ToeBase"))',
+    '            _pg = _quatgroups(prev_a); _ng = _quatgroups(next_a)',
+    '            for _dp, _nc in _ng.items():',
+    '                if _skip(_dp):',
+    '                    continue',
+    '                _pc = _pg.get(_dp)',
+    '                if not _pc or any(x is None for x in _pc) or any(x is None for x in _nc):',
+    '                    continue',
+    '                _qp = Quaternion([_pc[_k].evaluate(seam_f) for _k in range(4)])',
+    '                for _ki in range(len(_nc[0].keyframe_points)):',
+    '                    _fr = _nc[0].keyframe_points[_ki].co.x',
+    '                    if _fr < f0 or _fr > f0 + n:',
+    '                        continue',
+    '                    _w = (_fr - f0) / float(n)',
+    '                    _qn = Quaternion([_nc[_k].keyframe_points[_ki].co.y for _k in range(4)])',
+    '                    _qb = _qp.slerp(_qn, _w)',
+    '                    for _k in range(4):',
+    '                        _kp = _nc[_k].keyframe_points[_ki]',
+    '                        _d = _qb[_k] - _kp.co.y',
+    '                        _kp.co.y += _d; _kp.handle_left.y += _d; _kp.handle_right.y += _d',
+    '                for _k in range(4):',
+    '                    _nc[_k].update()',
+    '            _pe = _eulergroups(prev_a); _ne = _eulergroups(next_a)',
+    '            for _dp, _nc in _ne.items():',
+    '                if _skip(_dp):',
+    '                    continue',
+    '                _pc = _pe.get(_dp)',
+    '                if not _pc or any(x is None for x in _pc) or any(x is None for x in _nc):',
+    '                    continue',
+    '                _qp = Euler([_pc[_k].evaluate(seam_f) for _k in range(3)], "XYZ").to_quaternion()',
+    '                for _ki in range(len(_nc[0].keyframe_points)):',
+    '                    _fr = _nc[0].keyframe_points[_ki].co.x',
+    '                    if _fr < f0 or _fr > f0 + n:',
+    '                        continue',
+    '                    _w = (_fr - f0) / float(n)',
+    '                    _cur = Euler([_nc[_k].keyframe_points[_ki].co.y for _k in range(3)], "XYZ")',
+    '                    _qn = _cur.to_quaternion()',
+    '                    _eb = _qp.slerp(_qn, _w).to_euler("XYZ", _cur)',
+    '                    for _k in range(3):',
+    '                        _kp = _nc[_k].keyframe_points[_ki]',
+    '                        _d = _eb[_k] - _kp.co.y',
+    '                        _kp.co.y += _d; _kp.handle_left.y += _d; _kp.handle_right.y += _d',
+    '                for _k in range(3):',
+    '                    _nc[_k].update()',
+    '        _MIS_THRESH = 1.5',
+    '        _EASE_N = 6',
     '        # effective crossfade per seam: the strip overlap and the blend-in must be the SAME',
     '        # number of frames, or the incoming strip reaches full weight while the outgoing one',
     '        # is still playing (that mismatch was a visible hitch at every seam).',
@@ -767,7 +893,7 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                _lp = baked[_j - 1][2] - baked[_j - 1][1]',
     '                _effs.append(min(BLEND, max(1, _lj // 2), max(1, _lp // 2)))',
     '        # where the chain has to pick up: on append, read the hips out of the existing NLA',
-    '        _target = None; _prev_yaws = None',
+    '        _target = None; _chain_head = None; _prev_face = None',
     '        _prev_action = None; _prev_seam_f = 0',
     '        if _append:',
     '            _sf = max(1, _existing_end - _effs[0])',
@@ -782,13 +908,14 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                _p2 = _m2.to_translation().copy()',
     '                _sv = _m2.to_3x3() @ Vector((1.0, 0.0, 0.0)); _sv.z = 0.0',
     '                _face = math.atan2(_sv.y, _sv.x) if _sv.length >= 0.15 else None',
-    '                bpy.context.scene.frame_set(max(1, _sf - _HEAD_WIN))',
+    '                bpy.context.scene.frame_set(max(1, _sf - _HEAD_WIN_OUT))',
     '                bpy.context.view_layer.update()',
     '                _p1 = (dst.matrix_world @ _pbh.matrix).to_translation().copy()',
     '                bpy.context.scene.frame_set(_sf)',
     '                bpy.context.view_layer.update()',
     '                _dv = _p2 - _p1; _dv.z = 0.0',
-    '                _prev_yaws = (math.atan2(_dv.y, _dv.x) if _dv.length >= 0.02 else None, _face)',
+    '                _chain_head = math.atan2(_dv.y, _dv.x) if _dv.length >= 0.02 else None',
+    '                _prev_face = _face',
     '            # the outgoing clip is an NLA strip here, not a live action -- fetch the one',
     '            # that reaches furthest and convert the seam frame into ITS action time',
     '            _ls = None',
@@ -806,21 +933,43 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '            _idx = _track_off + _j',
     '            _fcs = _hipfc(_a)',
     '            _qf, _ef = _hiprotfc(_a)',
-    '            # 1) face the way the chain was heading. MUST happen before the position',
-    '            #    offset: rotating afterwards would swing the already-placed path away',
-    '            #    from the seam point again.',
-    '            if _prev_yaws is not None:',
-    '                _t, _o, _how = _seam_from(_prev_yaws, _fcs, _qf, _ef, _f0)',
-    '                if _t is not None:',
-    '                    _dy = (_t - _o + math.pi) % (2 * math.pi) - math.pi',
-    '                    _rotate_clip(_qf, _ef, _fcs, _dy, _val(_fcs, _f0))',
-    '                    print("SEQ_YAW:clip=%d turned=%+.1f via=%s" % (_j, math.degrees(_dy), _how))',
-    '                else:',
-    '                    print("SEQ_YAW:clip=%d no-reference" % _j)',
+    '            # 1) FACE the way the chain is heading — before the position offset, since rotating',
+    '            #    afterwards would swing the already-placed path off the seam. A traveling clip',
+    '            #    aligns its START heading to _chain_head and then advances _chain_head by its own',
+    '            #    turn (end-start), so straight walks rotate ~0 and nothing accumulates into a bow',
+    '            #    while a turn is preserved AND carries the chain around. A clip that does not',
+    '            #    travel (idle / a flip that lands where it took off) keeps the body continuous via',
+    '            #    facing and leaves _chain_head untouched. All headings are read BEFORE the rotate',
+    '            #    and advanced by _dy, because _rotate_clip mutates the very curves they come from.',
+    '            _sh, _eh = _clip_head(_fcs, _qf, _ef, _f0, _f1)',
+    '            _ownface = _side_dir(_qf, _ef, _f0)',
+    '            _endface = _side_dir(_qf, _ef, _f1)',
+    '            _dy = 0.0; _how = "first"',
+    '            if _sh is not None:',
+    '                _how = "travel"',
+    '                if _chain_head is not None:',
+    '                    _dy = _angwrap(_chain_head - _sh)',
+    '            elif _chain_head is not None and _prev_face is not None and _ownface is not None:',
+    '                _how = "facing"; _dy = _angwrap(_prev_face - _ownface)',
+    '            if abs(_dy) > 1e-6:',
+    '                _rotate_clip(_qf, _ef, _fcs, _dy, _val(_fcs, _f0))',
+    '            print("SEQ_YAW:clip=%d turned=%+.1f via=%s" % (_j, math.degrees(_dy), _how))',
+    '            if _sh is not None:',
+    '                _chain_head = _angwrap(_eh + _dy)',
+    '            if _endface is not None:',
+    '                _prev_face = _angwrap(_endface + _dy)',
     '            # after any rotation: put every bone on the short arc across the seam',
     '            _flip = _match_rot_continuity(_prev_action, _prev_seam_f, _a, _f0)',
     '            if _flip:',
     '                print("SEQ_FLIP:clip=%d bones=%d" % (_j, _flip))',
+    '            # a mismatched seam (walk->turn) pops on a hard cut and slides on a crossfade — bake a',
+    '            # rotation ease-in instead: body smooths, root stays full speed. Matched seams skip it.',
+    '            if _prev_action is not None:',
+    '                _mis = _pose_dist_rot(_prev_action, _prev_seam_f, _a, _f0)',
+    '                if _mis > _MIS_THRESH:',
+    '                    _en = min(_EASE_N, max(1, (_f1 - _f0) // 2))',
+    '                    _pose_easein(_prev_action, _prev_seam_f, _a, _f0, _en)',
+    '                    print("SEQ_EASE:clip=%d dist=%.2f frames=%d" % (_j, _mis, _en))',
     '            # 2) then move it so it starts where the previous clip stood at the seam',
     '            _s = _val(_fcs, _f0)',
     '            if _target is None:',
@@ -844,7 +993,6 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     '                _sn = _f1 - _effs[_j + 1]',
     '                if _sn < _f0: _sn = _f0',
     '                _target = _val(_fcs, _sn)',
-    '                _prev_yaws = (_travel_dir(_fcs, _sn, True), _side_dir(_qf, _ef, _sn))',
     '                _prev_action = _a; _prev_seam_f = _sn',
     '            # stack on its own NLA track (higher = later), blend-in crossfade',
     '            _tr = dst.animation_data.nla_tracks.new(); _tr.name = "Seq %02d" % _idx',

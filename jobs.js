@@ -17,8 +17,10 @@ let counter = 0;
  * start(meta, work) — attempt to launch a background job.
  *
  * meta: { kind?: string, label?: string }
- * work: async (id) => string  — the heavy function; its return value becomes
- *       the job's status string on success.
+ * work: async (id, signal) => string  — the heavy function; its return value becomes
+ *       the job's status string on success. The second arg is an AbortSignal that fires
+ *       when cancel(id) is called, so a long-running job (e.g. downloader.acquire) can
+ *       kill its child process and stop. Existing callers that ignore it are unaffected.
  *
  * Returns:
  *   { started: true,  id }            — job accepted, running detached.
@@ -33,11 +35,13 @@ function start(meta, work) {
   }
 
   const id = ++counter;
+  const ac = new AbortController();
   current = {
     id,
     kind:      meta.kind  || 'gen',
     label:     meta.label || 'job',
     startedAt: Date.now(),
+    ac,
   };
 
   dbg.event('job', { phase: 'start', id, label: current.label });
@@ -46,7 +50,7 @@ function start(meta, work) {
   const label0 = current.label;
 
   Promise.resolve()
-    .then(() => work(id))
+    .then(() => work(id, ac.signal))
     .then(status => {
       dbg.event('job', { phase: 'done', id, label: label0, status: typeof status === 'string' ? status : '' });
     })
@@ -60,7 +64,23 @@ function start(meta, work) {
   return { started: true, id };
 }
 
-function isRunning() { return current !== null; }
-function info()      { return current; }
+/**
+ * cancel(id) — signal the running job to abort (there is at most one).
+ *   - id omitted → cancels whatever is running.
+ *   - id given but not the running job → { ok:false } (stale click; do not cancel someone else).
+ * Aborting only SIGNALS; the job's own work fn is responsible for stopping (downloader.acquire
+ * kills its child on the signal and marks the run cancelled). The slot clears when work settles.
+ */
+function cancel(id) {
+  if (current === null) return { ok: false, reason: 'no job is running' };
+  if (id != null && Number(id) !== current.id) {
+    return { ok: false, reason: 'job #' + id + ' is not the one running (#' + current.id + ')' };
+  }
+  try { current.ac.abort(); } catch (_) { /* already aborted */ }
+  return { ok: true, id: current.id };
+}
 
-module.exports = { start, isRunning, info };
+function isRunning() { return current !== null; }
+function info()      { return current ? { id: current.id, kind: current.kind, label: current.label, startedAt: current.startedAt } : null; }
+
+module.exports = { start, cancel, isRunning, info };
