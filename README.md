@@ -1,6 +1,6 @@
 # Phoenix
 
-**Text → 3D prop pipeline.** Phoenix is an AI agent that turns a short text prompt into a 3D prop. It orchestrates a local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) through a chat‑driven pipeline — prompt → reference image → 3D mesh → Blender import — all from a single browser UI.
+**A creative's control room for local AI.** Phoenix is a free, open‑source harness that brings the messy toolchain of local AI generation — concept images, 3D meshes, voice & sound, image editing, a Blender bridge — into one browser workbench and *drives the tools for you*. Describe what you want in plain language; Phoenix runs the pipeline and hands you an asset to finish in Blender. It all runs on your own GPU — the flagship pipeline (prompt → reference image → 3D mesh → Blender) is the fastest way to see it work.
 
 Built by [Laconova](https://laconova.com). Phoenix is the first public release built on Laconova's in-house agent harness — the same foundation behind the developer tooling we're building next.
 
