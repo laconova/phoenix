@@ -7,6 +7,7 @@ const dbg    = require('./debug-log');
 const palette = require('./palette');
 const { callBlender } = require('./blender-ipc');
 const { demetalPy } = require('./mesh-import-fix');
+const checkpoints = require('./checkpoints');   // scene checkpoint before an import (v1.9 M5)
 
 // ─── Stage list ───────────────────────────────────────────────────────────────
 
@@ -282,7 +283,25 @@ async function runMeshStage(ctx) {
   };
 }
 
-async function runImportStage(ctx) {
+// M10: join the triangle pairs of a Meshy quad GLB back into quads (bmesh, object mode, no operator, no selection change).
+function quadRestorePy(list) {
+  return [
+    'import bmesh',
+    '_q = _t = 0',
+    `for _o in ${list}:`,
+    '    _bm = bmesh.new()',
+    '    _bm.from_mesh(_o.data)',
+    '    bmesh.ops.join_triangles(_bm, faces=_bm.faces[:], angle_face_threshold=0.698132, angle_shape_threshold=0.698132, cmp_seam=False, cmp_sharp=False, cmp_uvs=True, cmp_vcols=False, cmp_materials=True)',
+    '    _bm.to_mesh(_o.data)',
+    '    _o.data.update()',
+    '    _q += sum(1 for _f in _bm.faces if len(_f.verts) == 4)',
+    '    _t += sum(1 for _f in _bm.faces if len(_f.verts) == 3)',
+    '    _bm.free()',
+    'print("QUADS_RESTORED:" + str(_q) + ":" + str(_t))',
+  ];
+}
+
+async function runImportStage(ctx, opts) {
   // Mirrors toolImportAsset in assistant.js
   let assetPath = ctx.glb || '';
   const cleanup = ctx.cleanup === true || ctx.cleanup === 'true';
@@ -312,6 +331,9 @@ async function runImportStage(ctx) {
   const fwd      = assetPath.replace(/\\/g, '/');
   const basename = path.basename(fwd);
 
+  // M10: GLB cannot store quads — a Meshy quad result comes back as triangle pairs; join them again right after the glTF import.
+  const quadFix = /_meshy_quad\d+(\.\d+)?k(_\d+)?\.glb$/i.test(basename) ? quadRestorePy('imported') : [];
+
   let code;
   if (!cleanup) {
     // RAW import — default; no shading applied (aber entmetallisiert: siehe mesh-import-fix.js)
@@ -319,6 +341,7 @@ async function runImportStage(ctx) {
       'import bpy',
       `bpy.ops.import_scene.gltf(filepath=${JSON.stringify(fwd)})`,
       'imported = [o for o in bpy.context.selected_objects if o.type == "MESH"]',
+      ...quadFix,
       ...demetalPy('imported'),
       `print("IMPORT_OK:" + ${JSON.stringify(basename)})`,
     ].join('\n');
@@ -339,9 +362,28 @@ async function runImportStage(ctx) {
       '            bpy.ops.object.shade_smooth_by_angle(angle=0.523599)',
       '        except Exception:',
       '            bpy.ops.object.shade_smooth()',
+      ...quadFix,
       ...demetalPy('imported'),
       `print("IMPORT_OK:" + ${JSON.stringify(basename)})`,
     ].join('\n');
+  }
+
+  // M5: checkpoint of the open scene BEFORE the import (covers generate_prop's import, background phase C and the
+  // /action approve-mesh). A chat tool that already checkpointed in this turn (import_asset) says so in ctx.checkpointed.
+  // A broken checkpoint never blocks the import; the warning line travels back in the result.
+  let checkpointWarning = '';
+  if (!ctx.checkpointed) {
+    let cpCfg = opts && opts.cfg;
+    let cpTurn = opts && opts.turn;
+    try {
+      const asst = require('./assistant');   // lazy: assistant.js requires this module
+      if (!cpCfg) cpCfg = asst.loadConfig();
+      if (cpTurn == null) cpTurn = (asst.loadState() || {}).turnSeq;
+    } catch (_) {}
+    if (checkpoints.settings(cpCfg).enabled) {
+      const cp = await checkpoints.take('import', { cfg: cpCfg, turn: cpTurn });
+      if (cp && cp.ok === false) checkpointWarning = '⚠ checkpoint failed before import: ' + cp.error + ' — this step cannot be rewound.';
+    }
   }
 
   try {
@@ -354,7 +396,7 @@ async function runImportStage(ctx) {
     if (!result || result.status === 'error' || !out.includes('IMPORT_OK:')) {
       const tb = (out.match(/Traceback[\s\S]*/) || [''])[0].trim().slice(0, 400);
       const msg = (result && result.message) || '';
-      return { ok: false, stage: 'import', error: 'import failed in Blender' + (tb ? ': ' + tb : (msg ? ': ' + msg : '')) };
+      return { ok: false, stage: 'import', error: 'import failed in Blender' + (tb ? ': ' + tb : (msg ? ': ' + msg : '')) + (checkpointWarning ? '\n' + checkpointWarning : '') };
     }
     const name = path.basename(assetPath, '.glb');
     // Update scene cache (mirrors assistant.js toolImportAsset L312–317; keep pipeline.js self-contained)
@@ -375,9 +417,10 @@ async function runImportStage(ctx) {
         }, null, 2));
       }
     } catch {}
-    return { ok: true, stage: 'import', artifact: name };
+    const qm = out.match(/QUADS_RESTORED:(\d+):(\d+)/);
+    return Object.assign({ ok: true, stage: 'import', artifact: name }, qm ? { quadsRestored: { quads: +qm[1], tris: +qm[2] } } : {}, checkpointWarning ? { checkpointWarning } : {});
   } catch (e) {
-    return { ok: false, stage: 'import', error: e.message };
+    return { ok: false, stage: 'import', error: e.message + (checkpointWarning ? '\n' + checkpointWarning : '') };
   }
 }
 

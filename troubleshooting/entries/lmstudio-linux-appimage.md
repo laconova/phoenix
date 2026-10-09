@@ -30,7 +30,7 @@ installation" · Phoenix preflight says LM Studio is absent on a Linux machine w
    lms server start
    ```
 4. **Verify:** `curl http://localhost:1234/v1/models` → HTTP 200 JSON → point Phoenix's
-   `endpoints.lmstudio` at `http://localhost:1234`.
+   `endpoints.local` at `http://localhost:1234/v1` (Settings → General → Seats, or `phoenix-config.json`; `endpoints.lmstudio` is not read).
 
 *(With sudo available: `sudo apt install libfuse2t64` makes the AppImage itself runnable — steps 2–4
 unchanged. Truly no desktop session anywhere: `sudo apt install xvfb`, then `xvfb-run -a` replaces

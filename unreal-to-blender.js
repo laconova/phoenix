@@ -495,6 +495,8 @@ async function unrealToBlender(opts = {}) {
     return { asset, slug, glb: glbPath, cached, steps, glbInfo: glb, exported, blender: null };
   }
 
+  // Sweep 1c: the caller's checkpoint hook runs right before Blender is touched (after the possibly slow Unreal export).
+  if (typeof opts.beforeBlender === 'function') { const n = String((await opts.beforeBlender()) || '').trim(); if (n) steps.push(n); }
   const blender = await importIntoBlender(glbPath, cfg, glb.noMetallic);
   const meshes  = blender.objects.filter(o => o.type === 'MESH');
   steps.push(
@@ -641,7 +643,7 @@ async function unrealToBrush(opts = {}) {
   const asset = opts.asset;
   if (!asset) throw new Error('asset required, e.g. "/Game/Props/SM_Crate"');
 
-  const imported = await unrealToBlender({ asset, refresh: opts.refresh, cfg });
+  const imported = await unrealToBlender({ asset, refresh: opts.refresh, beforeBlender: opts.beforeBlender, cfg });
   const steps    = imported.steps.slice();
 
   const objects = imported.blender.objects;

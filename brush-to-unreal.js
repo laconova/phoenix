@@ -301,6 +301,13 @@ async function ensureBrushGlb(opts = {}) {
   const cached = fs.existsSync(glbPath) && fs.statSync(glbPath).size > 0
                  && fs.statSync(glbPath).mtimeMs >= srcMtime && !opts.refresh;
   let blender  = null;
+  // Sweep 1c: opts.beforeBlender (the caller's checkpoint hook) runs right before Blender is really used — never on a pure cache hit.
+  const notes = [];
+  const beforeBlender = async () => {
+    if (typeof opts.beforeBlender !== 'function') return;
+    const n = String((await opts.beforeBlender()) || '').trim();
+    if (n) { notes.push(n); steps.push(n); }
+  };
 
   if (cached) {
     if (opts.keepInBlender) {
@@ -310,6 +317,7 @@ async function ensureBrushGlb(opts = {}) {
       // Non-fatal: if Blender is closed this must NOT sink the Unreal half, so a failed placement
       // degrades to a warning step and the caller still imports the cached GLB into Unreal.
       try {
+        await beforeBlender();
         await placeBrush(slug, slug);
         steps.push(`GLB from cache (${fs.statSync(glbPath).size} bytes); placed in Blender scene (kept)`);
       } catch (e) {
@@ -319,6 +327,7 @@ async function ensureBrushGlb(opts = {}) {
       steps.push(`GLB from cache (${fs.statSync(glbPath).size} bytes) — Blender not involved`);
     }
   } else {
+    await beforeBlender();
     const before = await sceneObjectNames(cfg);
     await placeBrush(slug, slug);
     blender = await exportAndClean(before, glbPath, cfg, !!opts.keepInBlender);
@@ -327,7 +336,7 @@ async function ensureBrushGlb(opts = {}) {
     steps.push(blender.cleaned ? 'removed from Blender scene' : 'left in Blender scene');
   }
 
-  return { slug, glb: glbPath, cached, bytes: fs.statSync(glbPath).size, steps, blender };
+  return { slug, glb: glbPath, cached, bytes: fs.statSync(glbPath).size, steps, notes, blender };
 }
 
 /**

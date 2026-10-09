@@ -80,7 +80,7 @@ for (const f of files) {
 
   for (const m of src.matchAll(/__dirname,\s*['"]([^'"]+\.(?:js|py|json|md|bat))['"]/g)) {
     checked++;
-    if (!fs.existsSync(path.join('.', m[1]))) note(f, m[1], path.basename(m[1]));
+    if (!fs.existsSync(path.join(path.dirname(f), m[1]))) note(f, m[1], path.basename(m[1]));   // __dirname = the file's own folder
   }
 
   for (const m of src.matchAll(/['"](scripts\/[A-Za-z0-9_\-/]+\.py)['"]/g)) {

@@ -6,7 +6,7 @@ Phoenix is **alpha**: usable, but early.
 
 ## Now (this release)
 
-The core text → 3D prop pipeline, driven from one browser UI:
+The core text → 3D prop pipeline, driven from one browser UI — now with a choice of brain per role, Ask/Auto run modes, scene checkpoints and an MCP server (see *New in 1.9.0* below):
 
 - **Chat-driven generation** with per-stage gates (prompt · image · mesh) — plus a **vision gate**
   (`off` / `focused` / `full`) that renders the viewport after a scene-changing action and has a model
@@ -84,6 +84,28 @@ New in **1.8.1** — a library that ships with nothing, and a choice of voice:
 - **Upgrade pickup** — existing installs pick up newly-shipped built-in workflow definitions on
   upgrade, rather than staying frozen at the set they first seeded.
 
+New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a tool:
+
+- **A provider per seat** — the orchestrator, troubleshooter, metaprompter, vision and category-provider (`utility` in the config) roles each
+  pick their own model source: the Claude CLI, the Codex CLI (ChatGPT plan), a local OpenAI-compatible
+  server, or an API key. Models that drive tools pass a **tool test** (local ones also a short
+  **benchmark**); a non-Claude vision seat passes a **vision test** (a colour card proves it saw the
+  render) before it can be saved.
+- **Ask / Auto** — Ask stops at the gates; Auto runs to the end and stops only when the render check does
+  not clearly confirm a step. Tool steps per turn are budgeted.
+- **Checkpoints + rewind** — a copy of the open Blender scene before each scene-changing step (chat and MCP
+  alike, taken right where Blender is touched — e.g. a generated mesh right before its import; the Library and
+  Human-tab buttons do not take one yet), with a rewind that can itself be undone.
+- **Phoenix as an MCP server** — an external agent (Claude Code / Codex / Cursor) can generate props,
+  import them and check the result with Phoenix's render vision.
+- **GPU share** *(best effort)* — before an image or mesh stage Phoenix asks a local LLM server that shares the
+  card (LM Studio, Ollama, llama.cpp router) to unload its model. Only for the llama.cpp router does it wait
+  until the model is gone; for LM Studio and Ollama it does not confirm, and if unloading fails the job still runs.
+- **Remesh via Meshy** *(optional, paid)* — rebuild a staged mesh's topology in the cloud; a Meshy *quad*
+  result gets its quads restored on import (GLB can only store triangles).
+- **Resizable, collapsible panels** — drag or collapse the assistant and the Library; Settings is split into
+  a General and a Connections tab.
+
 ## Near future
 
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf
@@ -98,8 +120,9 @@ New in **1.8.1** — a library that ships with nothing, and a choice of voice:
 - **Rigid binding for machines** — robots, vehicles and other hard-surface rigs want each part
   parented to a bone, not weighted deformation. The folder model already carries them; the binding
   step is manual for now.
-- **Clean retopology** — 1.6.0 ships a *voxel* remesh, which is what automatic weights need but is
-  not a quality retopo. Proper retopology (and baking detail back onto it) is the next step.
+- **Clean retopology, locally** — 1.9.0 adds a paid, opt-in cloud remesh through Meshy (with quads restored
+  on import); 1.6.0's local remesh is a *voxel* remesh, which is what automatic weights need but is not a
+  quality retopo. Proper local retopology (and baking detail back onto it) is still the next step.
 
 ## Middle future
 
@@ -123,8 +146,16 @@ New in **1.8.1** — a library that ships with nothing, and a choice of voice:
 - **Workflows only run if their models/custom-nodes are present.** The Workflows tab shows a live
   dependency badge; a red badge means something is missing on your machine. The Troubleshooter helps
   locate what's missing.
-- **Prerequisites are real.** ComfyUI + multi-GB models + the Claude CLI are required for a full run.
+- **Prerequisites are real.** ComfyUI + multi-GB models + one brain of your choice (Claude CLI, Codex CLI, a local model server or an API key) are required for a full run.
   The onboarding wizard guides you, but it can't install them for you.
+- **Wizard / Settings corners (1.9.0).** The Settings dialog tests a seat against the *local* endpoint URL typed there, but only that one
+  (not ComfyUI's); a changed local URL starts a fresh test result rather than inheriting the old one (entries written before 1.9.0 stay valid).
+  The "controls stuck after a lost completion" fix asks the server once when the live stream (re)opens; a request sent in the same instant can
+  still release the UI one moment early. Unloading a model on a *remote* LM Studio is not possible from here — Phoenix says so instead of
+  running the local `lms`; the "unload after use" option of the metaprompter still uses the local `lms` only.
+
+- **Meshy records use the wall clock.** The 3-day life of a paid-task record and the 15-minute hold after an unconfirmed remesh are measured with the system clock; a large clock jump
+  (manual change, a long suspend, a wrong time after boot) can shorten or extend either of them. A remesh costs about 5 credits; check the Meshy dashboard (Tasks) if in doubt.
 
 ## Philosophy
 

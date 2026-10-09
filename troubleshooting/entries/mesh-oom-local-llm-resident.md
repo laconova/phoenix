@@ -4,10 +4,14 @@
 stage · mesh stage runs forever then times out while GPU shows ~full memory at 0% utilization ·
 `nvidia-smi` shows an `.lmstudio/.internal/utils/node` process holding 6–9 GB.
 **Applies to:** mesh · lmstudio · vram
-**Root cause:** the metaprompter's call **JIT-loads the local LLM into VRAM and leaves it there**
-(LM Studio's idle TTL only evicts after ~1 h). On a 10 GB card, Gemma-12B-Q4 (~8.6 GB with 8k context)
-plus Trellis cannot coexist → the mesh job OOMs. The eject-before-heavy-stage logic does not cover
-this path (found live).
+**Root cause:** a local LLM seat (LM Studio JIT-load, Ollama, llama.cpp) keeps its model in VRAM after its
+call (LM Studio's idle TTL only evicts after ~1 h). On a 10 GB card, Gemma-12B-Q4 (~8.6 GB with 8k context)
+plus Trellis cannot coexist → the mesh job OOMs.
+**Since 1.9.0 Phoenix tries to do this for you (best effort):** before an image or mesh stage it asks the local
+server to unload the model (LM Studio, Ollama, or a llama.cpp router server). Only for the llama.cpp router does it
+wait until the model is gone; for LM Studio and Ollama it does not confirm, and if unloading fails the job still
+runs. If you still see this, the unload did not work (server not reachable, a plain `llama-server` without an unload command — Phoenix never
+kills a process it did not start — or a model loaded by another program), so the manual steps below are the fallback.
 
 ## Fix — do it for me
 1. Free the VRAM: `lms unload --all` (add `~/.lmstudio/bin` to PATH if `lms` is not found).
@@ -18,9 +22,8 @@ this path (found live).
 ## Fix — explain it
 Two GPU tenants, one 10 GB card: the prompt-writing LLM and the 3D generator each want most of it.
 They never need to run at the same moment — the prompt is finished before the mesh starts — but
-LM Studio keeps the model warm long after its last call. Until Phoenix ejects automatically before
-heavy stages (planned; same problem automatic model eviction before heavy stages solves system-wide), unload manually between
-"prompt work" and "mesh work".
+LM Studio keeps the model warm long after its last call. Phoenix now asks it to unload before heavy
+stages (best effort); when that does not work (see above), unload manually between "prompt work" and "mesh work".
 
 ## Verify
 `lms ps` → no LLM listed (or STATUS not loaded) · mesh stage completes; ComfyUI log ends with
@@ -29,5 +32,5 @@ heavy stages (planned; same problem automatic model eviction before heavy stages
 ## Notes
 - The image stage usually survives (SD1.5 is small); it's the **mesh** stage that collides.
 - LM Studio's TTL (~1 h) will *eventually* free it — never soon enough for a pipeline run.
-- Long-term fix = Phoenix ejects before mesh dispatch / loads the metaprompter with a short TTL;
-  system-wide fix = automatic model eviction before heavy stages.
+- Automatic, best effort: Phoenix asks LM Studio / Ollama / llama.cpp-router to unload before image and mesh stages (the manual
+  `lms unload --all` is the fallback).

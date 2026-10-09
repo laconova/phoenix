@@ -110,11 +110,13 @@ custom node needed, just a recent ComfyUI (0.27.0 is fine). Runs on the current 
 
 ## 4. Metaprompter routing — LM Studio is optional with the default config
 
-**Root cause / fact:** `phoenix.js:271` → `const isLocal = !/^claude/i.test(GEMMA_MODEL)`. If the
-metaprompter seat's model **starts with `claude`**, the metaprompt runs through the **Claude CLI**, and
-LM Studio is never touched. The default config uses `claude-haiku-4-5-20251001`, so:
+**Root cause / fact:** routing is decided by **`seats.metaprompter.provider`**. With `claude-cli` (the
+default) the metaprompt runs through the **Claude CLI** and LM Studio is never touched; with `openai-compat`
++ endpoint `local` it goes to your local server. (Only a seat that has *no* `provider` at all falls back to the
+legacy inference from the model name: `claude*` = CLI, anything else = local server.) The default config
+uses `claude-cli` with `claude-haiku-4-5-20251001`, so:
 - `[FAIL] Local LLM` in `preflight.js` is **harmless** here — nothing uses `:1234`.
-- LM Studio only matters if you switch the metaprompter seat to a local model (e.g. a Gemma). Then
+- LM Studio only matters if you switch the metaprompter seat to a local model (e.g. a Gemma; Settings → General → Seats). Then
   start LM Studio, load that model (or enable JIT), and point `endpoints.local` at its `/v1`.
 
 ---

@@ -21,16 +21,14 @@ function loadConfig() {
 
 const { loadPalette } = require('./palette');
 const { getActive, resolveSlot, resolveWorkflowFile } = require('./workflows');
+const providers = require('./providers');   // every LLM call (metaprompter, category) goes through the seat → provider layer
 const i2iEngine = require('./i2i');   // freeOtherInstances — evict an i2i model left resident on the OTHER instance before mesh/image
 
 const _cfg     = loadConfig();
 const _palette = loadPalette();
 
 const COMFY_BASE   = (_cfg.endpoints && _cfg.endpoints.comfyui) || 'http://localhost:8188';
-const LOCAL_BASE   = process.env.LOCAL_API   || (_cfg.endpoints && _cfg.endpoints.local) || 'http://localhost:1234/v1';
-const GEMMA_MODEL  = process.env.GEMMA_MODEL || (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.model) || 'claude-haiku-4-5-20251001';
 const EJECT_AFTER  = !!(_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.ejectAfterUse);
-const GEMMA_TEMP   = (_cfg.seats && _cfg.seats.metaprompter && _cfg.seats.metaprompter.temperature) || 0.7;
 
 // ─── VRAM ─────────────────────────────────────────────────────────────────────
 // Freeing ComfyUI's models before the mesh step is what keeps Flux and Trellis from
@@ -106,75 +104,9 @@ async function withProgress(label, fn) {
 
 // ─── LLM calls ───────────────────────────────────────────────────────────────
 
-const claudeCli = require('./claude-cli');
-
-// Prompt text must never be a command-line arg (cmd.exe/sh mangle newlines+specials):
-// system prompt goes to a temp file, user via stdin. See claude-cli.js.
-function callClaude(systemPrompt, user) {
-  return claudeCli.runSync('claude-sonnet-4-6', systemPrompt, user);
-}
-
-// lms lives in ~/.lmstudio/bin, which non-login shells (SSH, spawned servers) often
-// don't have on PATH — resolve the explicit path first, fall back to PATH lookup.
-function lmsBin() {
-  const home = process.env.USERPROFILE || process.env.HOME || '';
-  const cand = path.join(home, '.lmstudio', 'bin', process.platform === 'win32' ? 'lms.exe' : 'lms');
-  return fs.existsSync(cand) ? cand : 'lms';
-}
-function lmsLoad(modelKey) {
-  try {
-    const r = spawnSync(lmsBin(), ['load', modelKey, '-y'], { encoding: 'utf8', timeout: 120000 });
-    if (r.error)       { dbg.event('eject', { phase: 'load-error',   model: modelKey, error: r.error.message }); return; }
-    if (r.status !== 0){ dbg.event('eject', { phase: 'load-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
-    dbg.event('eject', { phase: 'loaded', model: modelKey });
-  } catch (e) { dbg.event('eject', { phase: 'load-throw', error: (e && e.message) || String(e) }); }
-}
-function lmsUnload(modelKey) {
-  try {
-    const r = spawnSync(lmsBin(), ['unload', modelKey], { encoding: 'utf8', timeout: 30000 });
-    if (r.error)       { dbg.event('eject', { phase: 'unload-error',   model: modelKey, error: r.error.message }); return; }
-    if (r.status !== 0){ dbg.event('eject', { phase: 'unload-nonzero', model: modelKey, code: r.status, stderr: String(r.stderr || '').slice(0, 200) }); return; }
-    dbg.event('eject', { phase: 'unloaded', model: modelKey });
-  } catch (e) { dbg.event('eject', { phase: 'unload-throw', error: (e && e.message) || String(e) }); }
-}
-
-async function callLocal(systemPrompt, user) {
-  const _t = Date.now();
-  const body = JSON.stringify({
-    model: GEMMA_MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: user },
-    ],
-    temperature: GEMMA_TEMP,
-    max_tokens: 4000,
-    stream: false,
-    thinking: { type: 'disabled' },
-  });
-  // Up to 2 attempts: LM Studio JIT-loads the model on the first request, which can
-  // briefly return "No models loaded" before the load finishes (a race). One retry
-  // after a short wait lets the load complete instead of failing the whole gen.
-  let lastErr = '';
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const res = await fetch(`${LOCAL_BASE}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body,
-      });
-      if (res.ok) {
-        const content = (await res.json()).choices[0].message.content.trim();
-        dbg.llm('metaprompter', { ms: Date.now() - _t, respChars: content.length, attempt });
-        return content;
-      }
-      lastErr = `HTTP ${res.status}: ${await res.text()}`;
-    } catch (e) {
-      lastErr = (e && e.message) || String(e);
-    }
-    if (attempt < 2) await new Promise(r => setTimeout(r, 3000)); // give JIT loading time
-  }
-  throw new Error(`Local metaprompter model "${GEMMA_MODEL}" isn't responding from LM Studio at ${LOCAL_BASE} (${lastErr}). Load the model in LM Studio (or enable JIT loading), then retry — or switch the metaprompter to Haiku in Settings (no local model needed).`);
-}
+// lms load/unload + the pre-stage GPU sharing live in providers/gpu-share.js
+const gpuShare = require('./providers/gpu-share');
+const { lmsLoad, lmsUnload } = gpuShare;
 
 // ─── Blender IPC ─────────────────────────────────────────────────────────────
 
@@ -411,9 +343,12 @@ const CAT_SYSTEM = [
   'Reply with ONLY the single category word. No explanation.',
 ].join('\n');
 
-function inferCategory(userPrompt) {
+async function inferCategory(userPrompt) {
   try {
-    const raw = callClaude(CAT_SYSTEM, userPrompt);
+    // 'utility' seat (default claude-sonnet-4-6); no extra CLI flags, as before.
+    const { text: raw } = await providers.complete('utility', _cfg, {
+      system: CAT_SYSTEM, messages: [{ role: 'user', content: userPrompt }], purpose: 'category', extraFlags: [],
+    });
     const cat = raw.trim().toLowerCase().split(/\s+/)[0];
     return CATEGORIES[cat] ? cat : 'item';
   } catch (e) {
@@ -445,17 +380,22 @@ const META_SYSTEM = META_SYSTEM_HEADER +
 
 async function generateMetaprompt(userPrompt, category) {
   const _mpUser = `Category: ${category}\nDescription: ${userPrompt}`;
-  const isLocal = !/^claude/i.test(GEMMA_MODEL);
+  const seat = providers.resolveSeat('metaprompter', _cfg);
+  // LM Studio load/unload only makes sense for a local (keyless) OpenAI-compatible seat.
+  const isLocal = seat.provider === 'openai-compat' && seat.kind === 'local';
   let text;
-  if (isLocal) {
-    if (EJECT_AFTER) lmsLoad(GEMMA_MODEL);
-    try {
-      text = await callLocal(META_SYSTEM, _mpUser);
-    } finally {
-      if (EJECT_AFTER) lmsUnload(GEMMA_MODEL);
+  if (isLocal && EJECT_AFTER) lmsLoad(seat.model);
+  try {
+    ({ text } = await providers.complete('metaprompter', _cfg, {
+      system: META_SYSTEM, messages: [{ role: 'user', content: _mpUser }], purpose: 'metaprompt',
+    }));
+  } catch (e) {
+    if (isLocal && e && e.kind === 'unreachable') {
+      throw new Error(`Local metaprompter model "${seat.model}" isn't responding from LM Studio at ${seat.url} (${e.message}). Load the model in LM Studio (or enable JIT loading), then retry — or switch the metaprompter to Haiku in Settings (no local model needed).`);
     }
-  } else {
-    text = await callClaudeMeta(META_SYSTEM, _mpUser, GEMMA_MODEL);
+    throw e;
+  } finally {
+    if (isLocal && EJECT_AFTER) lmsUnload(seat.model);
   }
   const posM = text.match(/POSITIVE:\s*([\s\S]+?)(?:\nNEGATIVE:|$)/i);
   const negM = text.match(/NEGATIVE:\s*([\s\S]+?)$/i);
@@ -472,14 +412,12 @@ async function generateMetaprompt(userPrompt, category) {
   };
 }
 
-async function callClaudeMeta(systemPrompt, user, model) {
-  return claudeCli.runStream(model, systemPrompt, user, { extraFlags: ['--tools', '', '--strict-mcp-config'] });
-}
-
 // ─── Stage: Flux image gen ───────────────────────────────────────────────────
 
 async function runFlux(session) {
   await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
+  // Local model servers sharing the GPU: unload where possible, else one honest notice (never kills anything).
+  await gpuShare.beforeGpuStage(_cfg, 'image');
   // Free an i2i model (Qwen) left resident on the OTHER instance before loading Flux here — same
   // one-GPU multi-instance OOM as the mesh path. Gated by the same switch, best-effort. (F2, 2026-08-06)
   if (FREE_COMFY_BEFORE_MESH) { try { await i2iEngine.freeOtherInstances(_cfg, COMFY_BASE); } catch (_) {} }
@@ -526,11 +464,10 @@ async function runFlux(session) {
 
 async function runTrellis(session) {
   await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
-  // Mesh OOMs on 10GB cards when the local metaprompter is still resident (LM Studio JIT
-  // keeps it loaded ~1h). Eject it before dispatch — unconditionally, not gated by
-  // ejectAfterUse, so the --stage/CLI paths are covered too. lmsUnload is best-effort:
-  // model not loaded / lms missing just logs a warning, the gen is never aborted.
-  if (!/^claude/i.test(GEMMA_MODEL)) lmsUnload(GEMMA_MODEL);
+  // Mesh OOMs on 10GB cards while a local model still sits in VRAM (LM Studio JIT keeps it loaded ~1h).
+  // Every local seat's model is unloaded where the server supports it (LM Studio, Ollama), otherwise an
+  // honest PHOENIX_NOTICE — unconditionally, not gated by ejectAfterUse, so the --stage/CLI paths are covered.
+  await gpuShare.beforeGpuStage(_cfg, 'mesh');
 
   if (FREE_COMFY_BEFORE_MESH) {
     // First free any OTHER instance: after an i2i edit, Qwen-Image-Edit (~9.8 GB) stays resident on
@@ -768,7 +705,7 @@ async function runImageStage(userPrompt, categoryOverride, literalPos = null, li
   // Validate the override against the palette: an unknown category (LLM invented one, or a custom
   // category deleted after the image step) would make CATEGORIES[category] undefined → empty params →
   // undefined workflow inputs → a raw ComfyUI 400. inferCategory always returns a real category.
-  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
+  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
   const params   = { ...CATEGORIES[category] };
   const session  = {
     userPrompt,
@@ -812,7 +749,7 @@ async function runMeshStage(imagePath, userPrompt, categoryOverride, targetFaceN
     process.exit(1);
   }
 
-  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
+  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
   const params   = { ...CATEGORIES[category] };
   if (Number.isFinite(targetFaceNum) && targetFaceNum > 0) {
     params.target_face_num = Math.round(Math.min(300000, Math.max(200, targetFaceNum)));
@@ -857,7 +794,7 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
 
   // Category
   process.stdout.write('  Detecting category...');
-  session.category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : inferCategory(userPrompt);
+  session.category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
   session.params   = { ...CATEGORIES[session.category] };
   console.log(` ${session.category}  (${CATEGORY_LABELS[session.category]})`);
   console.log(`  Defaults → ${session.params.target_face_num} faces | CFG ${session.params.cfg} | ${session.params.steps} steps\n`);
@@ -1033,12 +970,15 @@ async function main() {
 
 // CLI dispatch
 const _args = process.argv.slice(2);
-dbg.initDebug({ enabled: _args.includes('--debug') });
+const _isMain = require.main === module;   // required as a module (tests) → export only, don't dispatch
+if (_isMain) dbg.initDebug({ enabled: _args.includes('--debug') });
 
 const _si = _args.indexOf('--stage');
 const _hi = _args.indexOf('--headless');
 
-if (_si >= 0) {
+if (!_isMain) {
+  module.exports = { inferCategory, generateMetaprompt };
+} else if (_si >= 0) {
   // Stage mode: node phoenix.js --stage <image|mesh> --desc "<text>" [--cat <cat>] [--image "<path>"] [--prompt "<pos>"] [--neg "<neg>"]
   const _stageName = _args[_si + 1] || '';
   const _di        = _args.indexOf('--desc');
@@ -1083,7 +1023,7 @@ if (_si >= 0) {
     if (!_desc) { process.stderr.write('--stage prompt requires --desc "<description>"\n'); process.exit(1); }
     (async () => {
       try {
-        const category = _cat || inferCategory(_desc);
+        const category = _cat || await inferCategory(_desc);
         process.stdout.write(`CATEGORY: ${category}\n`);
         console.log(`  Category: ${category}  (${CATEGORY_LABELS[category]})`);
         process.stdout.write('  Metaprompter (Gemma E4B)...');

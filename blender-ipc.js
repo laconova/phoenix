@@ -78,6 +78,24 @@ function callBlender(code, opts = {}) {
     const deadline = Date.now() + timeoutMs;
     const poll = () => {
       if (Date.now() > deadline) {
+        // Sweep 3 H: the command we published is still sitting in cmd.json. A Blender that wakes up later would execute it AFTER Phoenix
+        // reported the failure (e.g. a late open_mainfile switching the scene). Withdraw it - only if it is still OUR command.
+        // Sweep 3b: no read-then-unlink race. MOVE cmd.json to a name only we know (rename is atomic), look at the id, and either drop it (ours) or put it back
+        // WITHOUT overwriting anything newer (hard link = atomic "create only if absent"; if a newer cmd.json appeared meanwhile, that one stays).
+        const mine = cmdFile + '.' + id + '.wd';
+        try {
+          fs.renameSync(cmdFile, mine);
+          let cur = null; try { cur = JSON.parse(fs.readFileSync(mine, 'utf8')); } catch (_) { /* unreadable: not ours to judge */ }
+          if (!(cur && cur.id === id)) {
+            try { fs.linkSync(mine, cmdFile); }
+            catch (le) {
+              // ONLY EEXIST means "a newer cmd.json is there: it stays". Any other error (FAT / exFAT stick: EPERM, ENOTSUP, EINVAL ... = no hard links) must not
+              // look like that - copy it back with COPYFILE_EXCL (create only if absent) so the other caller's command is not lost.
+              if (!(le && le.code === 'EEXIST')) { try { fs.copyFileSync(mine, cmdFile, fs.constants.COPYFILE_EXCL); } catch (_) { /* a newer cmd.json appeared meanwhile: it stays */ } }
+            }
+          }
+          try { fs.unlinkSync(mine); } catch (_) { /* gone */ }
+        } catch (_) { /* no cmd.json (Blender took it) or it is busy: nothing to withdraw */ }
         return reject(new Error(
           'Blender not responding (' + Math.round(timeoutMs / 1000) + 's) — is Blender open with the ' +
           'Phoenix IPC addon enabled? Watch dir: ' + dir + ipcDirMismatchHint(opts.cfg)));

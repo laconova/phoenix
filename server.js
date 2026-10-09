@@ -5,6 +5,9 @@ const fs   = require('fs');
 const path = require('path');
 
 const a         = require('./assistant.js');
+const providers = require('./providers');
+const bench = require('./bench/bench');   // competence mini-benchmark (v1.9 M2.1)
+const capabilities = require('./providers/capabilities');   // tool-protocol probe results (v1.9 M2)   // seats → provider layer (v1.9 M1): validation, model lists, API keys
 const dbg       = require('./debug-log.js');
 const lock      = require('./lock');
 const palette   = require('./palette');
@@ -17,6 +20,7 @@ const voice     = require('./voice');
 const sfx       = require('./sfx');
 const unrealIpc = require('./unreal-ipc');
 const pipeline  = require('./pipeline');
+const checkpoints = require('./checkpoints');   // scene checkpoints + rewind (v1.9 M5)
 const jobs      = require('./jobs');
 const i2iEngine = require('./i2i');   // baseForInstance — so the deps check hits each workflow's own instance
 const downloader = require('./downloader');   // workflow/engine acquisition core (Stage 1)
@@ -52,6 +56,9 @@ function broadcast(obj) {
 // works (hy_motion — see the /action route). Module-level because the route is re-entered per
 // request; a single boolean is enough, since exactly one action defers.
 let deferredInFlight = false;
+
+// Last Blender filepath GET /checkpoints could read (null = unknown); served as "stale" while a turn holds the lock.
+let lastCpFilepath = null;
 
 // ─── Unreal bridge status (for the header indicator) ──────────────────────────
 // The probe costs a Python start plus multicast discovery, so it is cached AND
@@ -107,6 +114,11 @@ function feedPipelineLine(line) {
   try {
     const trimmed = line.trim();
     const results = [];
+
+    // ── PHOENIX_NOTICE: (e.g. a local model stays loaded next to ComfyUI) → a visible notice ──
+    if (trimmed.startsWith('PHOENIX_NOTICE:')) {
+      return [{ kind: 'notice', text: trimmed.slice('PHOENIX_NOTICE:'.length).trim() }];
+    }
 
     // ── RESULT_GLB ──
     const glbMatch = line.match(/RESULT_GLB:\s*(.+\.glb)\s*$/i);
@@ -272,10 +284,179 @@ function sendJSON(res, statusCode, obj) {
 
 const WEB_ROOT = path.join(__dirname, 'web');
 
+// ── Provider layer glue (v1.9 M1) ───────────────────────────────────────────
+// Tests inject deps via _setProviderDeps: { validateSeat, listModels } replace the routes' calls
+// outright; { cli, fetchImpl, getKey, dbg, spawn } are forwarded to providers/index.js.
+let _provDeps = null;
+let _probeRunning = false;   // one tool probe at a time
+let lastCpProbeFailAt = 0;   // sweep 3 H
+let _benchRunning = false;   // one competence benchmark at a time (it owns a headless Blender)
+let _benchProgress = null;   // { task, of, id } while it runs — the UI polls GET /seat-bench-status
+function _setProviderDeps(d) {
+  _provDeps = (d && typeof d === 'object') ? d : null;
+  if (!_provDeps) { providers._resetDeps(); return; }
+  const fwd = {};
+  for (const k of ['cli', 'fetchImpl', 'getKey', 'dbg', 'spawn', 'sleepImpl', 'spawnImpl', 'codexExe', 'spawnSyncImpl', 'existsSync']) if (_provDeps[k]) fwd[k] = _provDeps[k];
+  providers._setDeps(fwd);
+}
+function provValidateSeat(name, candidate, cfgForValidation) {
+  return (_provDeps && _provDeps.validateSeat)
+    ? _provDeps.validateSeat(name, candidate, cfgForValidation)
+    : providers.validateSeat(name, candidate, cfgForValidation);
+}
+function provListModels(endpointName, cfgForList) {
+  return (_provDeps && _provDeps.listModels)
+    ? _provDeps.listModels(endpointName, cfgForList)
+    : providers.listEndpointModels(endpointName, cfgForList);
+}
+
+// Resolved view of every seat for the Settings UI — old configs show their inferred provider.
+// env {} → shows what the FILE says, not a LOCAL_API / GEMMA_MODEL override.
+function seatsView(cfg) {
+  const out = {};
+  for (const name of providers.SEAT_NAMES) {
+    try {
+      const r = providers.resolveSeat(name, cfg, {});
+      const c = capabilities.getCaps(r), vz = capabilities.getVision(r);   // the vision test (M3) is its own verdict on the same key
+      const caps = c ? { tools: c.tools, probedAt: c.probedAt, forced: !!c.forced, bench: c.bench || null } : (vz ? {} : null);
+      if (caps && vz) Object.assign(caps, vz);
+      out[name] = { provider: r.provider, model: r.model, endpoint: r.endpointName, caps };
+    } catch (_) {
+      const raw = (cfg && cfg.seats && cfg.seats[name]) || {};
+      out[name] = { provider: raw.provider || '', model: raw.model || '', endpoint: raw.endpoint || '', caps: null };
+    }
+  }
+  return out;
+}
+// Competence gate (v1.9 M2.1): only a LOCAL openai-compat orchestrator needs >= 4/5 on the benchmark; cloud/CLI/Codex
+// seats are only graded. A benchmark that could not run (no Blender) is a missing prerequisite, not a failed test.
+// → null (allowed) | the 400 error text.
+function benchGateError(seat, caps) {
+  if (!seat || seat.provider !== 'openai-compat' || seat.kind !== 'local') return null;
+  const v = bench.benchVerdict(caps && caps.bench);   // old-shape entry = not run
+  // A local orchestrator is never saved without a measured benchmark (or an explicit unavailable marker).
+  if (v.state === 'none') return 'Run the benchmark first (Settings runs it automatically for local models).';
+  if (v.state !== 'fail') return null;   // pass | unavailable
+  return (seat.model || 'This model') + ' solved ' + v.passed + '/' + v.total + ' benchmark tasks over ' + v.runs + ' runs (needs ' + v.need + '): ' + v.weak.join(', ');
+}
+// M2.3: validateSeat for a probe/bench candidate (same merge rule as the probe itself). → '' (ok) | the message.
+// Sweep 2 G2: the Settings dialog tests a seat against the endpoint URL TYPED THERE (maybe not saved yet). Only the `local` URL can be overlaid,
+// only as an http(s) URL, only for this request - nothing is written.
+// A non-empty candidate that is not an http(s) URL (or endpoints that is not an object) is an ERROR, never a silent fallback to the saved endpoint.
+function withCandidateEndpoints(cfg0, eps) {
+  if (eps === undefined || eps === null) return cfg0;
+  if (typeof eps !== 'object' || Array.isArray(eps)) throw new CandidateEndpointError();
+  const raw = eps.local;
+  if (raw === undefined || raw === null || (typeof raw === 'string' && !raw.trim())) return cfg0;
+  const u = typeof raw === 'string' ? raw.trim() : '';
+  // parsed, not pattern-matched: "http://[" or "http://" is no URL; only http: / https: with a host counts
+  let parsed = null;
+  try { parsed = new URL(u); } catch (_) { /* invalid */ }
+  if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) throw new CandidateEndpointError();
+  return { ...cfg0, endpoints: { ...(cfg0.endpoints || {}), local: u } };
+}
+class CandidateEndpointError extends Error { constructor() { super('LM Studio endpoint must be an http(s) URL.'); this.field = 'local'; } }
+async function validateCandidate(seatName, body) {
+  try {
+    const cfg0 = withCandidateEndpoints(a.loadConfig(), body && body.endpoints);
+    const cur = (cfg0.seats && cfg0.seats[seatName] && typeof cfg0.seats[seatName] === 'object') ? cfg0.seats[seatName] : {};
+    const cand = { ...cur };
+    for (const k of ['provider', 'model', 'endpoint']) if (body && typeof body[k] === 'string') cand[k] = body[k];
+    const { ok, msg } = await provValidateSeat(seatName, cand, cfg0);
+    return ok ? '' : String(msg || 'candidate was not accepted');
+  } catch (e) { return String((e && e.message) || e); }
+}
+function endpointNamesOf(cfg) {
+  const names = ['local', 'openai'];
+  const eps = (cfg && cfg.endpoints) || {};
+  for (const [k, v] of Object.entries(eps)) {
+    if (v && typeof v === 'object' && typeof v.url === 'string' && !names.includes(k)) names.push(k);
+  }
+  return names;
+}
+
+// A key route must not be callable cross-site: a browser request from another origin (or a DNS-rebound
+// Host) is refused. Requests with neither header (curl, tests) are same-machine by construction.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+// Sweep 3b B: with an Origin present the request must be STRICTLY same-origin: scheme http, and the Origin's hostname AND port equal the Host header's
+// hostname and port (the page's own relative requests always match). No cross-alias exemption: another service on [::1]:7777 or localhost:9999 is not
+// Phoenix on 127.0.0.1:7777. No Origin = curl, phoenix-mcp.js, the Blender addon: unchanged (loopback Host only).
+function isLocalRequest(req) {
+  const h = req.headers || {};
+  let hostName = null, hostPort = '80';
+  if (h.host !== undefined) {
+    try { const u = new URL('http://' + h.host); hostName = u.hostname; hostPort = u.port || '80'; } catch (_) { return false; }
+    if (!LOCAL_HOSTS.has(hostName)) return false;
+  }
+  if (h.origin !== undefined) {
+    let o;
+    try { o = new URL(h.origin); } catch (_) { return false; }
+    if (o.protocol !== 'http:' || !LOCAL_HOSTS.has(o.hostname)) return false;
+    if (h.host === undefined) return false;   // an Origin without a Host cannot be checked
+    if ((o.port || '80') !== hostPort || o.hostname.toLowerCase() !== String(hostName).toLowerCase()) return false;
+  }
+  return true;
+}
+
+// ─── MCP (v1.9 M6) ────────────────────────────────────────────────────────────
+// M6.1: EVERY Phoenix tool in assistant.js TOOLS except i2i_edit (UI-only decision) is reachable over POST /mcp/call, each in
+// exactly one class:  R read-only (no lock, runs during a background job) · H heavy GPU · S scene (Blender) · L library write
+// (reads the scene / writes files, no scene change) · U Unreal · O opt-in (off by default, see MCP_OPTIN).
+// Everything but R needs the lock and is refused while a background generation runs (same doors as /chat and /rewind).
+// The R-client tools (list_animations / list_custom_rigs / list_characters / job_status / stop) never reach /mcp/call —
+// phoenix-mcp.js answers them with GET routes. The checkpoint list (MCP_FORCE_CHECKPOINT) lives in assistant.js.
+const MCP_CLASS = {
+  // R
+  read_state: 'R', list_assets: 'R', list_brushes: 'R', read_palette: 'R', list_materials: 'R',
+  // H
+  generate_prop: 'H', generate_image: 'H', image_to_3d: 'H', hy_motion: 'H',
+  // S
+  import_asset: 'S', use_brush: 'S', inspect_render: 'S', make_human: 'S', place_human: 'S', animate_human: 'S',
+  sequence_animations: 'S', apply_material: 'S', spawn_rig: 'S', animate_clip: 'S', sequence_clips: 'S',
+  prepare_mesh: 'S', bind_mesh: 'S', spawn_character: 'S', brush_preview: 'S',
+  // L
+  save_as_brush: 'L', save_animation: 'L', save_clip: 'L', save_mesh: 'L', save_character: 'L',
+  rename_asset: 'L', rename_brush: 'L', assign_skeleton: 'L',
+  // M9: Meshy remesh (paid cloud) — writes the library, no scene change, no checkpoint; takes NO chat lock (see /mcp/call)
+  remesh_asset: 'L',
+  // U
+  brush_to_unreal: 'U', unreal_to_blender: 'U', unreal_to_brush: 'U', character_to_unreal: 'U', inspect_unreal: 'U',
+  // O
+  blender_run: 'O', unreal_run: 'O', delete_asset: 'O', delete_brush: 'O', delete_material: 'O',
+};
+// opt-in tool -> the cfg.mcp flag that switches it on (default off; Settings -> Connections)
+const MCP_OPTIN = { blender_run: 'allowBlenderRun', unreal_run: 'allowUnrealRun', delete_asset: 'allowDelete', delete_brush: 'allowDelete', delete_material: 'allowDelete' };
+const MCP_FLAGS = ['allowBlenderRun', 'allowUnrealRun', 'allowDelete'];
+let mcpRenderPath = path.join(workingDir, 'output', 'render-check.png');   // test seam: _setMcpRenderPath
+const mcpAllows = (c, flag) => !!(c && c.mcp && c.mcp[flag] === true);
+const mcpAllowsBlenderRun = (c) => mcpAllows(c, 'allowBlenderRun');   // kept: older callers/tests
+const remeshView = (c) => {
+  const r = (c && c.remesh && typeof c.remesh === 'object') ? c.remesh : {};
+  return { enabled: r.enabled === true, provider: 'meshy', topology: r.topology === 'triangle' ? 'triangle' : 'quad',
+    targetPolycount: Number.isInteger(r.targetPolycount) ? r.targetPolycount : 20000,
+    maxUploadMB: (typeof r.maxUploadMB === 'number' && r.maxUploadMB > 0) ? r.maxUploadMB : 60,
+    keyPresent: !!providers.getKey('meshy') };   // D8: also true for a key found via the environment; never the value
+};
+const mcpFlagsView = (c) => ({ allowBlenderRun: mcpAllows(c, 'allowBlenderRun'), allowUnrealRun: mcpAllows(c, 'allowUnrealRun'), allowDelete: mcpAllows(c, 'allowDelete') });
+// "Render check: PASS | FAIL — why | UNVERIFIED — why | NO VERDICT — why | not run" (the MCP client and the chat line say the same)
+function mcpVerdictLine(verdict, stopReason) {
+  if (!verdict) return 'Render check: not run';
+  const word = verdict === 'unverified' ? 'UNVERIFIED' : verdict === 'none' ? 'NO VERDICT' : String(verdict).toUpperCase();
+  return 'Render check: ' + word + (verdict !== 'pass' && stopReason ? ' — ' + stopReason : '');
+}
+
 async function handler(req, res) {
   const method  = req.method;
   const parsedUrl = new URL(req.url, 'http://localhost');
   const urlPath = parsedUrl.pathname;
+
+  // Sweep 2 F2: EVERY state-changing request must be same-machine/same-origin, in one place. A web page on another origin can send a
+  // text/plain "simple" POST to 127.0.0.1:7777 without any preflight; refuse it before any route runs. Phoenix's own page is same-origin and
+  // phoenix-mcp.js / the Blender addon / curl send no Origin (and a loopback Host), so they pass.
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS' && !isLocalRequest(req)) {
+    sendJSON(res, 403, { error: 'Cross-site request refused.' });
+    return;
+  }
 
   // ── GET / ──────────────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/') {
@@ -448,6 +629,11 @@ async function handler(req, res) {
       sendJSON(res, 400, { error: 'message is required and must not be empty' });
       return;
     }
+    // Run mode (v1.9 M4): optional per message. Absent = the config default (gates.mode, else Ask).
+    if (body && body.mode !== undefined && body.mode !== 'ask' && body.mode !== 'auto') {
+      sendJSON(res, 400, { error: 'mode must be ask or auto' });
+      return;
+    }
 
     // A chat turn can trigger a heavy generation (image/mesh/text→motion). A deferred edit
     // (i2i / hy_motion) in flight holds no lock, so without this the turn would run and its
@@ -469,14 +655,17 @@ async function handler(req, res) {
     (async () => {
       try {
         broadcast({ kind: 'user', text: message });
+        state.turnSeq = (Number(state.turnSeq) || 0) + 1;   // M5: monotonically increasing turn number
+        const turnNo = state.turnSeq;
 
         // holdsLock: this route took the lock above and holds it for the whole turn. Tools that
         // would otherwise acquire it themselves (hy_motion) must not, or they deadlock against us.
         // onArtifact: the chat path's route to the artifact tabs. inspect_render and the
         // render-vision gate produce a picture mid-turn; without this hook the render was
         // taken and judged but never shown (the /action route had it, the chat path did not).
-        const { text, messages } = await a.runTurn(message, history, state, cfg, {
+        const { text, messages, stopped, visionOff, mode: ranMode } = await a.runTurn(message, history, state, cfg, {
           blenderOnly: !!(body && body.noTool), background: true, holdsLock: true,
+          mode: body && body.mode,   // undefined = runConfig falls back to cfg.gates.mode
           onArtifact: (art) => {
             try {
               if (!art || !art.rel) return;
@@ -500,13 +689,15 @@ async function handler(req, res) {
         });
 
         // Mirror CLI post-turn persistence exactly
-        history.push({ role: 'user', content: message });
+        history.push({ role: 'user', content: message, turn: turnNo });
         const lastAssistant = messages.findLast(m => m.role === 'assistant');
-        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content });
+        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content, turn: turnNo });
         a.saveHistory(history);
         a.saveState(state);
 
-        broadcast({ kind: 'reply', text });
+        // mode: what this turn ran as (the UI marks Auto replies); stopped / visionOff only when set.
+        broadcast({ kind: 'reply', text, mode: ranMode || (body && body.mode) || 'ask',
+          ...(stopped ? { stopped } : {}), ...(visionOff ? { visionOff: true } : {}) });
       } catch (err) {
         broadcast({ kind: 'error', message: String(err.message || err) });
       } finally {
@@ -519,6 +710,8 @@ async function handler(req, res) {
 
   // ── POST /action ───────────────────────────────────────────────────────────
   if (method === 'POST' && urlPath === '/action') {
+    // D2 (M9 Amendment 1): a state-changing route must not be drivable from another site's page (CSRF). The Phoenix UI is same-origin.
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
     let body;
     try {
       const raw = await readBody(req);
@@ -536,9 +729,30 @@ async function handler(req, res) {
       // list is a second, independent gate. Missing it produced "unknown action" 400s on every
       // double-click with the brush target set to Unreal (found live 2026-07-31).
       'brush_to_unreal', 'brush_preview', 'inspect_unreal',
-      'unreal_to_blender', 'unreal_to_brush', 'character_to_unreal'];
+      'unreal_to_blender', 'unreal_to_brush', 'character_to_unreal',
+      'remesh_asset'];
     if (!ALLOWED.includes(action)) {
       sendJSON(res, 400, { error: 'unknown action' });
+      return;
+    }
+
+    // M9: remesh_asset is a CLOUD job (Meshy) — light: no Blender lock, no GPU, so it is neither refused because a ComfyUI job runs
+    // nor blocks one. It runs detached (the click returns 202, progress + the result arrive over SSE); its own flag allows ONE at a time.
+    // The jobs.js slot is deliberately NOT used: it is the single GENERATION slot and would make a remesh and a GPU job exclude each other.
+    if (action === 'remesh_asset') {
+      if (a.remeshBusy()) { sendJSON(res, 409, { error: 'BUSY: a remesh is already running' }); return; }
+      cfg = a.loadConfig();
+      sendJSON(res, 202, { accepted: true });
+      (async () => {
+        try {
+          const inp = (input && typeof input === 'object') ? input : {};
+          broadcast({ kind: 'user', text: '⏷ ' + action });
+          const result = await a.TOOLS.remesh_asset(inp, state, cfg, { background: true, uiButton: true });   // progress + done reach the page through the remeshEvents listeners (every start path alike)
+          broadcast({ kind: 'reply', action, text: typeof result === 'string' ? result : JSON.stringify(result) });
+        } catch (err) {
+          broadcast({ kind: 'error', action, message: String((err && err.message) || err) });
+        }
+      })();
       return;
     }
 
@@ -1002,16 +1216,89 @@ async function handler(req, res) {
     return;
   }
 
+  // ── GET /checkpoints (v1.9 M5) ───────────────────────────────────────────
+  // The list for the Checkpoints panel. `current` marks the copy Blender has open right now (one short IPC
+  // read, 500 ms bound). When Blender does not answer in time the LAST KNOWN value is kept and the reply says stale:true.
+  // Blender's filepath is read ONLY while the chat lock is free (a turn / rewind owns the IPC channel meanwhile); when
+  // busy, the last known state is returned with stale:true. Same localhost / cross-site rule as /rewind.
+  if (method === 'GET' && urlPath === '/checkpoints') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    const fresh = a.loadConfig();
+    const s = checkpoints.settings(fresh);
+    let stale = true;
+    // Sweep 3 H: while a recent probe found Blender silent, do not take the chat lock for another 500 ms on every refresh (a send right after a
+    // reply would meet 409) - the last known value is returned until the quiet period is over.
+    const cpQuiet = (Date.now() - lastCpProbeFailAt) < 15000;
+    if (!cpQuiet && lock.tryAcquire()) {
+      // 500 ms bound: the lock is held only that long when Blender is down (a send / Rewind right after a reply must
+      // not meet 409). No answer in time → the last known value, stale:true.
+      try {
+        const t0cp = Date.now();
+        const fp = await checkpoints.currentFilepath({ timeoutMs: 500, cfg: fresh });
+        // only a probe that really HELD the lock for a while (Blender silent) starts the quiet period; an immediate failure does not
+        if (fp !== null) { lastCpFilepath = fp; stale = false; lastCpProbeFailAt = 0; } else if (Date.now() - t0cp >= 400) lastCpProbeFailAt = Date.now();
+      }
+      catch (_) { /* Blender not reachable: keep the last known value */ }
+      finally { lock.release(); }
+    }
+    const cur = lastCpFilepath;
+    const items = checkpoints.list({ currentPath: cur });
+    sendJSON(res, 200, { enabled: s.enabled, keep: s.keep, maxGB: s.maxGB, usedBytes: checkpoints.usedBytes(),
+      inCopy: !!(cur && checkpoints.insideDir(cur)), ...(stale ? { stale: true } : {}), items });
+    return;
+  }
+
+  // ── POST /rewind (v1.9 M5) ───────────────────────────────────────────────
+  // Body: { id, choice: 'stay' | 'overwrite' }. USER-ONLY and localhost-only (same rule as /secrets); takes the chat lock
+  // like a turn does, and is refused while a deferred generation or a background job is running.
+  if (method === 'POST' && urlPath === '/rewind') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    if (deferredInFlight || jobs.isRunning()) {
+      sendJSON(res, 409, { error: 'a background generation is running — rewind is blocked until it finishes' });
+      return;
+    }
+    if (!lock.tryAcquire()) { sendJSON(res, 409, { error: 'busy' }); return; }
+    let r;
+    try {
+      cfg = a.loadConfig();
+      r = await checkpoints.rewind(body && body.id, body && body.choice, {
+        cfg, turn: state.turnSeq,
+        loadHistory: () => history,
+        saveHistory: (h) => { history = h; a.saveHistory(h); },
+      });
+    } catch (e) {
+      r = { ok: false, error: String((e && e.message) || e) };
+    } finally {
+      lock.release();
+    }
+    // The scene can be rewound even when the overwrite was refused: the chat view must reload in that case too.
+    if ((r.ok || r.rewound) && !r.noop) broadcast({ kind: 'rewound', id: body && body.id, choice: r.choice, openedPath: r.openedPath, history: r.history });
+    if (!r.ok) { sendJSON(res, 400, { error: r.error, ...(r.rewound ? { rewound: true } : {}) }); return; }
+    sendJSON(res, 200, { ok: true, openedPath: r.openedPath, choice: r.choice, ...(r.note ? { note: r.note } : {}) });
+    return;
+  }
+
   // ── GET /config ──────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/config') {
     const fresh = a.loadConfig();
     const orch = (fresh.seats && fresh.seats.orchestrator) || {};
     const meta = (fresh.seats && fresh.seats.metaprompter) || {};
     sendJSON(res, 200, {
-      gates: (fresh && fresh.gates) || {},
-      orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3 },
+      gates: Object.assign({}, (fresh && fresh.gates) || {}, { mode: a.runConfig(fresh).mode }),
+      orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3,
+        maxToolCalls: a.runConfig(fresh, 'ask').budget, maxToolCallsAuto: a.runConfig(fresh, 'auto').budget },
       metaprompter: { model: meta.model || '', ejectAfterUse: !!meta.ejectAfterUse },
+      checkpoints: checkpoints.settings(fresh),
+      mcp: mcpFlagsView(fresh),
+      remesh: remeshView(fresh),   // M9: never the key, never the base URL
+      mcpScript: path.join(workingDir, 'phoenix-mcp.js'),   // absolute path for the Settings setup lines
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
+      seats: seatsView(fresh),
+      endpointNames: endpointNamesOf(fresh),
+      keys: providers.listKeys(),   // booleans only — a key value never leaves the server
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
       // Defaults land HERE, not in the browser: the double-click handler reads brushTarget on
@@ -1035,7 +1322,11 @@ async function handler(req, res) {
       // alone leaves renamed assets looking unsorted in the library.
       // orphaned reicht bis in die UI durch: sonst sieht der Operator eine Datei in einer
       // Kategorie, die es in der Palette gar nicht mehr gibt, ohne Hinweis warum.
-      assets = a.listStagedFiles().map(({ name, category, orphaned }) => ({ name, category, orphaned: !!orphaned, label: labels[category + '/' + name] || null }))
+      assets = a.listStagedFiles().map(({ name, category, orphaned, path: abs }) => {
+        let sizeMB = null;   // M9: the Library's Remesh dialog says how much it would upload
+        try { sizeMB = Math.round(fs.statSync(abs).size / 104857.6) / 10; } catch (_) { /* gone between list and stat */ }
+        return { name, category, orphaned: !!orphaned, label: labels[category + '/' + name] || null, sizeMB };
+      })
         .sort((x, y) => (x.label || x.name).localeCompare(y.label || y.name, undefined, { numeric: true, sensitivity: 'base' }));
     } catch (_) {}
     sendJSON(res, 200, { assets });
@@ -1190,6 +1481,7 @@ async function handler(req, res) {
 
   // ── POST /config ─────────────────────────────────────────────────────────
   if (method === 'POST' && urlPath === '/config') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }   // D2 (M9 Amendment 1)
     let body;
     try {
       const raw = await readBody(req);
@@ -1199,26 +1491,6 @@ async function handler(req, res) {
       return;
     }
 
-    function validateClaudeModel(model) {
-      return new Promise(resolve => {
-        // Guard: `model` is interpolated into a shell command line on Windows (shell:true below — needed
-        // to launch the `claude` .cmd shim). Reject anything outside the character set real model ids use,
-        // or a crafted model string becomes a command-injection vector (fixed 2026-08-02).
-        if (typeof model !== 'string' || !/^[A-Za-z0-9._:\/\[\]-]+$/.test(model)) {
-          return resolve({ ok: false, msg: 'invalid model name' });
-        }
-        const { spawn } = require('child_process');
-        let done = false;
-        const finish = (ok, msg) => { if (!done) { done = true; resolve({ ok, msg }); } };
-        let child;
-        try {
-          child = spawn('claude', ['--print', '--tools', '', '--strict-mcp-config', '--model', model, 'ok'], { encoding: 'utf8', shell: process.platform === 'win32' });
-        } catch (e) { return finish(false, 'could not launch claude: ' + e.message); }
-        const timer = setTimeout(() => { try { child.kill(); } catch (_) {} finish(false, 'model probe timed out'); }, 25000);
-        child.on('error', e => { clearTimeout(timer); finish(false, 'claude CLI error: ' + e.message); });
-        child.on('close', code => { clearTimeout(timer); finish(code === 0, code === 0 ? '' : 'Claude CLI rejected model (exit ' + code + ')'); });
-      });
-    }
     async function pingURL(url) {
       try { const r = await fetch(url, { signal: AbortSignal.timeout(4000) }); return r.ok; } catch (_) { return false; }
     }
@@ -1240,14 +1512,18 @@ async function handler(req, res) {
     const hasApps  = body && typeof body.apps === 'object' && body.apps !== null;
     const hasFb    = body && typeof body.feedback === 'object' && body.feedback !== null;
     const hasUnreal = body && typeof body.unreal === 'object' && body.unreal !== null;
+    const hasSeats = body && typeof body.seats === 'object' && body.seats !== null && !Array.isArray(body.seats);
+    const hasCp    = body && typeof body.checkpoints === 'object' && body.checkpoints !== null && !Array.isArray(body.checkpoints);
+    const hasMcp   = body && typeof body.mcp === 'object' && body.mcp !== null && !Array.isArray(body.mcp);
+    const hasRemesh = body && typeof body.remesh === 'object' && body.remesh !== null && !Array.isArray(body.remesh);
 
-    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb && !hasUnreal) {
+    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb && !hasUnreal && !hasSeats && !hasCp && !hasMcp && !hasRemesh) {
       sendJSON(res, 400, { error: 'No settings provided.' });
       return;
     }
 
     // Stage validated changes (only applied on full success)
-    const staged = { gates: {}, orchestrator: {}, metaprompter: {}, endpoints: {}, apps: {}, feedback: {}, unreal: {} };
+    const staged = { gates: {}, orchestrator: {}, metaprompter: {}, endpoints: {}, apps: {}, feedback: {}, unreal: {}, seats: {} };
 
     if (hasGates) {
       for (const k of ['prompt', 'image', 'mesh']) {
@@ -1263,6 +1539,70 @@ async function handler(req, res) {
         }
         staged.gates.vision = v;
       }
+      // mode = the DEFAULT run mode (the chat toggle picks per message). ask | auto, nothing else.
+      if ('mode' in body.gates) {
+        if (body.gates.mode !== 'ask' && body.gates.mode !== 'auto') {
+          sendJSON(res, 400, { error: 'Run mode must be ask or auto.', field: 'mode' });
+          return;
+        }
+        staged.gates.mode = body.gates.mode;
+      }
+    }
+
+    // Checkpoints (v1.9 M5): enabled bool, keep int 1–100, maxGB number 0.1–100.
+    const stagedCp = {};
+    if (hasCp) {
+      const c = body.checkpoints;
+      if ('enabled' in c) {
+        if (typeof c.enabled !== 'boolean') { sendJSON(res, 400, { error: 'Checkpoints enabled must be true or false.', field: 'enabled' }); return; }
+        stagedCp.enabled = c.enabled;
+      }
+      if ('keep' in c) {
+        if (!Number.isInteger(c.keep) || c.keep < 1 || c.keep > 100) { sendJSON(res, 400, { error: 'Checkpoints to keep must be an integer between 1 and 100.', field: 'keep' }); return; }
+        stagedCp.keep = c.keep;
+      }
+      if ('maxGB' in c) {
+        if (typeof c.maxGB !== 'number' || !Number.isFinite(c.maxGB) || c.maxGB < 0.1 || c.maxGB > 100) { sendJSON(res, 400, { error: 'Checkpoint disk budget must be a number between 0.1 and 100 GB.', field: 'maxGB' }); return; }
+        stagedCp.maxGB = c.maxGB;
+      }
+    }
+
+    // MCP (v1.9 M6 / M6.1): allowBlenderRun / allowUnrealRun / allowDelete must be real booleans.
+    const stagedMcp = {};
+    const MCP_FLAG_LABEL = { allowBlenderRun: 'Allow blender_run over MCP', allowUnrealRun: 'Allow unreal_run over MCP', allowDelete: 'Allow deleting library files over MCP' };
+    if (hasMcp) {
+      for (const flag of MCP_FLAGS) {
+        if (!(flag in body.mcp)) continue;
+        if (typeof body.mcp[flag] !== 'boolean') { sendJSON(res, 400, { error: MCP_FLAG_LABEL[flag] + ' must be true or false.', field: flag }); return; }
+        stagedMcp[flag] = body.mcp[flag];
+      }
+    }
+
+    // Remesh (v1.9 M9): enabled bool · provider 'meshy' · topology quad|triangle · targetPolycount int 100–300000 · maxUploadMB number 1–500.
+    // A bad field saves nothing from this request. No other key (meshyBase is a test seam, config-file only) is taken from the body.
+    const stagedRemesh = {};
+    if (hasRemesh) {
+      const rm = body.remesh;
+      if ('enabled' in rm) {
+        if (typeof rm.enabled !== 'boolean') { sendJSON(res, 400, { error: 'Allow remesh must be true or false.', field: 'enabled' }); return; }
+        stagedRemesh.enabled = rm.enabled;
+      }
+      if ('provider' in rm) {
+        if (rm.provider !== 'meshy') { sendJSON(res, 400, { error: 'Remesh provider must be meshy.', field: 'provider' }); return; }
+        stagedRemesh.provider = 'meshy';
+      }
+      if ('topology' in rm) {
+        if (rm.topology !== 'quad' && rm.topology !== 'triangle') { sendJSON(res, 400, { error: 'Remesh topology must be quad or triangle.', field: 'topology' }); return; }
+        stagedRemesh.topology = rm.topology;
+      }
+      if ('targetPolycount' in rm) {
+        if (!Number.isInteger(rm.targetPolycount) || rm.targetPolycount < 100 || rm.targetPolycount > 300000) { sendJSON(res, 400, { error: 'Remesh target polycount must be an integer between 100 and 300000.', field: 'targetPolycount' }); return; }
+        stagedRemesh.targetPolycount = rm.targetPolycount;
+      }
+      if ('maxUploadMB' in rm) {
+        if (typeof rm.maxUploadMB !== 'number' || !Number.isFinite(rm.maxUploadMB) || rm.maxUploadMB < 1 || rm.maxUploadMB > 500) { sendJSON(res, 400, { error: 'Remesh upload limit must be a number between 1 and 500 MB.', field: 'maxUploadMB' }); return; }
+        stagedRemesh.maxUploadMB = rm.maxUploadMB;
+      }
     }
 
     // Validate historyMessages (cheap, synchronous)
@@ -1275,6 +1615,18 @@ async function handler(req, res) {
       staged.orchestrator.historyMessages = hm;
     }
 
+    // Tool budget per turn (Ask / Auto) — same integer rule as historyMessages.
+    for (const [key, label] of [['maxToolCalls', 'Tool steps per turn (Ask)'], ['maxToolCallsAuto', 'Tool steps per turn (Auto)']]) {
+      if (hasOrch && key in body.orchestrator) {
+        const n = body.orchestrator[key];
+        if (!Number.isInteger(n) || n < 1 || n > 50) {
+          sendJSON(res, 400, { error: label + ' must be an integer between 1 and 50.', field: key });
+          return;
+        }
+        staged.orchestrator[key] = n;
+      }
+    }
+
     // Validate model (async, live probe)
     if (hasOrch && 'model' in body.orchestrator) {
       const model = body.orchestrator.model;
@@ -1285,10 +1637,28 @@ async function handler(req, res) {
       // Only probe if the model actually changed — saving other fields shouldn't
       // depend on a live Claude probe of an already-active model.
       if (model !== fresh.seats.orchestrator.model) {
-        const { ok, msg } = await validateClaudeModel(model);
+        // Legacy field = a Claude model unless the seat is explicitly on another provider.
+        const cand = { ...fresh.seats.orchestrator, model };
+        if (!cand.provider) cand.provider = 'claude-cli';
+        const { ok, msg } = await provValidateSeat('orchestrator', cand, fresh);
         if (!ok) {
-          sendJSON(res, 400, { error: 'Model "' + model + '" was not accepted by the Claude CLI: ' + msg, field: 'model' });
+          sendJSON(res, 400, { error: 'Model "' + model + '" was not accepted' + (cand.provider === 'claude-cli' ? ' by the Claude CLI' : '') + ': ' + msg, field: 'model' });
           return;
+        }
+        // Same tool-test gate as seats.orchestrator (v1.9 M2): a model change never bypasses it.
+        let would = null;
+        try { would = providers.resolveSeat('orchestrator', { ...fresh, seats: { ...fresh.seats, orchestrator: cand } }, {}); } catch (_) {}
+        if (would) {
+          const caps = capabilities.getCaps(would);
+          if (!caps) { sendJSON(res, 400, { error: 'Test this model first (Settings runs the tool test automatically).', field: 'model' }); return; }
+          if (caps.tools === 'fail') {
+            const okN = (caps.trials || []).filter(t => t.ok).length;
+            const why = ((caps.trials || []).find(t => !t.ok) || {}).why || 'failed';
+            sendJSON(res, 400, { error: (would.model || 'Codex default') + ' did not drive the tool protocol (' + okN + '/3: ' + why + ') — use it as metaprompter or category model instead.', field: 'model' });
+            return;
+          }
+          const benchErr = benchGateError(would, caps);
+          if (benchErr) { sendJSON(res, 400, { error: benchErr, field: 'model' }); return; }
         }
       }
       staged.orchestrator.model = model;
@@ -1330,6 +1700,18 @@ async function handler(req, res) {
       staged.endpoints.comfyui = comfyui;
     }
 
+    // OpenAI endpoint (v1.9): only the URL is settable; its key reference is always "openai" and the
+    // key itself goes through POST /secrets, never through this file.
+    if (hasEps && 'openai' in body.endpoints) {
+      const o = body.endpoints.openai;
+      const u = (o && typeof o === 'object') ? o.url : o;
+      if (typeof u !== 'string' || !/^https?:\/\//.test(u.trim())) {
+        sendJSON(res, 400, { error: 'OpenAI endpoint must be an http(s) URL.', field: 'openai' });
+        return;
+      }
+      staged.endpoints.openai = { url: u.trim(), apiKeyRef: 'openai' };
+    }
+
     // Validate metaprompter model (probe only Claude models, only if changed)
     if (hasMeta && 'model' in body.metaprompter) {
       const mm = body.metaprompter.model;
@@ -1337,8 +1719,11 @@ async function handler(req, res) {
         sendJSON(res, 400, { error: 'Metaprompter model must be a non-empty string.', field: 'metaprompter' });
         return;
       }
-      if (/^claude/i.test(mm) && mm !== fresh.seats.metaprompter.model) {
-        const { ok, msg } = await validateClaudeModel(mm);
+      // Probe only Claude-CLI models (a local model is JIT-loaded and may not be listed yet).
+      let mmProvider = null;
+      try { mmProvider = providers.resolveSeat('metaprompter', { ...fresh, seats: { ...fresh.seats, metaprompter: { ...fresh.seats.metaprompter, model: mm.trim() } } }, {}).provider; } catch (_) {}
+      if (mmProvider === 'claude-cli' && mm !== fresh.seats.metaprompter.model) {
+        const { ok, msg } = await provValidateSeat('metaprompter', { ...fresh.seats.metaprompter, model: mm.trim() }, fresh);
         if (!ok) {
           sendJSON(res, 400, { error: 'Metaprompter model "' + mm + '" was not accepted by the Claude CLI: ' + msg, field: 'metaprompter' });
           return;
@@ -1349,6 +1734,84 @@ async function handler(req, res) {
 
     if (hasMeta && 'ejectAfterUse' in body.metaprompter) {
       staged.metaprompter.ejectAfterUse = !!body.metaprompter.ejectAfterUse;
+    }
+
+    // ── Seats (v1.9): { <name>: { provider?, model?, endpoint? } }, any subset ──
+    // Each CHANGED seat is probed (CLI probe / the endpoint's /models); an unchanged one is not —
+    // saving something else must not depend on a live probe. Nothing is applied until all pass.
+    const forcedSeats = [];
+    if (hasSeats) {
+      const valCfg = { ...fresh, endpoints: { ...fresh.endpoints, ...staged.endpoints } };
+      for (const [name, patch] of Object.entries(body.seats)) {
+        if (!providers.SEAT_NAMES.includes(name) || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
+          sendJSON(res, 400, { error: 'Unknown seat "' + name + '".', field: name });
+          return;
+        }
+        const cur = (fresh.seats[name] && typeof fresh.seats[name] === 'object') ? fresh.seats[name] : {};
+        const cand = { ...cur }, picked = {};
+        for (const k of ['provider', 'model', 'endpoint']) {
+          if (!(k in patch)) continue;
+          // An empty model is valid only for a ChatGPT-plan (codex-cli) seat = Codex's own default.
+          const toCodex = (patch.provider !== undefined ? patch.provider : cur.provider) === 'codex-cli';
+          if (typeof patch[k] !== 'string' || (k === 'model' && !patch[k].trim() && !toCodex)) {
+            sendJSON(res, 400, { error: 'Seat ' + k + ' must be ' + (k === 'model' ? 'a non-empty ' : 'a ') + 'string.', field: name });
+            return;
+          }
+          cand[k] = picked[k] = patch[k].trim();
+        }
+        // First use of the OpenAI endpoint on an older config: seed the default (key ref is fixed).
+        if (cand.endpoint === 'openai' && !valCfg.endpoints.openai) {
+          staged.endpoints.openai = { url: 'https://api.openai.com/v1', apiKeyRef: 'openai' };
+          valCfg.endpoints = { ...valCfg.endpoints, openai: staged.endpoints.openai };
+        }
+        let before = null;
+        try { before = providers.resolveSeat(name, valCfg, {}); } catch (_) {}
+        let after;
+        try { after = providers.resolveSeat(name, { ...valCfg, seats: { ...valCfg.seats, [name]: cand } }, {}); }
+        catch (e) { sendJSON(res, 400, { error: e.message, field: name }); return; }
+        const changed = !before || before.provider !== after.provider || before.model !== after.model ||
+          (after.provider === 'openai-compat' && before.endpointName !== after.endpointName);
+        if (changed) {
+          const { ok, msg } = await provValidateSeat(name, cand, valCfg);
+          if (!ok) {
+            sendJSON(res, 400, { error: 'Seat "' + name + '" (' + after.model + ') was not accepted: ' + msg, field: name });
+            return;
+          }
+          // Vision gating (v1.9 M3): a local / OpenAI / ChatGPT-plan seat must have read the test card. No override
+          // (no force) — the judge is the only thing that can contradict a "fixed" claim.
+          if (name === 'vision' && after.provider !== 'claude-cli') {
+            const vz = capabilities.getVision(after);
+            if (!vz) { sendJSON(res, 400, { error: 'Test this model for vision first (Settings runs the vision test automatically).', field: name }); return; }
+            if (vz.vision === 'fail') {
+              const why = ((vz.visionTrials || []).find(t => !t.ok) || {}).why || 'failed';
+              sendJSON(res, 400, { error: (after.model || 'Codex default') + ' did not read the test card (' + why + ') — pick a model with vision (local: load its mmproj).', field: name });
+              return;
+            }
+          }
+          // Honest gating (v1.9 M2): the orchestrator / troubleshooter must have passed the tool test.
+          // The orchestrator has no override; the troubleshooter may be forced (marked in the caps store).
+          if (name === 'orchestrator' || name === 'troubleshooter') {
+            const caps = capabilities.getCaps(after);
+            if (!caps) {
+              sendJSON(res, 400, { error: 'Test this model first (Settings runs the tool test automatically).', field: name });
+              return;
+            }
+            if (caps.tools === 'fail') {
+              if (name === 'troubleshooter' && patch.force === true) forcedSeats.push(after);
+              else {
+                const okN = (caps.trials || []).filter(t => t.ok).length;
+                const why = ((caps.trials || []).find(t => !t.ok) || {}).why || 'failed';
+                sendJSON(res, 400, { error: (after.model || 'Codex default') + ' did not drive the tool protocol (' + okN + '/3: ' + why +
+                  ') — use it as metaprompter or category model instead.', field: name });
+                return;
+              }
+            }
+            const benchErr = name === 'orchestrator' ? benchGateError(after, caps) : null;
+            if (benchErr) { sendJSON(res, 400, { error: benchErr, field: name }); return; }
+          }
+        }
+        staged.seats[name] = { ...picked, provider: after.provider };   // provider is always written explicitly
+      }
     }
 
     // Validate Blender path (string; empty allowed to clear)
@@ -1415,12 +1878,29 @@ async function handler(req, res) {
     Object.assign(fresh.seats.orchestrator, staged.orchestrator);
     Object.assign(fresh.seats.metaprompter, staged.metaprompter);
     Object.assign(fresh.endpoints, staged.endpoints);
+    for (const [name, p] of Object.entries(staged.seats)) {
+      if (!fresh.seats[name] || typeof fresh.seats[name] !== 'object') fresh.seats[name] = {};
+      Object.assign(fresh.seats[name], p);
+    }
     if ('blender' in staged.apps) fresh.apps.blender = staged.apps.blender;
     if ('comfyOutput' in staged.apps) fresh.apps.comfyOutput = staged.apps.comfyOutput;
     if ('endpointUrl' in staged.feedback) fresh.feedback.endpointUrl = staged.feedback.endpointUrl;
     Object.assign(fresh.unreal, staged.unreal);
+    if (hasCp) {
+      if (!fresh.checkpoints || typeof fresh.checkpoints !== 'object') fresh.checkpoints = {};
+      Object.assign(fresh.checkpoints, stagedCp);
+    }
+    if (hasMcp) {
+      if (!fresh.mcp || typeof fresh.mcp !== 'object') fresh.mcp = {};
+      Object.assign(fresh.mcp, stagedMcp);
+    }
+    if (hasRemesh) {
+      if (!fresh.remesh || typeof fresh.remesh !== 'object') fresh.remesh = {};
+      Object.assign(fresh.remesh, stagedRemesh);
+    }
 
     a.saveConfig(fresh);
+    for (const sd of forcedSeats) capabilities.markForced(sd);   // the troubleshooter was forced past a failed test
     cfg = fresh;
     sendJSON(res, 200, {
       unreal: {
@@ -1429,10 +1909,15 @@ async function handler(req, res) {
         visionWidth:  fresh.unreal.visionWidth  || 1280,
         visionHeight: fresh.unreal.visionHeight || 720,
       },
-      gates: fresh.gates,
-      orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages },
+      gates: Object.assign({}, fresh.gates, { mode: a.runConfig(fresh).mode }),
+      orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages,
+        maxToolCalls: a.runConfig(fresh, 'ask').budget, maxToolCallsAuto: a.runConfig(fresh, 'auto').budget },
       metaprompter: { model: fresh.seats.metaprompter.model, ejectAfterUse: !!fresh.seats.metaprompter.ejectAfterUse },
+      checkpoints: checkpoints.settings(fresh),
+      mcp: mcpFlagsView(fresh),
+      remesh: remeshView(fresh),
       endpoints: { local: fresh.endpoints.local, comfyui: fresh.endpoints.comfyui },
+      seats: seatsView(fresh),
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
     });
@@ -1812,12 +2297,162 @@ async function handler(req, res) {
     return;
   }
 
+  // ── POST /seat-probe ─────────────────────────────────────────────────────
+  // Body: { seat, provider, model, endpoint } → the tool-protocol test (3 tries) of a CANDIDATE seat; seat 'vision' → the
+  // vision test (2 colour cards, M3). Only these three seats are tested; any other answers { tools:'n/a' } with no calls.
+  // One probe at a time (409); same localhost-only rule as /secrets.
+  if (method === 'POST' && urlPath === '/seat-probe') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const seatName = body && body.seat;
+    if (seatName !== 'orchestrator' && seatName !== 'troubleshooter' && seatName !== 'vision') { sendJSON(res, 200, { tools: 'n/a' }); return; }
+    if (_probeRunning) { sendJSON(res, 409, { error: 'probe already running' }); return; }
+    // Sweep 3 G: claimed SYNCHRONOUSLY (before the first await) with an owner token - three parallel probes used to all pass the check; released only by the owner
+    const owner = {}; _probeRunning = owner;
+    try {
+      // Validate the candidate BEFORE any model call (M2.3): a wrong model for the provider is a 400 with the reason —
+      // zero calls, and no caps entry is written for a combination the user never meant.
+      const vErr = await validateCandidate(seatName, body);
+      if (vErr) { sendJSON(res, 400, { error: vErr }); return; }
+      const cand = { provider: body.provider, model: body.model, endpoint: body.endpoint };
+      const cfgP = withCandidateEndpoints(a.loadConfig(), body.endpoints);
+      const r = seatName === 'vision'
+        ? await capabilities.probeVision(seatName, cand, cfgP, { complete: _provDeps && _provDeps.complete })   // M3: the colour-card test
+        : await capabilities.probeTools(seatName, cand, cfgP, {
+          buildSystemPrompt: a.buildSystemPrompt, TOOLS: a.TOOLS, parseToolCallStrict: a.parseToolCallStrict, nudge: a.TOOL_RESULT_NUDGE,
+          complete: _provDeps && _provDeps.complete,
+        });
+      sendJSON(res, 200, r);
+    } catch (e) {
+      sendJSON(res, 400, { error: String((e && e.message) || e) });
+    } finally { if (_probeRunning === owner) _probeRunning = false; }
+    return;
+  }
+
+  // ── POST /seat-bench ─────────────────────────────────────────────────────
+  // Body: { seat:'orchestrator', provider, model, endpoint } → the 5-task competence benchmark of a CANDIDATE seat
+  // in a throw-away headless Blender (its own IPC dir — the user's open Blender is never touched). Only after the
+  // seat's tool test passed. Result stored on the seat's caps entry. One at a time (409); localhost only.
+  if (method === 'POST' && urlPath === '/seat-bench') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const seatName = body && body.seat;
+    if (seatName !== 'orchestrator') { sendJSON(res, 400, { error: 'Only the orchestrator is benchmarked.' }); return; }
+    if (_benchRunning) { sendJSON(res, 409, { error: 'benchmark already running' }); return; }
+    const owner = {}; _benchRunning = owner;   // sweep 3 G: claimed synchronously, released only by the owner
+    try {
+    let cfg0;
+    try { cfg0 = withCandidateEndpoints(a.loadConfig(), body && body.endpoints); }
+    catch (e) { sendJSON(res, 400, { error: e.message, field: 'local' }); return; }
+    const cur = (cfg0.seats && cfg0.seats[seatName] && typeof cfg0.seats[seatName] === 'object') ? cfg0.seats[seatName] : {};
+    const cand = {};
+    for (const k of ['provider', 'model', 'endpoint']) if (typeof body[k] === 'string') cand[k] = body[k];
+    let seat;
+    try { seat = providers.resolveSeat(seatName, { ...cfg0, seats: { ...(cfg0.seats || {}), [seatName]: { ...cur, ...cand } } }, {}); }
+    catch (e) { sendJSON(res, 400, { error: String((e && e.message) || e) }); return; }
+    const caps = capabilities.getCaps(seat);
+    if (!caps || caps.tools !== 'pass') { sendJSON(res, 400, { error: 'Run the tool test first' }); return; }
+    const vErr = await validateCandidate(seatName, body);   // M2.3: validate before any bench call
+    if (vErr) { sendJSON(res, 400, { error: vErr }); return; }
+    _benchProgress = { task: 0, of: bench.OF, id: '', run: 0, runs: 0 };
+      const bd = (_provDeps && _provDeps.bench) || {};
+      const run = (_provDeps && _provDeps.runBench) || bench.runBench;
+      const r = await run(seatName, cand, cfg0, {
+        complete: _provDeps && _provDeps.complete,
+        ...bd,
+        onProgress: (task, of, id, run, runs) => { _benchProgress = { task, of, id, run, runs }; },
+      });
+      const stored = (r && Number.isInteger(r.passed) && Number.isInteger(r.runs))
+        ? { passed: r.passed, total: r.total, runs: r.runs, ranAt: r.ranAt || new Date().toISOString(), blender: r.blender, tasks: r.tasks || [] }
+        : { unavailable: String((r && r.unavailable) || bench.NO_BLENDER), ranAt: new Date().toISOString() };
+      capabilities.setBench(seat, stored);
+      sendJSON(res, 200, { ...stored, local: seat.provider === 'openai-compat' && seat.kind === 'local' });
+    } catch (e) {
+      sendJSON(res, 400, { error: String((e && e.message) || e) });
+    } finally { if (_benchRunning === owner) { _benchRunning = false; _benchProgress = null; } }
+    return;
+  }
+
+  // ── GET /seat-bench-status ───────────────────────────────────────────────
+  if (method === 'GET' && urlPath === '/seat-bench-status') {
+    sendJSON(res, 200, { running: !!_benchRunning, ...(_benchProgress || {}) });
+    return;
+  }
+
+  // ── GET /remesh-balance (v1.9 M9) ──────────────────────────────────────────
+  // The Settings section's live "Meshy balance". The server calls Meshy with the stored key; the page only ever gets the number
+  // (or "balance unavailable"). Localhost-only like /secrets. Always 200: { ok:true, balance } | { ok:false, error }.
+  if (method === 'GET' && urlPath === '/remesh-balance') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    const rcfg = a.loadConfig();
+    const key = providers.getKey('meshy');
+    if (!key) { sendJSON(res, 200, { ok: false, error: 'no Meshy API key' }); return; }
+    const b = await require('./providers/meshy').balance({ key, baseUrl: rcfg.remesh && rcfg.remesh.meshyBase });
+    sendJSON(res, 200, b.ok ? { ok: true, balance: b.balance } : { ok: false, error: b.error });
+    return;
+  }
+
+  // ── GET /asset-faces (v1.9 M10) ───────────────────────────────────────────
+  // Source triangle count for the Remesh dialog, read from the GLB's JSON chunk only. { ok:true, tris } | { ok:false }.
+  if (method === 'GET' && urlPath === '/asset-faces') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    const qs = new URL(req.url, 'http://x').searchParams;
+    sendJSON(res, 200, a.assetFaces(qs.get('category') || '', qs.get('name') || ''));
+    return;
+  }
+
+  // ── GET /remesh-status (v1.9 M10) ─────────────────────────────────────────
+  // The running remesh for the Library badge after a page reload: { running:false } | { running:true, asset, progress }. Never the key.
+  if (method === 'GET' && urlPath === '/remesh-status') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    sendJSON(res, 200, a.remeshStatus());
+    return;
+  }
+
+  // ── POST /secrets ────────────────────────────────────────────────────────
+  // Body: { ref, key } — key '' deletes. The response carries booleans only; no route ever returns a key.
+  if (method === 'POST' && urlPath === '/secrets') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    try { providers.setKey(body && body.ref, body && body.key); }
+    catch (e) { sendJSON(res, 400, { error: String((e && e.message) || e) }); return; }
+    sendJSON(res, 200, { keys: providers.listKeys() });
+    return;
+  }
+
+  // ── GET /provider-models?endpoint=openai ────────────────────────────────
+  // Model ids an OpenAI-compatible endpoint offers (Settings datalist). Always 200, like /lmstudio/models.
+  if (method === 'GET' && urlPath === '/provider-models') {
+    // ?provider=codex → the ChatGPT-plan catalog + login state (always 200, never throws)
+    if (parsedUrl.searchParams.get('provider') === 'codex') {
+      try { sendJSON(res, 200, await providers.codexCatalog(a.loadConfig())); }
+      catch (e) { sendJSON(res, 200, { reachable: false, models: [], labels: {}, loggedIn: false, error: String((e && e.message) || e) }); }
+      return;
+    }
+    const endpoint = parsedUrl.searchParams.get('endpoint') || 'local';
+    try {
+      const models = await provListModels(endpoint, a.loadConfig());
+      sendJSON(res, 200, { endpoint, models });
+    } catch (e) {
+      sendJSON(res, 200, { endpoint, models: [], error: String((e && e.message) || e) });
+    }
+    return;
+  }
+
   // ── GET /lmstudio/models ─────────────────────────────────────────────────
   // Returns models currently loaded in LM Studio. Always responds 200 —
   // { reachable: false, error, base } when LM Studio is unreachable so the UI
   // can render a graceful "offline" badge (same convention as /workflows/deps).
   if (method === 'GET' && urlPath === '/lmstudio/models') {
-    const localCfg = a.loadConfig();
+    let localCfg;
+    try { localCfg = withCandidateEndpoints(a.loadConfig(), { local: parsedUrl.searchParams.get('local') }); }   // sweep 2 G2: the URL typed in Settings
+    catch (e) { sendJSON(res, 400, { error: e.message, field: 'local' }); return; }
     const result = await a.listLmStudioModels(localCfg);
     sendJSON(res, 200, result);
     return;
@@ -2034,6 +2669,120 @@ async function handler(req, res) {
     return;
   }
 
+  // ── POST /mcp/call (v1.9 M6) ───────────────────────────────────────────────
+  // Body { tool, input, intent?, client? }. ONE Phoenix tool run for an external agent (Claude Code / Codex / Cursor) —
+  // Phoenix's own orchestrator is not involved. Localhost-only; same doors as /chat (the chat lock, no heavy tool
+  // while a background generation runs). Runs as Auto (gates off on a copy, render vision as configured) and answers
+  // when the tool is done — generate_prop may keep the request open for minutes. Shown live in the chat window
+  // (kind:'mcp'), never written to history.json.
+  if (method === 'POST' && urlPath === '/mcp/call') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); }
+    catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const tool = (body && typeof body.tool === 'string') ? body.tool : '';
+    const fresh = a.loadConfig();
+    const mcpClass = Object.prototype.hasOwnProperty.call(MCP_CLASS, tool) ? MCP_CLASS[tool] : null;
+    if (!mcpClass) { sendJSON(res, 400, { error: 'tool not available over MCP' }); return; }
+    const optFlag = Object.prototype.hasOwnProperty.call(MCP_OPTIN, tool) ? MCP_OPTIN[tool] : null;
+    if (optFlag && !mcpAllows(fresh, optFlag)) {
+      sendJSON(res, 400, { error: 'tool not available over MCP — enable it in Phoenix Settings → Connections' });
+      return;
+    }
+    let input = body.input === undefined ? {} : body.input;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) { sendJSON(res, 400, { error: 'input must be an object' }); return; }
+    input = Object.assign({}, input);
+    // M6.1 B2: overwriting an existing library entry destroys data a checkpoint cannot bring back -> same opt-in as the deletes.
+    // Chat path unchanged (this is the MCP door only). A refusal is a tool error text, not an HTTP error.
+    if (!mcpAllows(fresh, 'allowDelete')) {
+      let overwrite = '';
+      if (tool === 'save_as_brush' && input.overwrite) overwrite = 'overwrite:true on save_as_brush';
+      else if (tool === 'save_character' && input.overwrite) overwrite = 'overwrite:true on save_character';
+      else if (tool === 'unreal_to_brush' && input.force) overwrite = 'force:true on unreal_to_brush';
+      else if (tool === 'assign_skeleton') {
+        try {
+          const abs = customRig.folderPath(input.folder);
+          if (abs && (fs.existsSync(path.join(abs, 'signature.json')) || fs.existsSync(path.join(abs, 'rig.blend')))) overwrite = 're-assigning the skeleton of a folder that already has one';
+        } catch (_) { /* an unreadable folder is the tool's own error */ }
+      }
+      if (overwrite) {
+        sendJSON(res, 200, { result: "REJECTED: " + overwrite + " would overwrite an existing library entry. Overwriting needs 'Allow deleting library files' in Phoenix Settings → Connections.",
+          failed: true, verdict: null, gateNote: '', stopReason: null });
+        return;
+      }
+    }
+    let intent = typeof body.intent === 'string' ? body.intent : '';
+    if ('intent' in input) { if (typeof input.intent === 'string' && !intent) intent = input.intent; delete input.intent; }   // never forwarded into the tool input, string or not
+    intent = intent.trim();
+    if (!intent) intent = Array.from(tool + ' ' + JSON.stringify(input)).slice(0, 500).join('');
+    const client = (body && typeof body.client === 'string' && body.client.trim()) ? body.client.trim().slice(0, 80) : 'mcp';
+    // M9: remesh_asset is cloud work — no chat lock, not refused by a running GPU job (own one-at-a-time flag in the tool). Consent:
+    // only when Settings → Connections is on; MCP counts as Auto. The tool re-checks the same gates (enabled, key) in the same order.
+    const cloudTool = tool === 'remesh_asset';
+    if (cloudTool && !(fresh.remesh && fresh.remesh.enabled === true)) {
+      sendJSON(res, 200, { result: 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Connections', failed: true, verdict: null, gateNote: '', stopReason: null });
+      return;
+    }
+    const readOnly = mcpClass === 'R' || cloudTool;   // 'readOnly' here = takes no chat lock
+    if (!readOnly && (deferredInFlight || jobs.isRunning())) {
+      sendJSON(res, 409, { error: 'a background generation is running — wait for it to finish, then try again' });
+      return;
+    }
+    if (!readOnly && !lock.tryAcquire()) { sendJSON(res, 409, { error: 'busy' }); return; }   // read-only tools never take the lock: parallel agent calls must not 409
+    const cut = (t, n) => { const cps = Array.from(String(t)); return cps.length > n ? cps.slice(0, n).join('') + '…' : cps.join(''); };
+    try {
+      cfg = fresh;
+      broadcast({ kind: 'mcp', client, tool, phase: 'start', text: cut(JSON.stringify(input), 300) });
+      const started = Date.now();
+      let runCfg = a.runConfig(cfg, 'auto').cfg;
+      // generate_image over MCP stops at the image, like the Image tab: only the image gate is switched back on.
+      if (tool === 'generate_image') runCfg = Object.assign({}, runCfg, { gates: Object.assign({}, runCfg.gates, { image: true }) });
+      const r = await a.runOneTool(tool, input, {
+        state, cfg: runCfg, turnNo: Number(state.turnSeq) || 0, history, userInput: intent,
+        toolOpts: {
+          holdsLock: true, mode: 'auto', checkpointLabel: 'mcp_' + tool,
+          forceCheckpoint: a.MCP_FORCE_CHECKPOINT.includes(tool),
+          onArtifact: (art) => {
+            try {
+              if (!art || !art.rel) return;
+              broadcast({ kind: 'artifact', slot: art.slot || 'image', source: art.source,
+                url: '/file?p=' + encodeURIComponent(art.rel) + '&t=' + Date.now() });
+            } catch (_) { /* a broadcast must never break the call */ }
+          },
+        },
+      });
+      let result = typeof r.result === 'string' ? r.result : String(r.result);
+      const failed = a.toolResultFailed(result);
+      if (tool === 'generate_image' && !failed) {
+        result += "\n\nStopped at the image. The image is in Phoenix's Image tab — the user can turn it into 3D there; generate_prop makes a new prop from text in one go.";
+      }
+      const out = { result, failed, verdict: r.verdict === undefined ? null : r.verdict, gateNote: r.gateNote || '', stopReason: r.stopReason || null };
+      if (r.rendered || tool === 'inspect_render') {
+        try {
+          const st = fs.statSync(mcpRenderPath);
+          if (st.size <= 4 * 1024 * 1024 && st.mtimeMs >= started - 1000) out.image = fs.readFileSync(mcpRenderPath).toString('base64');
+        } catch (_) { /* no render = no image */ }
+      }
+      broadcast({ kind: 'mcp', client, tool, phase: 'done',
+        text: cut(result, 2000) + '\n' + mcpVerdictLine(out.verdict, out.stopReason) });
+      sendJSON(res, 200, out);
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      broadcast({ kind: 'mcp', client, tool, phase: 'done', text: 'ERROR: ' + msg });
+      sendJSON(res, 500, { error: msg });
+    } finally {
+      if (!readOnly) lock.release();
+    }
+    return;
+  }
+
+  // ── GET /mcp/status (v1.9 M6) — what job_status shows an MCP client ─────────
+  if (method === 'GET' && urlPath === '/mcp/status') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    sendJSON(res, 200, { job: jobs.info(), stage: pipeline.currentStage(), busy: lock.isHeld() });
+    return;
+  }
+
   // ── POST /stop ─────────────────────────────────────────────────────────────
   // Abort the running stage. Two things have to die, not one: the LOCAL
   // phoenix.js stage child, and the job ComfyUI is computing on the rig.
@@ -2074,7 +2823,14 @@ async function handler(req, res) {
 
 // ─── Exports (pure functions for unit testing — usable without starting the server) ──
 
-module.exports = { feedPipelineLine, _resetPipelineState };
+function _setMcpRenderPath(p) { mcpRenderPath = p; }   // test seam: where /mcp/call looks for the gate's render
+
+// F1: the "maybe charged" warning reaches the UI directly, not only through the tool result (a chat model may paraphrase it).
+a.remeshEvents.on('progress', (e) => { try { broadcast({ kind: 'notice', text: 'remesh ' + e.pct + '%', progress: 'remesh', asset: e.asset, pct: e.pct }); } catch (_) { /* no clients */ } });
+a.remeshEvents.on('done', (asset) => { try { broadcast({ kind: 'notice', text: 'remesh done', progress: 'remesh', asset, done: true }); } catch (_) { /* no clients */ } });
+a.remeshEvents.on('maybe-charged', (text) => { try { broadcast({ kind: 'notice', level: 'error', text: String(text) }); } catch (_) { /* no clients */ } });
+
+module.exports = { feedPipelineLine, _resetPipelineState, _resetCpProbeQuiet: () => { lastCpProbeFailAt = 0; }, handler, _setProviderDeps, _setMcpRenderPath };
 
 // ─── Start server (only when run directly, not when required for tests) ────────
 
@@ -2105,6 +2861,16 @@ if (require.main === module) {
       } catch (_) {}
       console.error('Unhandled error in request handler:', err);
     });
+  });
+
+  // Sweep 2 F3: a second Phoenix (or anything else on the port) is a plain sentence, not a stack trace.
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.error('Port 7777 is in use — is Phoenix already running? Open http://127.0.0.1:7777');
+    } else {
+      console.error('Phoenix could not start its server: ' + ((err && err.message) || err));
+    }
+    process.exit(1);
   });
 
   server.listen(7777, '127.0.0.1', () => {

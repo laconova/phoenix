@@ -77,7 +77,11 @@ function request(urlStr, { method = 'GET', body = null, timeoutMs = 300000 } = {
       const chunks = [];
       res.on('data', d => chunks.push(d));
       res.on('end', () => resolve({ status: res.statusCode, buf: Buffer.concat(chunks),
-                                    type: res.headers['content-type'] || '' }));
+                                    type: res.headers['content-type'] || '',
+                                    // Voice seed (2026-09-26): the seed the engine used comes back as a
+                                    // response header (X-Voice-Seed), not in the JSON/audio body — expose
+                                    // the raw node headers object so callers can read it.
+                                    headers: res.headers }));
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => { req.destroy(new Error('timeout after ' + timeoutMs + 'ms')); });
@@ -88,6 +92,23 @@ function request(urlStr, { method = 'GET', body = null, timeoutMs = 300000 } = {
 
 function slug(s) {
   return String(s || 'line').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'line';
+}
+
+// Voice seed (2026-09-26): `undefined`/`null`/`''` means "no seed" (the adapter rolls one); anything
+// else must be an integer 0..2147483647 (a number, or a string of plain digits) or it's a format error.
+// Validated before any network call so a typo never spends a generation.
+function parseSeed(seed) {
+  if (seed === undefined || seed === null || seed === '') return { none: true };
+  let n;
+  if (typeof seed === 'number') {
+    n = seed;
+  } else if (typeof seed === 'string' && /^\d+$/.test(seed.trim())) {
+    n = Number(seed.trim());
+  } else {
+    return { error: true };
+  }
+  if (!Number.isInteger(n) || n < 0 || n > 2147483647) return { error: true };
+  return { none: false, value: n };
 }
 
 // ── public ───────────────────────────────────────────────────────────────────
@@ -200,8 +221,8 @@ function resolveEngine(engine) {
   return { ok: true, id };
 }
 
-// speak({voice, text, effect, strength, engine}) -> { file, url, seconds, effect, filter }
-async function speak({ voice, text, effect, strength, engine } = {}) {
+// speak({voice, text, effect, strength, engine, seed}) -> { file, url, seconds, effect, filter, seed, seedIgnored }
+async function speak({ voice, text, effect, strength, engine, seed } = {}) {
   const base = apiBase();
   if (!base) return { error: 'voice.api is not set in phoenix-config.json' };
   if (!voice) return { error: 'pick a voice pack first' };
@@ -213,19 +234,30 @@ async function speak({ voice, text, effect, strength, engine } = {}) {
   const eng = resolveEngine(engine);
   if (!eng.ok) return { error: eng.error };
 
+  // Voice seed (2026-09-26): validated before any network call — see parseSeed().
+  const seedInfo = parseSeed(seed);
+  if (seedInfo.error) return { error: 'seed must be a whole number between 0 and 2147483647' };
+  // crispasr is a fixed speaker pack with no seed knob (voice-host contract) — a given seed is accepted but
+  // ignored, never sent as `params`, so the crispasr request body stays byte-for-byte as before this
+  // feature existed.
+  const seedIgnored = eng.id === 'crispasr' && !seedInfo.none;
+  const sendSeed = eng.id !== 'crispasr' && !seedInfo.none;
+
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const base_name = voice + '_' + slug(text) + '_' + stamp;
-  const rawFile = path.join(OUT_DIR, base_name + (effect ? '_raw.wav' : '.wav'));
+
+  const reqBody = { model: 'tada', voice, input: String(text), engine: eng.id };
+  if (sendSeed) reqBody.params = { seed: seedInfo.value };
 
   let r;
   try {
     r = await request(base + '/v1/audio/speech', {
       method: 'POST',
       // `engine` (Stage 2d): default "crispasr" reproduces the exact prior body/behavior — the
-      // rig's /v1/audio/speech + /speak already default to "crispasr" when the field is absent
+      // the voice host's /v1/audio/speech + /speak already default to "crispasr" when the field is absent
       // (Part 2b, LIVE), so sending it explicitly here changes nothing for the default case.
-      body: JSON.stringify({ model: 'tada', voice, input: String(text), engine: eng.id }),
+      body: JSON.stringify(reqBody),
     });
   } catch (e) {
     return { error: 'speech server not reachable at ' + base + ' — ' + e.message };
@@ -243,6 +275,17 @@ async function speak({ voice, text, effect, strength, engine } = {}) {
   if (!(r.type || '').includes('audio') || r.buf.length < 1000) {
     return { error: 'speech server returned no audio (' + r.buf.length + ' bytes, ' + r.type + ')' };
   }
+
+  // Voice seed (2026-09-26): the engine's actual seed comes back as X-Voice-Seed (node lowercases
+  // header names). crispasr/cosyvoice never send it, chatterbox always does. If it doesn't parse as
+  // an integer, the take still succeeded — just report seed: null rather than failing it.
+  const hdrSeed = r.headers && r.headers['x-voice-seed'];
+  const parsedHdrSeed = Number(hdrSeed);
+  const respSeed = (hdrSeed !== undefined && Number.isInteger(parsedHdrSeed)) ? parsedHdrSeed : null;
+  const seedSuffix = respSeed != null ? ('_s' + respSeed) : '';
+  const named_base = base_name + seedSuffix;
+  const rawFile = path.join(OUT_DIR, named_base + (effect ? '_raw.wav' : '.wav'));
+
   fs.writeFileSync(rawFile, r.buf);
 
   let finalFile = rawFile;
@@ -250,7 +293,7 @@ async function speak({ voice, text, effect, strength, engine } = {}) {
   if (effect) {
     try {
       chain = soundFx.buildChain({ effect, strength: typeof strength === 'number' ? strength : 0.5 });
-      finalFile = path.join(OUT_DIR, base_name + '.wav');
+      finalFile = path.join(OUT_DIR, named_base + '.wav');
       await runFfmpeg(rawFile, finalFile, chain);
     } catch (e) {
       // Keep the unprocessed take rather than losing the generation to a filter problem.
@@ -269,6 +312,9 @@ async function speak({ voice, text, effect, strength, engine } = {}) {
     effect: effect || null,
     filter: chain ? chain.filter : null,
     steps: chain ? chain.steps.map(s => s.id) : [],
+    // Voice seed (2026-09-26): the reproducible-take feature — see parseSeed()/hdrSeed above.
+    seed: respSeed,
+    ...(seedIgnored ? { seedIgnored: true } : {}),
   };
 }
 

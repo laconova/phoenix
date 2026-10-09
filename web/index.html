@@ -153,6 +153,14 @@
     }
 
     #settings-panel[hidden] { display: none; }
+    #settings-panel { max-height: calc(100vh - 60px); overflow-y: auto; }
+    #settings-tabs { display:flex; gap:2px; border-bottom:1px solid var(--outline); }
+    .settings-tab-btn { padding:6px 12px; border:none; background:transparent; color:var(--muted); font-size:11px; font-weight:600; cursor:pointer; border-bottom:2px solid transparent; transition:color 0.15s, border-color 0.15s; }
+    .settings-tab-btn:hover { color:var(--text); }
+    .settings-tab-btn.active { color:var(--text); border-bottom-color:var(--accent); }
+    #moved-general, #moved-conn { display:flex; flex-direction:column; gap:8px; }
+    .settings-pane { display:flex; flex-direction:column; gap:8px; }
+    .settings-pane[hidden] { display:none; }
 
     .settings-title {
       font-weight: 600;
@@ -267,6 +275,7 @@
 
     /* ── Settings form ── */
     .set-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+    .set-row[hidden] { display: none; }   /* author display beats [hidden] — legacy model rows rely on this */
     .set-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .set-row input, .set-row select { padding: 7px 10px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); outline: none; width: 100%; }
     .set-row input:focus, .set-row select:focus { border-color: var(--accent); }
@@ -298,6 +307,21 @@
       min-height: 0;
     }
 
+    /* ── Panel resize handles + collapse strips (M10) ── */
+    .panel-handle { flex: 0 0 6px; cursor: col-resize; background: transparent; position: relative; z-index: 5; margin: 0 -3px; }
+    .panel-handle:hover, .panel-handle.dragging { background: linear-gradient(to right, transparent 2px, var(--accent) 2px, var(--accent) 4px, transparent 4px); }
+    .panel-handle.hidden-by-collapse { display: none; }
+    .panel-strip { display: none; flex: 1; flex-direction: column; align-items: center; gap: 10px; padding-top: 8px; background: var(--panel); border: none; color: var(--muted); cursor: pointer; font-size: 12px; width: 100%; }
+    .panel-strip:hover { color: var(--text); }
+    .panel-strip .strip-label { writing-mode: vertical-rl; transform: rotate(180deg); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
+    #chat-wrap.collapsed, #library-wrap.collapsed { flex: 0 0 28px !important; min-width: 0; }
+    #chat-wrap.collapsed > :not(.panel-strip), #library-wrap.collapsed > :not(.panel-strip) { display: none !important; }
+    #chat-wrap.collapsed > .panel-strip, #library-wrap.collapsed > .panel-strip { display: flex; }
+    #chat-head { display:flex; justify-content:space-between; align-items:center; padding:4px 10px; border-bottom:1px solid var(--outline); font-size:11px; font-weight:600; color:var(--muted); flex-shrink:0; }
+    .panel-collapse-btn { background:transparent; border:none; color:var(--accent); cursor:pointer; font-size:15px; line-height:1; padding:0 4px; }
+    #library-header-btns { display:flex; align-items:center; }
+    .lib-badge { position:absolute; top:2px; right:6px; background:var(--accent); color:#fff; font-size:10px; font-weight:700; border-radius:9px; padding:1px 6px; pointer-events:none; }
+
     /* ── Chat panel ── */
     #chat-wrap {
       flex: 0 0 360px;
@@ -306,6 +330,22 @@
       overflow: hidden;
       border-right: 1px solid var(--outline);
     }
+
+    /* ── Checkpoints panel (v1.9 M5) ── */
+    #cp-panel { flex-shrink: 0; border-top: 1px solid var(--outline); background: var(--panel); font-size: 12px; }
+    #cp-banner { padding: 6px 12px; background: #c98a2b; color: #fff; font-weight: 600; }
+    #cp-details > summary { cursor: pointer; padding: 6px 12px; user-select: none; }
+    #cp-list { list-style: none; margin: 0; padding: 0 12px 8px; max-height: 160px; overflow-y: auto; }
+    #cp-list li { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+    #cp-list li .cp-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #cp-list li.cp-current .cp-meta { font-weight: 700; }
+    #cp-list li.cp-here .cp-meta { font-weight: 700; }
+    #cp-list li.cp-ahead { opacity: .55; }
+    #cp-list li button, #cp-dialog button { cursor: pointer; }
+    #cp-empty { padding: 0 12px 8px; opacity: .7; }
+    #cp-dialog { max-width: 420px; border: 1px solid var(--outline); border-radius: 10px; padding: 16px; background: var(--panel); color: inherit; }
+    #cp-dialog .cp-choice { display: block; width: 100%; text-align: left; margin: 8px 0 2px; padding: 8px 10px; }
+    #cp-dialog .cp-hint { display: block; font-size: 11px; opacity: .75; margin: 0 2px 6px; }
 
     #messages {
       flex: 1;
@@ -355,6 +395,18 @@
       color: var(--muted);
       font-size: 12px;
       padding: 4px 8px;
+    }
+
+    /* A call from an external agent over MCP (v1.9 M6): a marked log line, not a chat bubble. */
+    .bubble.mcp {
+      align-self: stretch;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      padding: 4px 8px;
+      border-left: 3px solid var(--outline);
+      border-radius: 0;
+      white-space: pre-wrap;
     }
 
     /* ── Input row ── */
@@ -417,6 +469,17 @@
       opacity: 0.5;
       cursor: not-allowed;
     }
+
+    /* Run mode (v1.9 M4): Ask | Auto toggle in its own slim bar above the input row (so the text field keeps the width) + the vision-off warning beside it */
+    #run-mode-wrap { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 6px 16px 0; background: var(--panel); border-top: 1px solid var(--outline); flex-shrink: 0; }
+    #run-mode-wrap + #input-row { border-top: none; }
+    #run-mode { display: flex; border: 1px solid var(--outline); border-radius: 8px; overflow: hidden; }
+    #run-mode button {
+      padding: 7px 12px; border: none; background: transparent; color: var(--muted);
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    #run-mode button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+    #auto-warn { font-size: 11px; line-height: 1.3; color: #c98a2b; }
 
     /* ── Artifacts column (middle) ── */
     #artifacts-wrap {
@@ -807,7 +870,7 @@
     #library-list { flex:1; overflow-y:auto; padding:6px 0; }
     .lib-cat { font-size:11px; text-transform:uppercase; letter-spacing:0.07em; font-weight:700; color:var(--text); padding:7px 12px 6px; margin-top:4px; background:rgba(128,128,128,0.10); border-top:1px solid rgba(128,128,128,0.18); }
     .lib-cat:first-child { border-top:none; margin-top:0; }
-    .lib-item { padding:5px 12px; font-size:12px; color:var(--text); cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
+    .lib-item { position:relative; padding:5px 12px; font-size:12px; color:var(--text); cursor:pointer; user-select:none; display:flex; align-items:center; gap:6px; }
     .lib-item:hover { background:var(--accent); color:#fff; }
     .lib-item.selected { border-left:3px solid var(--accent); padding-left:9px; }
     .lib-empty { color:#B8B8B8; font-style:italic; font-size:12px; padding:10px 12px; }
@@ -916,6 +979,14 @@
       </select>
     </div>
 
+    <!-- Run mode default + tool budgets (v1.9 M4). The chat toggle picks per message; this is the default. -->
+    <div class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+      <label for="gate-mode" style="margin:0;">Default run mode</label>
+      <select id="gate-mode" style="margin-left:auto;">
+        <option value="ask">Ask</option>
+        <option value="auto">Auto</option>
+      </select>
+    </div>
     <div class="gate-pop" id="pop-gates" hidden>
       <b>On</b> = stop for your approval after this stage.<br>
       <b>Off</b> = auto-continue with no LLM between steps.
@@ -932,6 +1003,9 @@
       Each check costs one extra vision call (~10&ndash;15&nbsp;s).
     </div>
 
+    <!-- Checkpoints (v1.9 M5): ring buffer of scene copies taken before scene-changing steps. -->
+    <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">Checkpoints</div>
+    <label class="gate-row"><input type="checkbox" id="cp-enabled" checked> Save a checkpoint before scene changes</label>
     <!-- Unreal sits LAST on purpose: the individual gates above are the ones reached for every
          session, this group is set once and left alone. -->
     <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">Unreal</div>
@@ -973,6 +1047,68 @@
       unless the Unreal window is in the foreground.
     </div>
   </div>
+  <!-- M10: settings that moved from the gear into the Settings window. Kept here (hidden) so loadGates fills them; openSettings moves the nodes into its tabs and back. -->
+  <div id="settings-moved-holder" hidden>
+    <div id="moved-general">
+    <div class="gate-row">
+      <label for="gate-steps-ask" style="margin:0;">Tool steps per turn (Ask)</label>
+      <input type="number" id="gate-steps-ask" min="1" max="50" step="1" value="3" style="margin-left:auto;width:60px;">
+    </div>
+    <div class="gate-row">
+      <label for="gate-steps-auto" style="margin:0;">Tool steps per turn (Auto)</label>
+      <input type="number" id="gate-steps-auto" min="1" max="50" step="1" value="8" style="margin-left:auto;width:60px;">
+    </div>
+
+    <div id="gate-steps-err" class="settings-hint" style="color:#e06c6c;" hidden></div>
+
+    <div class="gate-row">
+      <label for="cp-keep" style="margin:0;">Checkpoints to keep</label>
+      <input type="number" id="cp-keep" min="1" max="100" step="1" value="10" style="margin-left:auto;width:60px;">
+    </div>
+    <div class="gate-row">
+      <label for="cp-maxgb" style="margin:0;">Max disk (GB)</label>
+      <input type="number" id="cp-maxgb" min="0.1" max="100" step="0.1" value="2" style="margin-left:auto;width:60px;">
+    </div>
+    <div id="cp-settings-err" class="settings-hint" style="color:#e06c6c;" hidden></div>
+
+    </div>
+    <div id="moved-conn">
+    <!-- MCP (v1.9 M6): Phoenix as a tool for an external agent. Phoenix must be running. -->
+    <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">MCP (use Phoenix from Claude Code / Codex / Cursor)</div>
+    <label class="gate-row"><input type="checkbox" id="mcp-allow-blender-run"> Allow blender_run (arbitrary Python) over MCP</label>
+    <label class="gate-row"><input type="checkbox" id="mcp-allow-unreal-run"> Allow unreal_run (arbitrary Python in Unreal) over MCP</label>
+    <label class="gate-row"><input type="checkbox" id="mcp-allow-delete"> Allow deleting library files over MCP (delete_asset / delete_brush / delete_material — permanent)</label>
+    <div class="settings-hint">Off by default. Phoenix must be running for the tools to work. Add it once:</div>
+    <div class="settings-hint">Claude Code</div>
+    <code id="mcp-line-claude" style="font-size:11px;word-break:break-all;user-select:all;"></code>
+    <div class="settings-hint">Codex</div>
+    <code id="mcp-line-codex" style="font-size:11px;word-break:break-all;user-select:all;"></code>
+    <div class="settings-hint">Cursor — <code>.cursor/mcp.json</code></div>
+    <code id="mcp-line-cursor" style="font-size:11px;word-break:break-all;user-select:all;"></code>
+    <div class="settings-hint">Long generations: set <code>MCP_TOOL_TIMEOUT</code> (milliseconds) in Claude Code's environment; for Codex add <code>[mcp_servers.phoenix]</code> with <code>tool_timeout_sec = 3600</code> to <code>~/.codex/config.toml</code>. If a client times out, Phoenix keeps working — use job_status / list_assets.</div>
+    <div id="mcp-settings-err" class="settings-hint" style="color:#e06c6c;" hidden></div>
+
+    <!-- Remesh (v1.9 M9): Meshy, paid cloud, opt-in. The key is write-only: it is never rendered back into the page. -->
+    <div id="remesh-block">
+      <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">Remesh (Meshy — paid cloud)</div>
+      <label class="gate-row"><input type="checkbox" id="remesh-enabled"> Allow uploading meshes to Meshy for remeshing (uses your Meshy credits)</label>
+      <form id="remesh-key-form" autocomplete="off" onsubmit="return false;" class="gate-row">
+        <label for="remesh-key" style="margin:0;">Meshy API key</label>
+        <input type="password" id="remesh-key" autocomplete="off" placeholder="msy_… (stored in .secrets/, never in the config)" style="margin-left:auto;width:170px;">
+        <button type="button" id="remesh-key-save" class="modal-btn" style="margin-left:6px;">Save</button>
+        <button type="button" id="remesh-key-clear" class="modal-btn" style="margin-left:4px;">Clear</button>
+      </form>
+      <div id="remesh-key-status" class="settings-hint">not set</div>
+      <div class="gate-row">
+        <label for="remesh-maxmb" style="margin:0;">Max upload (MB)</label>
+        <input type="number" id="remesh-maxmb" min="1" max="500" step="1" value="60" style="margin-left:auto;width:60px;">
+      </div>
+      <div class="settings-hint">Pro plan: 1000 credits/month · remesh = 5 credits</div>
+      <div id="remesh-balance" class="settings-hint">Meshy balance: …</div>
+      <div id="remesh-settings-err" class="settings-hint" style="color:#e06c6c;" hidden></div>
+    </div>
+    </div>
+  </div>
   <div id="menu-panel" hidden>
     <button class="menu-item" data-menu="settings">Settings</button>
     <button class="menu-item" data-menu="themes">Themes</button>
@@ -992,7 +1128,34 @@
 
     <!-- Left: Chat -->
     <div id="chat-wrap">
+      <button type="button" class="panel-strip" id="chat-strip" title="Expand the assistant"><span>&raquo;</span><span class="strip-label">Assistant</span></button>
+      <div id="chat-head"><span>Assistant</span><button type="button" class="panel-collapse-btn" id="chat-collapse" title="Collapse the assistant" aria-label="Collapse the assistant">&laquo;</button></div>
       <div id="messages"></div>
+      <div id="cp-panel">
+        <div id="cp-banner" role="status" hidden>You are in a checkpoint copy — Save As in Blender to keep it.</div>
+        <details id="cp-details">
+          <summary id="cp-summary">Checkpoints</summary>
+          <div id="cp-empty" hidden>No checkpoints yet — one is saved before each step that changes the scene.</div>
+          <ul id="cp-list"></ul>
+        </details>
+      </div>
+      <dialog id="cp-dialog" aria-labelledby="cp-dialog-title">
+        <div id="cp-dialog-title"><b>Rewind the scene</b></div>
+        <div id="cp-dialog-what" class="cp-hint"></div>
+        <button type="button" id="cp-choice-stay" class="cp-choice">Stay in the checkpoint copy</button>
+        <span id="cp-hint-stay" class="cp-hint">Ctrl+S saves into Phoenix's checkpoint folder — use Save As to keep it</span>
+        <button type="button" id="cp-choice-overwrite" class="cp-choice">Overwrite my project file</button>
+        <span id="cp-hint-overwrite" class="cp-hint">the current state is kept as a checkpoint first</span>
+        <span id="cp-noproject" class="cp-hint" hidden>This scene was never saved</span>
+        <div style="text-align:right;margin-top:8px;"><button type="button" id="cp-choice-cancel">Cancel</button></div>
+      </dialog>
+      <div id="run-mode-wrap">
+        <div id="run-mode" role="group" aria-label="Run mode">
+          <button type="button" id="mode-ask" aria-pressed="true" title="Ask: the gates stop and wait for you">Ask</button>
+          <button type="button" id="mode-auto" aria-pressed="false" title="Auto: run to the end without stopping at the prompt/image/mesh gates">Auto</button>
+        </div>
+        <span id="auto-warn" hidden>⚠ Auto with render vision off — nothing stops a bad result</span>
+      </div>
       <div id="input-row">
         <textarea
           id="user-input"
@@ -1003,6 +1166,8 @@
         <button id="send-btn">Send</button>
       </div>
     </div>
+
+    <div class="panel-handle" id="handle-chat" title="Drag to resize · double-click resets" role="separator" aria-orientation="vertical"></div>
 
     <!-- Middle: Artifacts -->
     <div id="artifacts-wrap">
@@ -1304,6 +1469,9 @@
             <div class="cr-row cr-listhead">
               <span class="cr-listtitle">Voice</span>
               <span id="vo-status" class="cr-note" style="margin:0"></span>
+              <!-- Seed (2026-09-26): shown after a take that reported one; writes the seed back into
+                   #vo-seed for a repeat take. -->
+              <button class="art-btn" id="vo-seed-reuse" type="button" style="display:none">Reuse seed</button>
             </div>
 
             <p class="cr-note" id="vo-setup" style="display:none">
@@ -1333,6 +1501,10 @@
                   <span id="vo-strengthval" class="sx-pread">0.50</span>
                   <span class="sx-plabel">Strength</span>
                 </div>
+                <!-- Seed (2026-09-26): reproducible takes for non-pack engines (Chatterbox etc.) — see
+                     voice-seed-codespec.md. Empty = no seed sent, the adapter rolls one. -->
+                <label for="vo-seed">Seed</label>
+                <input type="number" id="vo-seed" placeholder="random" min="0" max="2147483647" step="1" style="width:120px">
                 <button class="art-btn" id="vo-speak" type="button">Speak &#127908;</button>
               </div>
 
@@ -1629,8 +1801,11 @@
       </div>
     </div>
 
+    <div class="panel-handle" id="handle-lib" title="Drag to resize · double-click resets" role="separator" aria-orientation="vertical"></div>
+
     <!-- Right rail: Asset library -->
     <div id="library-wrap">
+      <button type="button" class="panel-strip" id="lib-strip" title="Expand the library"><span>&laquo;</span><span class="strip-label">Library</span></button>
       <div id="library-header">
         <div id="lib-tabs">
           <button class="lib-tab-btn active" data-libtab="assets">Assets</button>
@@ -1639,7 +1814,7 @@
           <button class="lib-tab-btn"        data-libtab="palette">Palette</button>
           <button class="lib-tab-btn"        data-libtab="workflows">Workflows</button>
         </div>
-        <button id="library-refresh" title="Refresh">&#x21bb;</button>
+        <div id="library-header-btns"><button id="library-refresh" title="Refresh">&#x21bb;</button><button type="button" class="panel-collapse-btn" id="lib-collapse" title="Collapse the library" aria-label="Collapse the library">&raquo;</button></div>
       </div>
       <div id="library-list">
         <div class="lib-panel visible" id="lib-assets-body"></div>
@@ -1783,6 +1958,37 @@
       });
 
       updateConsoleCaret();
+
+      // ── Run mode state (v1.9 M4) ─────────────────────────────────────────────
+      // runMode = the chat toggle (next sends only, NOT saved — Settings holds the default).
+      // visionGateVal mirrors the render-vision setting so the Auto warning can follow either change.
+      let runMode = 'ask';
+      let visionGateVal = 'focused';
+      function refreshAutoWarn() {
+        const w = document.getElementById('auto-warn');
+        if (w) w.hidden = !(runMode === 'auto' && visionGateVal === 'off');
+      }
+      function setRunMode(m) {
+        runMode = (m === 'auto') ? 'auto' : 'ask';
+        const ba = document.getElementById('mode-ask'), bu = document.getElementById('mode-auto');
+        if (ba) ba.setAttribute('aria-pressed', runMode === 'ask' ? 'true' : 'false');
+        if (bu) bu.setAttribute('aria-pressed', runMode === 'auto' ? 'true' : 'false');
+        refreshAutoWarn();
+      }
+      function setVisionGateVal(v) { visionGateVal = ['off', 'focused', 'full'].includes(v) ? v : 'focused'; refreshAutoWarn(); }
+      document.getElementById('mode-ask').addEventListener('click', function () { setRunMode('ask'); });
+      document.getElementById('mode-auto').addEventListener('click', function () { setRunMode('auto'); });
+      // Initial value = the config default; read once at page start.
+      (async function initRunMode() {
+        try {
+          const res = await fetch('/config');
+          if (!res.ok) return;
+          const c = await res.json();
+          const g = c.gates || {};
+          setVisionGateVal(g.vision);
+          setRunMode(g.mode);
+        } catch (_) {}
+      })();
 
       // ── Blender-only mode state ──────────────────────────────────────────────
 
@@ -2127,10 +2333,15 @@
         const sel = document.getElementById('voice-engine');
         if (!sel) return;
         window.__voiceEngine = 'crispasr';   // default until the registry loads — matches the server's own default
+        // Seed (2026-09-26): the Voice tab's #vo-seed field is disabled while crispasr is active (voice
+        // packs have no seed knob). wireVoicePanel installs this hook once it has wired the field; call
+        // it after every place `window.__voiceEngine` can change.
+        function syncSeedDisable() { if (window.__vo_updateSeedDisabled) window.__vo_updateSeedDisabled(); }
         window.__setVoiceEngineActive = function (id) {
           if (!id) return;
           window.__voiceEngine = id;
           sel.value = id;   // no-op if `id` isn't a current <option> (e.g. picker hasn't loaded yet)
+          syncSeedDisable();
         };
         (async function loadVoiceEngines() {
           try {
@@ -2154,9 +2365,10 @@
             const persistedOk = persisted && wfs[persisted] && wfs[persisted].stage === 'voice' && !wfs[persisted].blocked;
             sel.value = persistedOk ? persisted : (ids.includes('crispasr') ? 'crispasr' : (ids.find(id => !wfs[id].blocked) || ids[0] || ''));
             window.__voiceEngine = sel.value || 'crispasr';
+            syncSeedDisable();
           } catch (_) { /* leave the default crispasr in place */ }
         })();
-        sel.addEventListener('change', () => { window.__voiceEngine = sel.value || 'crispasr'; });
+        sel.addEventListener('change', () => { window.__voiceEngine = sel.value || 'crispasr'; syncSeedDisable(); });
       })();
 
       // ── SFX panel — the clip workbench ──────────────────────────────────────
@@ -2628,10 +2840,29 @@
         const elSpeak = byId('vo-speak'), elStatus = byId('vo-status'), elSetup = byId('vo-setup');
         const elMain = byId('vo-main'), elPlayer = byId('vo-player'), elChain = byId('vo-chain');
         const elTakes = byId('vo-takes');
+        // Seed (2026-09-26): reproducible takes for non-pack engines — see voice-seed-codespec.md.
+        const elSeed = byId('vo-seed'), elSeedReuse = byId('vo-seed-reuse');
         let loaded = false;
 
         elStrength.addEventListener('input', () => {
           elStrengthVal.textContent = Number(elStrength.value).toFixed(2);
+        });
+
+        // Seed (2026-09-26): crispasr (voice packs) always sounds the same — grey the field out and
+        // say why, rather than silently ignoring what the user typed. Re-run whenever the engine
+        // picker's selection changes (see initVoiceEnginePicker's syncSeedDisable) and when this tab opens.
+        function updateSeedDisabled() {
+          const isCrispasr = (window.__voiceEngine || 'crispasr') === 'crispasr';
+          elSeed.disabled = isCrispasr;
+          elSeed.title = isCrispasr
+            ? 'Voice packs (CrispASR) always sound the same — seed applies to Chatterbox'
+            : '';
+        }
+        window.__vo_updateSeedDisabled = updateSeedDisabled;
+        updateSeedDisabled();
+
+        elSeedReuse.addEventListener('click', () => {
+          if (elSeedReuse.dataset.seed) elSeed.value = elSeedReuse.dataset.seed;
         });
 
         function renderTakes(takes) {
@@ -2722,6 +2953,8 @@
                 // Stage 2d: the engine picked in the SFX/workbench tab (window.__voiceEngine,
                 // default "crispasr" — see initVoiceEnginePicker above).
                 engine: window.__voiceEngine || 'crispasr',
+                // Seed (2026-09-26): empty field ⇒ no seed sent, the adapter rolls one.
+                seed: elSeed.value === '' ? null : elSeed.value,
               }),
             });
             const j = await r.json();
@@ -2732,7 +2965,19 @@
                 elChain.textContent = j.seconds + 's · ' + (j.steps || []).join(' → ') + '  —  ' + j.filter;
               }
               if (j.error) window.alert(j.error);
-              refresh();
+              await refresh();
+              // Seed (2026-09-26): report AFTER refresh() so its connection-status text doesn't
+              // immediately overwrite the seed note.
+              if (j.seed != null) {
+                elStatus.textContent = 'seed ' + j.seed;
+                elSeedReuse.dataset.seed = String(j.seed);
+                elSeedReuse.style.display = '';
+              } else if (j.seedIgnored) {
+                elStatus.textContent = 'seed ignored — voice packs are fixed';
+                elSeedReuse.style.display = 'none';
+              } else {
+                elSeedReuse.style.display = 'none';
+              }
             } else {
               window.alert((j && j.error) || 'speaking failed');
             }
@@ -2745,7 +2990,7 @@
 
         // Load lazily: no point talking to the speech server before the tab is opened.
         document.querySelectorAll('.art-tab-btn').forEach(b => {
-          if (b.dataset.tab === 'voice') b.addEventListener('click', () => { if (!loaded) refresh(); });
+          if (b.dataset.tab === 'voice') b.addEventListener('click', () => { if (!loaded) refresh(); updateSeedDisabled(); });
         });
       })();
 
@@ -3426,7 +3671,35 @@
           // vision is a mode, not a checkbox — anything unset/unknown reads as the default
           document.getElementById('gate-vision').value =
             ['off', 'focused', 'full'].includes(g.vision) ? g.vision : 'focused';
+          setVisionGateVal(g.vision);
+          // Run-mode default + tool budgets (GET /config already substitutes 3 / 8)
+          document.getElementById('gate-mode').value = g.mode === 'auto' ? 'auto' : 'ask';
+          const o = c.orchestrator || {};
+          document.getElementById('gate-steps-ask').value  = o.maxToolCalls     !== undefined ? o.maxToolCalls     : 3;
+          document.getElementById('gate-steps-auto').value = o.maxToolCallsAuto !== undefined ? o.maxToolCallsAuto : 8;
           document.getElementById('gate-notool').checked = blenderOnly;
+          // Checkpoints group (GET /config substitutes the defaults)
+          const cpc = c.checkpoints || {};
+          document.getElementById('cp-enabled').checked = cpc.enabled !== false;
+          document.getElementById('cp-keep').value  = cpc.keep  !== undefined ? cpc.keep  : 10;
+          document.getElementById('cp-maxgb').value = cpc.maxGB !== undefined ? cpc.maxGB : 2;
+          // MCP group: the setup lines carry the real absolute path (GET /config -> mcpScript)
+          document.getElementById('mcp-allow-blender-run').checked = !!(c.mcp && c.mcp.allowBlenderRun === true);
+          document.getElementById('mcp-allow-unreal-run').checked = !!(c.mcp && c.mcp.allowUnrealRun === true);
+          document.getElementById('mcp-allow-delete').checked = !!(c.mcp && c.mcp.allowDelete === true);
+          // Remesh group (M9): GET /config substitutes the defaults and never carries a key (only c.keys.meshy as a flag)
+          const rmc = c.remesh || {};
+          REMESH_ON = rmc.enabled === true;
+          document.getElementById('remesh-enabled').checked = REMESH_ON;
+          document.getElementById('remesh-maxmb').value = rmc.maxUploadMB !== undefined ? rmc.maxUploadMB : 60;
+          document.getElementById('remesh-key-status').textContent = ((c.remesh && c.remesh.keyPresent === true) || (c.keys && c.keys.meshy)) ? 'key stored ✓' : 'not set';
+          REMESH_DEFAULTS = { topology: rmc.topology === 'triangle' ? 'triangle' : 'quad', targetPolycount: rmc.targetPolycount !== undefined ? rmc.targetPolycount : 20000 };
+          if (typeof loadAssets === 'function') loadAssets();   // the Library's Remesh entry follows the opt-in
+          if (typeof c.mcpScript === 'string' && c.mcpScript) {
+            document.getElementById('mcp-line-claude').textContent = 'claude mcp add --scope user phoenix -- node "' + c.mcpScript + '"';
+            document.getElementById('mcp-line-codex').textContent = 'codex mcp add phoenix -- node "' + c.mcpScript + '"';
+            document.getElementById('mcp-line-cursor').textContent = JSON.stringify({ mcpServers: { phoenix: { command: 'node', args: [c.mcpScript] } } });
+          }
           // Unreal group. GET /config already substitutes the defaults, so an unset value arrives
           // as 'blender'/'camera' rather than empty — no second source of truth in the browser.
           const u = c.unreal || {};
@@ -3437,12 +3710,14 @@
         } catch (_) {}
       }
 
+      // <gear-save>
       async function saveGates() {
         const gates = {
           prompt: document.getElementById('gate-prompt').checked,
           image:  document.getElementById('gate-image').checked,
           mesh:   document.getElementById('gate-mesh').checked,
           vision: document.getElementById('gate-vision').value,
+          mode:   document.getElementById('gate-mode').value,
         };
         // Only the two switches this panel owns — the render SIZE lives in the Settings dialog and
         // must not be sent from here, or one panel would overwrite the other's field.
@@ -3454,6 +3729,24 @@
           await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gates, unreal }) });
         } catch (_) {}
       }
+      // M10 D4: the tool-step numbers live in the Settings window now; they save on their own and never block a gear switch
+      async function saveToolSteps() {
+        const orchestrator = {};
+        let stepsBad = false;
+        for (const [key, id] of [['maxToolCalls', 'gate-steps-ask'], ['maxToolCallsAuto', 'gate-steps-auto']]) {
+          const n = Number(document.getElementById(id).value);
+          if (document.getElementById(id).value !== '' && Number.isInteger(n) && n >= 1 && n <= 50) orchestrator[key] = n;
+          else stepsBad = true;
+        }
+        // An invalid budget is shown, not silently dropped — and nothing is saved until it is fixed.
+        const errEl = document.getElementById('gate-steps-err');
+        if (errEl) { errEl.textContent = stepsBad ? 'Tool steps per turn must be a whole number from 1 to 50 — not saved.' : ''; errEl.hidden = !stepsBad; }
+        if (stepsBad) return;
+        try {
+          await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestrator }) });
+        } catch (_) {}
+      }
+      // </gear-save>
 
       // ── Info popups in the gates panel ───────────────────────────────────────
       // Long explanations would flood a panel that is meant to be scanned at a glance, so they
@@ -3493,7 +3786,13 @@
       document.getElementById('gate-prompt').addEventListener('change', saveGates);
       document.getElementById('gate-image').addEventListener('change', saveGates);
       document.getElementById('gate-mesh').addEventListener('change', saveGates);
-      document.getElementById('gate-vision').addEventListener('change', saveGates);
+      document.getElementById('gate-vision').addEventListener('change', function () {
+        setVisionGateVal(document.getElementById('gate-vision').value);
+        saveGates();
+      });
+      document.getElementById('gate-mode').addEventListener('change', saveGates);
+      document.getElementById('gate-steps-ask').addEventListener('change', saveToolSteps);
+      document.getElementById('gate-steps-auto').addEventListener('change', saveToolSteps);
       document.getElementById('gate-brush-target').addEventListener('change', saveGates);
       document.getElementById('gate-unreal-vision').addEventListener('change', saveGates);
       document.getElementById('gate-notool').addEventListener('change', function () { setBlenderOnly(this.checked); });
@@ -3516,8 +3815,44 @@
 
       // ── Modal (reusable) ─────────────────────────────────────────────────────
 
-      function openModal(title) { toolTitle.textContent = title; toolModal.hidden = false; }
-      function closeModal() { toolModal.hidden = true; }
+      // <settings-tabs>
+      // M10: nodes that live in the hidden holder (#settings-moved-holder) are moved into the Settings window's tabs while it is open
+      function restoreSettingsMoved() {
+        const holder = document.getElementById('settings-moved-holder');
+        if (!holder) return;
+        ['moved-general', 'moved-conn'].forEach(function (id) { const n = document.getElementById(id); if (n && n.parentNode !== holder) holder.appendChild(n); });
+      }
+      // General = everything already in body + the moved steps/checkpoint numbers (before the Save row); Connections = MCP + Remesh.
+      function buildSettingsTabs(body, actRow) {
+        const stabs = document.createElement('div'); stabs.id = 'settings-tabs';
+        const genPane = document.createElement('div'); genPane.className = 'settings-pane'; genPane.id = 'settings-pane-general';
+        const connPane = document.createElement('div'); connPane.className = 'settings-pane'; connPane.id = 'settings-pane-conn';
+        while (body.firstChild) genPane.appendChild(body.firstChild);
+        const movedGen = document.getElementById('moved-general'), movedConn = document.getElementById('moved-conn');
+        if (movedGen) genPane.insertBefore(movedGen, actRow);
+        const cHint = document.createElement('p'); cHint.className = 'set-hint'; cHint.textContent = 'Changes here save immediately.';
+        connPane.appendChild(cHint); if (movedConn) connPane.appendChild(movedConn);
+        const tabBtns = {};
+        const showTab = function (t, save) {
+          if (t !== 'conn') t = 'general';
+          Object.keys(tabBtns).forEach(function (k) { tabBtns[k].classList.toggle('active', k === t); });
+          genPane.hidden = t !== 'general'; connPane.hidden = t !== 'conn';
+          if (save) { try { localStorage.setItem('phoenix.settingsTab', t); } catch (_) {} }
+          if (t === 'conn' && typeof refreshRemeshBalance === 'function') refreshRemeshBalance();
+        };
+        [['general', 'General'], ['conn', 'Connections']].forEach(function (pr) {
+          const b = document.createElement('button'); b.type = 'button'; b.className = 'settings-tab-btn'; b.dataset.stab = pr[0]; b.textContent = pr[1];
+          b.addEventListener('click', function () { showTab(pr[0], true); });
+          tabBtns[pr[0]] = b; stabs.appendChild(b);
+        });
+        body.appendChild(stabs); body.appendChild(genPane); body.appendChild(connPane);
+        let t0 = 'general'; try { t0 = localStorage.getItem('phoenix.settingsTab') || 'general'; } catch (_) {}
+        showTab(t0, false);
+        if (typeof loadGates === 'function') loadGates();   // the moved inputs are filled by loadGates (the gear may never have been opened)
+      }
+      // </settings-tabs>
+      function openModal(title) { restoreSettingsMoved(); toolTitle.textContent = title; toolModal.hidden = false; }
+      function closeModal() { toolModal.hidden = true; restoreSettingsMoved(); }
       toolClose.addEventListener('click', closeModal);
       toolModal.addEventListener('click', e => { if (e.target === toolModal) closeModal(); });
 
@@ -3700,6 +4035,7 @@
 
         const modelRow = makeRow('Orchestrator model', modelSel);
         modelRow.appendChild(modelCustom);
+        modelRow.hidden = true;   // legacy picker — the per-seat model select below is the one UI (M1.1)
         toolBody.appendChild(modelRow);
 
         modelSel.addEventListener('change', function () {
@@ -3720,7 +4056,7 @@
         localInp.type = 'text';
         localInp.id = 'set-local';
         localInp.placeholder = 'http://localhost:1234/v1';
-        toolBody.appendChild(makeRow('LM Studio endpoint', localInp));
+        toolBody.appendChild(makeRow('Local server endpoint', localInp));
 
         // ComfyUI endpoint
         const comfyInp = document.createElement('input');
@@ -3767,6 +4103,7 @@
         const metaRow = makeRow('Metaprompter model', metaSel);
         metaRow.appendChild(metaList);
         metaRow.appendChild(metaLocal);
+        metaRow.hidden = true;    // legacy picker — see above
         toolBody.appendChild(metaRow);
         metaList.addEventListener('change', function () { if (metaList.value) metaLocal.value = metaList.value; });
         metaSel.addEventListener('change', function () {
@@ -3792,6 +4129,411 @@
         metaEjectRow.appendChild(metaEjectLabel);
         metaEjectRow.appendChild(metaEjectHint);
         toolBody.appendChild(metaEjectRow);
+
+        // ── Providers (v1.9): which AI answers each seat ───────────────────────
+        // Per seat: a provider select + a REAL model select (the list depends on the provider) + a text
+        // input that holds the saved value (shown only for "Custom…"). The text input is the single
+        // source of truth for the save; the legacy Orchestrator/Metaprompter pickers above are hidden.
+        const PROVIDER_CHOICES = [
+          { label: 'Claude CLI',       value: 'claude-cli' },
+          { label: 'Local server',     value: 'local' },
+          { label: 'OpenAI (API key)', value: 'openai' },
+          { label: 'ChatGPT plan (Codex CLI)', value: 'codex' },   // saved as provider 'codex-cli'
+        ];
+        const CODEX_HINT = 'Uses your ChatGPT subscription (Plus/Pro). Businesses: use OpenAI (API key).';
+        const SEAT_ROWS = [
+          ['orchestrator', 'Orchestrator', 'claude-sonnet-4-6'],
+          ['troubleshooter', 'Troubleshooter', 'claude-sonnet-4-6'],
+          ['metaprompter', 'Metaprompter', 'claude-haiku-4-5-20251001'],
+          ['utility', 'Category provider', 'claude-sonnet-4-6'],
+          ['vision', 'Vision (render judge)', 'claude-opus-4-8'],   // v1.9 M3: no override, local/OpenAI need the vision test
+        ];
+        // Claude models: aliases always resolve to the newest model; fixed ids pin a version.
+        // One constant, easy to update when new models ship.
+        const CLAUDE_ALIASES = [
+          { value: 'opus',   label: 'opus — newest Opus' },
+          { value: 'sonnet', label: 'sonnet — newest Sonnet' },
+          { value: 'haiku',  label: 'haiku — newest Haiku' },
+          { value: 'fable',  label: 'fable — newest Fable' },
+        ];
+        const CLAUDE_FIXED = [
+          'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1', 'claude-haiku-4-5-20251001',
+          'claude-opus-4-8', 'claude-sonnet-4-6',
+        ].map(id => ({ value: id, label: id }));
+        const ALIAS_HINT = 'Aliases follow new releases automatically — for the vision judge a fixed version keeps verdicts comparable.';
+        const OPENAI_CHAT_ID = /^(gpt-|o[0-9]|chatgpt-)/;   // the endpoint also lists embedding/audio/image models
+        let _keySet = false;
+
+        function addOpt(parent, value, label, opts) {
+          const o = document.createElement('option');
+          o.value = value; o.textContent = label;
+          if (opts && opts.disabled) o.disabled = true;
+          if (opts && opts.title) o.title = opts.title;
+          parent.appendChild(o);
+          return o;
+        }
+        function addGroup(pick, label, items) {
+          const g = document.createElement('optgroup'); g.label = label;
+          for (const it of items) addOpt(g, it.value, it.label);
+          pick.appendChild(g);
+        }
+        // Rebuild one seat's model select. NO caching: every call asks the server again, so a failed
+        // fetch (server down, tunnel off) never blocks the next try. A token drops stale answers.
+        async function renderPick(name) {
+          const ctl = seatCtl[name];
+          const pick = ctl.pick, prov = ctl.sel.value; let cur = ctl.mdl.value.trim();
+          const token = ctl.token = (ctl.token || 0) + 1;
+          pick.innerHTML = '';
+          ctl.retry.style.display = 'none';
+          const ids = [];
+          if (prov === 'claude-cli') {
+            addGroup(pick, 'Always the latest', CLAUDE_ALIASES);
+            addGroup(pick, 'Fixed version', CLAUDE_FIXED);
+            for (const it of CLAUDE_ALIASES.concat(CLAUDE_FIXED)) ids.push(it.value);
+          } else {
+            let models = [], note = '', title = '', labels = {};
+            if (prov === 'codex') addOpt(pick, '', 'Codex default');   // empty model = Codex's own default
+            try {
+              if (prov === 'codex') {
+                const j = await (await fetch('/provider-models?provider=codex')).json();
+                if (j.reachable === false) { note = 'Codex CLI not found — npm install -g @openai/codex'; title = j.error || ''; }
+                else if (!j.loggedIn) { note = 'Codex is not logged in — run `codex login` in a terminal, then Retry'; title = j.error || ''; }
+                else if (Array.isArray(j.models)) { models = j.models; labels = j.labels || {}; if (!models.length) { note = 'No Codex models listed'; title = j.error || ''; } }
+              } else if (prov === 'local') {
+                const j = await (await fetch('/lmstudio/models' + (candEndpoints() ? '?local=' + encodeURIComponent(candEndpoints().local) : ''))).json();
+                if (j.reachable && Array.isArray(j.models)) {
+                  models = j.models;
+                  if (!models.length) note = 'No models loaded on the local server';
+                } else { note = 'Local server not reachable at ' + (j.base || 'the configured endpoint') + ' — start it (or the tunnel), then Retry'; title = j.error || ''; }
+              } else {
+                if (!_keySet) note = 'Set the OpenAI key below first';
+                else {
+                  const j = await (await fetch('/provider-models?endpoint=openai')).json();
+                  if (Array.isArray(j.models) && !j.error) {
+                    models = j.models.filter(id => OPENAI_CHAT_ID.test(id));
+                    if (!models.length) note = 'OpenAI returned no chat models';
+                  } else { note = 'OpenAI model list not available — Retry'; title = j.error || ''; }
+                }
+              }
+            } catch (e) { note = (prov === 'local' ? 'Local server not reachable' : 'OpenAI model list not available') + ' — Retry'; title = e.message; }
+            if (token !== ctl.token) return;   // a newer render superseded this one
+            if (note) { addOpt(pick, '', note, { disabled: true, title }); if (!models.length) ctl.retry.style.display = ''; }
+            for (const id of models) { addOpt(pick, id, prov === 'codex' && labels[id] ? labels[id] + ' (' + id + ')' : id); ids.push(id); }
+            if (prov === 'codex') ids.push('');
+          }
+          if (token !== ctl.token) return;
+          // Provider switch (M2.3): a model id from another provider is never carried over silently — it survives only if the
+          // NEW provider's freshly loaded list contains it; otherwise the model resets (Codex default / "— pick a model —").
+          if (ctl.switching) {
+            ctl.switching = false;
+            if (cur && !ids.includes(cur)) { cur = ''; ctl.mdl.value = ''; }
+          }
+          // A saved value outside the list is shown, never silently replaced.
+          if (cur && !ids.includes(cur)) addOpt(pick, cur, '(current) ' + cur);
+          addOpt(pick, '__custom__', 'Custom…');
+          if (cur) pick.value = cur;
+          else if (prov === 'codex') pick.value = '';
+          else { const ph = document.createElement('option'); ph.value = ''; ph.textContent = '— pick a model —'; ph.disabled = true; pick.insertBefore(ph, pick.firstChild); pick.value = ''; }
+          ctl.mdl.style.display = pick.value === '__custom__' ? '' : 'none';
+          ctl.aliasHint.style.display = CLAUDE_ALIASES.some(a => a.value === cur) && prov === 'claude-cli' ? '' : 'none';
+          ctl.codexHint.style.display = prov === 'codex' ? '' : 'none';
+          renderCaps(name);
+        }
+        function refreshOpenaiPicks() { for (const [n] of SEAT_ROWS) if (seatCtl[n] && seatCtl[n].sel.value === 'openai') renderPick(n); }
+
+        const seatCtl = {};
+        const PROBED_SEATS = ['orchestrator', 'troubleshooter'];   // the seats that drive tools (v1.9 M2)
+        const seatsTitle = document.createElement('div');   // the heading every "Settings → General → Seats" string points at
+        seatsTitle.className = 'settings-title'; seatsTitle.id = 'set-seats-title'; seatsTitle.textContent = 'Seats';
+        seatsTitle.style.cssText = 'border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;';
+        toolBody.appendChild(seatsTitle);
+        for (const [name, title, claudeDefault] of SEAT_ROWS) {
+          const sel = document.createElement('select');
+          sel.id = 'set-seat-' + name + '-provider';
+          for (const c of PROVIDER_CHOICES) addOpt(sel, c.value, c.label);
+          const pick = document.createElement('select');
+          pick.id = 'set-seat-' + name + '-model-pick';
+          const retry = document.createElement('button');
+          retry.type = 'button'; retry.className = 'modal-btn'; retry.textContent = 'Retry';
+          retry.style.cssText = 'display:none;margin-left:6px;';
+          const mdl = document.createElement('input');
+          mdl.type = 'text'; mdl.id = 'set-seat-' + name + '-model';
+          mdl.placeholder = 'model id'; mdl.style.cssText = 'display:none;margin-top:6px;';
+          const aliasHint = document.createElement('p');
+          aliasHint.className = 'set-hint'; aliasHint.id = 'set-seat-' + name + '-alias-hint';
+          aliasHint.textContent = ALIAS_HINT; aliasHint.style.display = 'none';
+          const codexHint = document.createElement('p');
+          codexHint.className = 'set-hint'; codexHint.id = 'set-seat-' + name + '-codex-hint';
+          codexHint.textContent = CODEX_HINT; codexHint.style.display = 'none';
+          const row = document.createElement('div');
+          row.className = 'set-row';
+          const l1 = document.createElement('label'); l1.className = 'set-label'; l1.htmlFor = sel.id; l1.textContent = /provider$/i.test(title) ? title : title + ' provider';   // sweep 2 G13: 'Category provider' must not become 'Category provider provider'
+          const l2 = document.createElement('label'); l2.className = 'set-label'; l2.htmlFor = pick.id; l2.textContent = title + ' model'; l2.style.marginTop = '6px';
+          row.appendChild(l1); row.appendChild(sel); row.appendChild(l2); row.appendChild(pick); row.appendChild(retry); row.appendChild(mdl); row.appendChild(aliasHint); row.appendChild(codexHint);
+          const ctl = { sel, pick, mdl, retry, aliasHint, codexHint, claudeDefault, endpoint: 'local', token: 0, probe: null, bench: null, savedKey: '', serverCaps: null };
+          if (PROBED_SEATS.includes(name) || name === 'vision') {
+            // Tool-protocol test status + a real Test button; the troubleshooter may be forced past a failure.
+            // The vision row gets the same pair, but its test is the colour-card vision test (M3), never forced.
+            const capsEl = document.createElement('p');
+            capsEl.className = 'set-hint'; capsEl.id = 'set-seat-' + name + '-caps'; capsEl.textContent = 'not tested yet';
+            const probeBtn = document.createElement('button');
+            probeBtn.type = 'button'; probeBtn.className = 'modal-btn'; probeBtn.id = 'set-seat-' + name + '-probe'; probeBtn.textContent = 'Test';
+            probeBtn.addEventListener('click', function () { runProbe(name); });
+            row.appendChild(capsEl); row.appendChild(probeBtn);
+            ctl.capsEl = capsEl; ctl.probeBtn = probeBtn;
+            if (name === 'orchestrator') {
+              // Competence benchmark (M2.1): 5 real Blender tasks in a throw-away headless Blender.
+              const benchEl = document.createElement('p');
+              benchEl.className = 'set-hint'; benchEl.id = 'set-seat-orchestrator-bench'; benchEl.textContent = 'Benchmark: not run';
+              const benchBtn = document.createElement('button');
+              benchBtn.type = 'button'; benchBtn.className = 'modal-btn'; benchBtn.id = 'set-seat-orchestrator-benchbtn'; benchBtn.textContent = 'Benchmark';
+              benchBtn.addEventListener('click', function () { runBenchClick(name); });
+              const benchList = document.createElement('div');
+              benchList.id = 'set-seat-orchestrator-benchlist';
+              row.appendChild(benchEl); row.appendChild(benchBtn); row.appendChild(benchList);
+              ctl.benchEl = benchEl; ctl.benchBtn = benchBtn; ctl.benchList = benchList;
+            }
+            if (name === 'troubleshooter') {
+              const forceWrap = document.createElement('div');
+              forceWrap.style.cssText = 'display:none;margin-top:6px;';
+              const forceBox = document.createElement('input');
+              forceBox.type = 'checkbox'; forceBox.id = 'set-seat-troubleshooter-force';
+              const forceLbl = document.createElement('label');
+              forceLbl.htmlFor = forceBox.id; forceLbl.textContent = ' Use it anyway (answers marked as unverified)';
+              forceWrap.appendChild(forceBox); forceWrap.appendChild(forceLbl);
+              row.appendChild(forceWrap);
+              ctl.forceWrap = forceWrap; ctl.forceBox = forceBox;
+            }
+          }
+          toolBody.appendChild(row);
+          seatCtl[name] = ctl;
+          sel.addEventListener('change', function () {
+            const isClaudeModel = mdl.value.trim().toLowerCase().startsWith('claude') || CLAUDE_ALIASES.some(a => a.value === mdl.value.trim());
+            if (sel.value === 'claude-cli' && !isClaudeModel) mdl.value = claudeDefault;
+            else if (sel.value !== 'claude-cli' && isClaudeModel) mdl.value = '';
+            ctl.switching = true;   // renderPick drops a stale id once the new provider's list is known
+            renderPick(name);
+          });
+          pick.addEventListener('change', function () {
+            if (pick.value === '__custom__') { mdl.style.display = ''; mdl.focus(); return; }
+            mdl.style.display = 'none';
+            mdl.value = pick.value;
+            renderCaps(name);
+            ctl.aliasHint.style.display = sel.value === 'claude-cli' && CLAUDE_ALIASES.some(a => a.value === pick.value) ? '' : 'none';
+          });
+          retry.addEventListener('click', function () { renderPick(name); });
+          mdl.addEventListener('input', function () { renderCaps(name); });
+        }
+
+        // The seat as the server wants it: { provider, model, endpoint? } (the picker's choice → API form).
+        function seatCand(name) {
+          const ctl = seatCtl[name];
+          const o = { model: ctl.mdl.value.trim() };
+          if (ctl.sel.value === 'claude-cli') o.provider = 'claude-cli';
+          else if (ctl.sel.value === 'codex') o.provider = 'codex-cli';
+          else { o.provider = 'openai-compat'; o.endpoint = ctl.sel.value === 'openai' ? 'openai' : ctl.endpoint; }
+          return o;
+        }
+        // Sweep 2 G2/G3: the candidate LOCAL endpoint (the URL typed in this dialog, maybe not saved yet) travels with every picker / probe / bench
+        // request, and the local URL is part of the key — a different server is a different test result.
+        function candEndpoints() { const u = localInp.value.trim(); return u ? { local: u } : undefined; }
+        function candKey(o) { return [o.provider, o.endpoint || '-', o.model || '-'].concat(o.endpoint === 'local' ? [localInp.value.trim() || '-'] : []).join('|'); }
+        function capsDate(iso) { try { return new Date(iso).toLocaleDateString(); } catch (_) { return ''; } }
+        function renderCaps(name) {
+          const ctl = seatCtl[name];
+          if (!ctl || !ctl.capsEl) return;
+          const key = candKey(seatCand(name));
+          if (name === 'vision') { ctl.capsEl.textContent = visionCapsText(ctl, key); return; }
+          let text = 'not tested yet';
+          if (ctl.probe && ctl.probe.key === key) {
+            text = ctl.probe.tools === 'pass' ? '✓ tool test passed (' + capsDate(ctl.probe.probedAt) + ')' : '✗ tool test failed: ' + ctl.probe.why;
+          } else if (ctl.serverCaps && ctl.savedKey === key) {
+            const c = ctl.serverCaps;
+            if (c.tools === 'pass') text = '✓ tool test passed (' + capsDate(c.probedAt) + ')';
+            else if (c.tools === 'fail') text = c.forced ? '⚠ forced — tool test failed' : '✗ tool test failed';   // a vision-only entry has no tools verdict
+          }
+          ctl.capsEl.textContent = text;
+          renderBench(name);
+        }
+        // Vision row status (M3). Claude reads images through the CLI (nothing to test); local/OpenAI/ChatGPT plan
+        // show the colour-card test. Everything via textContent — `why` can be model output.
+        function visionCapsText(ctl, key) {
+          if (ctl.sel.value === 'claude-cli') return '';
+          if (ctl.probe && ctl.probe.key === key) {
+            return ctl.probe.vision === 'pass' ? '✓ vision test passed (' + capsDate(ctl.probe.probedAt) + ')' : '✗ vision test failed: ' + ctl.probe.why;
+          }
+          if (ctl.serverCaps && ctl.savedKey === key && ctl.serverCaps.vision) {
+            const c = ctl.serverCaps;
+            if (c.vision === 'pass') return '✓ vision test passed (' + capsDate(c.visionProbedAt) + ')';
+            return '✗ vision test failed: ' + (((c.visionTrials || []).find(t => !t.ok) || {}).why || 'failed');
+          }
+          return 'not tested yet';
+        }
+        // Benchmark line + per-task list (orchestrator only). Local models run 3x and are gated (>= 80%, 12/15);
+        // every other provider runs once and is only graded. An old-shape entry (score/of, no runs) counts as not run.
+        function benchView(b) {
+          if (!b || typeof b !== 'object') return { state: 'none' };
+          if (b.unavailable) return { state: 'unavailable', reason: String(b.unavailable) };
+          if (!Number.isInteger(b.passed) || !Number.isInteger(b.total) || !Number.isInteger(b.runs) || b.runs < 1 || b.total < 1) return { state: 'none' };
+          const need = Math.ceil(0.8 * b.total - 1e-9);
+          return { state: b.passed >= need ? 'pass' : 'fail', passed: b.passed, total: b.total, runs: b.runs, need,
+                   weak: (b.tasks || []).filter(t => t && t.passes < t.runs).map(t => t.id + ' ' + t.passes + '/' + t.runs) };
+        }
+        // Everything below goes in via textContent — `sample` and `whys` are MODEL OUTPUT (never innerHTML).
+        function renderBenchList(ctl, b) {
+          const box = ctl.benchList;
+          while (box.firstChild) box.removeChild(box.firstChild);
+          if (!b || !Array.isArray(b.tasks)) return;
+          for (const t of b.tasks) {
+            const row = document.createElement('div');
+            row.className = 'set-hint bench-task';
+            const ok = t.passes === t.runs;
+            row.textContent = t.id + ' ' + t.passes + '/' + t.runs + (ok ? ' ✓' : (t.whys && t.whys.length ? ' — ' + t.whys.join('; ') : ' ✗'));
+            if (!ok && typeof t.sample === 'string' && t.sample) {
+              const det = document.createElement('details');
+              const sum = document.createElement('summary');
+              sum.textContent = 'show what the model did';
+              const pre = document.createElement('pre');
+              pre.textContent = t.sample;
+              det.appendChild(sum); det.appendChild(pre);
+              row.appendChild(det);
+            }
+            box.appendChild(row);
+          }
+        }
+        function renderBench(name) {
+          const ctl = seatCtl[name];
+          if (!ctl || !ctl.benchEl) return;
+          const key = candKey(seatCand(name));
+          let b = null;
+          if (ctl.bench && ctl.bench.key === key) b = ctl.bench;
+          else if (ctl.serverCaps && ctl.savedKey === key && ctl.serverCaps.bench) b = ctl.serverCaps.bench;
+          const isLocal = ctl.sel.value === 'local';
+          const v = benchView(b);
+          let text = 'Benchmark: not run';
+          if (v.state === 'unavailable') text = /^Blender did not start/.test(v.reason) ? 'competence not tested — ' + v.reason.replace(/^Blender did not start for the benchmark/, 'Blender did not start') : 'competence not tested — Blender not found';
+          else if (v.state !== 'none') {
+            if (!isLocal) text = 'Benchmark: ' + v.passed + '/' + v.total + ' (grade, ' + v.runs + (v.runs === 1 ? ' run)' : ' runs)');
+            else if (v.state === 'pass') text = 'Benchmark: ' + v.passed + '/' + v.total + ' ✓ (' + v.runs + ' runs)';
+            else text = 'Benchmark: ' + v.passed + '/' + v.total + ' ✗ — needs ' + v.need + ' for local models';
+          }
+          ctl.benchEl.textContent = text;
+          renderBenchList(ctl, v.state === 'none' || v.state === 'unavailable' ? null : b);
+        }
+        // Run the benchmark of the seat as currently picked → { key, score, of, tasks, unavailable?, transient?, why? } (never throws).
+        async function runBenchUI(name) {
+          const ctl = seatCtl[name];
+          const cand = seatCand(name), key = candKey(cand);
+          ctl.benchBtn.disabled = true;
+          ctl.benchEl.textContent = 'Benchmark: starting…';
+          let poll = null;
+          const tick = async function () {
+            try {
+              const sr = await fetch('/seat-bench-status');
+              const sj = await sr.json();
+              if (sj && sj.running && sj.task) ctl.benchEl.textContent = 'Benchmark: ' + (sj.runs > 1 ? 'run ' + sj.run + '/' + sj.runs + ' · ' : '') + 'task ' + sj.task + '/' + (sj.of || 5) + ' …';
+            } catch (_) {}
+          };
+          poll = setInterval(tick, 1500);
+          let out;
+          try {
+            const r = await fetch('/seat-bench', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seat: name, provider: cand.provider, model: cand.model, endpoint: cand.endpoint, endpoints: candEndpoints() }) });
+            const j = await r.json();
+            if (!r.ok) out = { key, transient: true, why: j.error || 'benchmark could not run' };
+            else out = { key, passed: j.passed, total: j.total, runs: j.runs, tasks: j.tasks || [], unavailable: j.unavailable, ranAt: j.ranAt };
+          } catch (e) { out = { key, transient: true, why: e.message }; }
+          clearInterval(poll);
+          ctl.benchBtn.disabled = false;
+          if (out.transient) ctl.benchEl.textContent = '✗ ' + out.why;   // not a verdict about the model — don't remember it
+          else { ctl.bench = out; renderBench(name); }
+          return out;
+        }
+        async function runBenchClick(name) {
+          const ctl = seatCtl[name];
+          const key = candKey(seatCand(name));
+          const known = (ctl.probe && ctl.probe.key === key) ? ctl.probe
+            : ((ctl.serverCaps && ctl.savedKey === key) ? { tools: ctl.serverCaps.tools } : null);
+          const pr = known || await runProbe(name);   // the benchmark only follows a passed tool test
+          if (pr.tools !== 'pass') { ctl.benchEl.textContent = 'Benchmark: run the tool test first (it did not pass)'; return; }
+          await runBenchUI(name);
+        }
+        // Run the 3-try tool test of the seat as currently picked → { key, tools, why, probedAt } (never throws).
+        async function runProbe(name) {
+          const ctl = seatCtl[name];
+          const cand = seatCand(name), key = candKey(cand);
+          if (name === 'vision') return runVisionProbe(ctl, cand, key);
+          ctl.capsEl.textContent = 'Testing ' + (cand.model || 'Codex default') + '… (3 tries, up to a few minutes)';
+          ctl.probeBtn.disabled = true;
+          let out;
+          try {
+            const r = await fetch('/seat-probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seat: name, provider: cand.provider, model: cand.model, endpoint: cand.endpoint, endpoints: candEndpoints() }) });
+            const j = await r.json();
+            if (!r.ok) out = { key, tools: 'fail', why: j.error || 'test could not run', transient: true };
+            else {
+              const bad = (j.trials || []).find(t => !t.ok);
+              out = { key, tools: j.tools, why: bad ? bad.why : '', probedAt: j.probedAt };
+            }
+          } catch (e) { out = { key, tools: 'fail', why: e.message, transient: true }; }
+          ctl.probeBtn.disabled = false;
+          if (out.transient) ctl.capsEl.textContent = '✗ ' + out.why;   // not a verdict about the model — don't remember it
+          else { ctl.probe = out; renderCaps(name); }
+          return out;
+        }
+
+        // The vision test (M3): two colour cards through /seat-probe → { key, vision, why, probedAt } (never throws).
+        // Claude is decided here without a call (the server would answer the same).
+        async function runVisionProbe(ctl, cand, key) {
+          if (ctl.sel.value === 'claude-cli') { renderCaps('vision'); return { key, vision: 'n/a' }; }
+          ctl.capsEl.textContent = 'Testing ' + (cand.model || 'Codex default') + ' with a colour test card… (2 tries, up to a few minutes)';
+          ctl.probeBtn.disabled = true;
+          let out;
+          try {
+            const r = await fetch('/seat-probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seat: 'vision', provider: cand.provider, model: cand.model, endpoint: cand.endpoint, endpoints: candEndpoints() }) });
+            const j = await r.json();
+            if (!r.ok) out = { key, vision: 'fail', why: j.error || 'test could not run', transient: true };
+            else {
+              const bad = (j.trials || []).find(t => !t.ok);
+              out = { key, vision: j.vision, why: bad ? bad.why : '', probedAt: j.probedAt };
+            }
+          } catch (e) { out = { key, vision: 'fail', why: e.message, transient: true }; }
+          ctl.probeBtn.disabled = false;
+          if (out.transient) ctl.capsEl.textContent = '✗ ' + out.why;   // not a verdict about the model — don't remember it
+          else { ctl.probe = out; renderCaps('vision'); }
+          return out;
+        }
+
+        const visionHint = document.createElement('p');
+        visionHint.className = 'set-hint'; visionHint.textContent = ALIAS_HINT;
+        toolBody.appendChild(visionHint);
+
+        // OpenAI API key — write-only: the field is never filled from the server, only a "set" flag is shown.
+        const keyForm = document.createElement('form');
+        keyForm.autocomplete = 'off';
+        keyForm.addEventListener('submit', function (e) { e.preventDefault(); });
+        const keyInp = document.createElement('input');
+        keyInp.type = 'password'; keyInp.id = 'set-key-openai'; keyInp.autocomplete = 'off';
+        keyInp.placeholder = 'sk-… (stored in .secrets/, never in the config)';
+        const keyLbl = document.createElement('label');
+        keyLbl.className = 'set-label'; keyLbl.htmlFor = 'set-key-openai'; keyLbl.textContent = 'OpenAI API key';
+        const keyStatus = document.createElement('span');
+        keyStatus.id = 'set-key-openai-status'; keyStatus.className = 'set-hint'; keyStatus.style.marginLeft = '8px';
+        const keyClear = document.createElement('button');
+        keyClear.type = 'button'; keyClear.className = 'modal-btn'; keyClear.textContent = 'Clear'; keyClear.style.marginLeft = '8px';
+        function showKeyStatus(keys) { _keySet = !!(keys && keys.openai); keyStatus.textContent = _keySet ? 'key set ✓' : 'not set'; refreshOpenaiPicks(); }
+        showKeyStatus(null);
+        keyClear.addEventListener('click', async function () {
+          try {
+            const r = await fetch('/secrets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: 'openai', key: '' }) });
+            const j = await r.json();
+            showKeyStatus(j.keys);
+            keyForm.reset();
+          } catch (_) { keyStatus.textContent = 'could not clear the key'; }
+        });
+        keyForm.appendChild(keyLbl); keyForm.appendChild(keyInp); keyForm.appendChild(keyStatus); keyForm.appendChild(keyClear);
+        const keyRow = document.createElement('div');
+        keyRow.className = 'set-row';
+        keyRow.appendChild(keyForm);
+        toolBody.appendChild(keyRow);
 
         // Blender executable path
         const blenderInp = document.createElement('input');
@@ -3843,8 +4585,11 @@
         // Hint line
         const hint = document.createElement('p');
         hint.className = 'set-hint';
-        hint.textContent = 'Changes take effect on your next message. The model is verified with the Claude CLI and endpoints are pinged before saving — this takes a few seconds.';
+        hint.textContent = 'Changes take effect on your next message. The model is checked with its provider and endpoints are pinged before saving — this takes a few seconds.';
         toolBody.appendChild(hint);
+
+        // M10: two tabs (General / Connections); the moved blocks keep their ids/listeners and save on change by themselves
+        if (typeof buildSettingsTabs === 'function') buildSettingsTabs(toolBody, actRow);
 
         // Prefill from server
         try {
@@ -3879,23 +4624,97 @@
           feedbackInp.value = fb.endpointUrl || '';
 
           // The server owns the defaults (GET /config fills them in), so nothing is guessed here.
+          // Providers: resolved per seat by the server, so old configs show their inferred provider.
+          const sv = c.seats || {};
+          for (const [name] of SEAT_ROWS) {
+            const v = sv[name]; if (!v) continue;
+            const ctl = seatCtl[name];
+            const choice = v.provider === 'claude-cli' ? 'claude-cli' : v.provider === 'codex-cli' ? 'codex' : (v.endpoint === 'openai' ? 'openai' : 'local');
+            ctl.sel.value = choice;
+            ctl.endpoint = (v.endpoint && v.endpoint !== 'openai') ? v.endpoint : 'local';
+            ctl.mdl.value = v.model || '';
+            ctl.savedKey = candKey(seatCand(name));   // what is saved now — unchanged seats need no new test
+            ctl.serverCaps = v.caps || null;
+          }
+          for (const [name] of SEAT_ROWS) renderPick(name);
+          showKeyStatus(c.keys);
+
           const unr = c.unreal || {};
           visionW.value = unr.visionWidth  || 1280;
           visionH.value = unr.visionHeight || 720;
         } catch (_) {}
 
         saveBtn.addEventListener('click', async function () {
-          const chosenModel = modelSel.value === '__custom__'
-            ? modelCustom.value.trim()
-            : modelSel.value;
-
           saveBtn.disabled = true;
           statusEl.textContent = 'Validating… (verifying model + pinging endpoints)';
+          // Sweep 2 G1: a key typed in this same Save is stored FIRST (its own write-only route) — the OpenAI seat's / vision probe below needs it, and
+          // a probe that failed on the missing key used to return before the key was ever saved. showKeyStatus also refreshes the OpenAI pickers.
+          if (keyInp.value.trim()) {
+            try {
+              const kr = await fetch('/secrets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: 'openai', key: keyInp.value.trim() }) });
+              const kj = await kr.json();
+              if (!kr.ok) { statusEl.textContent = '⚠️ ' + (kj.error || 'Key not saved'); saveBtn.disabled = false; return; }
+              showKeyStatus(kj.keys);
+              keyForm.reset();
+            } catch (e) { statusEl.textContent = '⚠️ Network error: ' + e.message; saveBtn.disabled = false; return; }
+          }
 
-          const chosenMeta = metaSel.value === '__local__' ? metaLocal.value.trim() : metaSel.value;
+          // Models + providers travel in body.seats (the model input is the source of truth);
+          // the legacy orchestrator/metaprompter objects carry only the non-model fields.
+          const seatsBody = {};
+          for (const [name] of SEAT_ROWS) seatsBody[name] = seatCand(name);
+
+          // Honest gating (M2): a CHANGED orchestrator/troubleshooter must pass the tool test first —
+          // run it now if it has not been run for exactly this model. The orchestrator has no override;
+          // the troubleshooter can be saved anyway when the user ticks the force box.
+          for (const name of PROBED_SEATS) {
+            const ctl = seatCtl[name];
+            const key = candKey(seatsBody[name]);
+            if (key === ctl.savedKey) continue;
+            const pr = (ctl.probe && ctl.probe.key === key) ? ctl.probe : await runProbe(name);
+            if (pr.tools === 'pass') {
+              // Local orchestrator: format test (above) → competence benchmark → save. Cloud/CLI seats are only graded.
+              if (name === 'orchestrator' && ctl.sel.value === 'local') {
+                const bo = (ctl.bench && ctl.bench.key === key) ? ctl.bench : await runBenchUI(name);
+                if (bo.transient) { statusEl.textContent = '⚠️ Benchmark could not run: ' + bo.why; saveBtn.disabled = false; return; }
+                const bv = benchView(bo);
+                if (bv.state === 'none') { statusEl.textContent = '⚠️ Benchmark gave no usable result — run it again.'; saveBtn.disabled = false; return; }
+                if (bv.state === 'fail') {
+                  statusEl.textContent = '⚠️ ' + (seatsBody[name].model || 'This model') + ' solved ' + bv.passed + '/' + bv.total + ' benchmark tasks over ' + bv.runs +
+                    ' runs (needs ' + bv.need + '): ' + bv.weak.join(', ');
+                  saveBtn.disabled = false;
+                  return;
+                }
+              }
+              continue;
+            }
+            if (name === 'troubleshooter' && !pr.transient) {
+              ctl.forceWrap.style.display = '';
+              if (ctl.forceBox.checked) { seatsBody[name].force = true; continue; }
+              statusEl.textContent = '⚠️ Troubleshooter tool test failed: ' + pr.why + ' — tick "Use it anyway" to save it regardless.';
+            } else {
+              statusEl.textContent = '⚠️ ' + (seatsBody[name].model || 'Codex default') + ' ' + (pr.transient ? 'could not be tested: ' : 'did not drive the tool protocol: ') + pr.why;
+            }
+            saveBtn.disabled = false;
+            return;
+          }
+          // Vision gating (M3): a CHANGED non-Claude vision seat must have read the colour card — test it now if it has not
+          // been tested for exactly this model. No force box: a judge that cannot see is not allowed to judge.
+          {
+            const ctl = seatCtl.vision, key = candKey(seatsBody.vision);
+            if (key !== ctl.savedKey && ctl.sel.value !== 'claude-cli') {
+              const pr = (ctl.probe && ctl.probe.key === key) ? ctl.probe : await runVisionProbe(ctl, seatsBody.vision, key);
+              if (pr.vision !== 'pass') {
+                statusEl.textContent = '⚠️ Vision: ' + (seatsBody.vision.model || 'this model') + ' ' + (pr.transient ? 'could not be tested: ' : 'did not read the test card: ') + pr.why;
+                saveBtn.disabled = false;
+                return;
+              }
+            }
+          }
           const body = {
-            orchestrator: { model: chosenModel, historyMessages: Number(histInp.value) },
-            metaprompter: { model: chosenMeta, ejectAfterUse: metaEject.checked },
+            orchestrator: { historyMessages: Number(histInp.value) },
+            metaprompter: { ejectAfterUse: metaEject.checked },
+            seats: seatsBody,
             endpoints: { local: localInp.value.trim(), comfyui: comfyInp.value.trim() },
             apps: { blender: blenderInp.value.trim(), comfyOutput: comfyOutputInp.value.trim() },
             feedback: { endpointUrl: feedbackInp.value.trim() },
@@ -3918,6 +4737,18 @@
             const data = await res.json();
             if (res.ok) {
               statusEl.textContent = '✅ Saved. Active from your next message.';
+              for (const name of PROBED_SEATS) {   // the saved seat is now what the server judges
+                const ctl = seatCtl[name];
+                ctl.savedKey = candKey(seatsBody[name]);
+                ctl.serverCaps = (ctl.probe && ctl.probe.key === ctl.savedKey) ? { tools: ctl.probe.tools, probedAt: ctl.probe.probedAt, forced: !!seatsBody[name].force, bench: (ctl.bench && ctl.bench.key === ctl.savedKey) ? ctl.bench : null } : ctl.serverCaps;
+                renderCaps(name);
+              }
+              {   // the saved vision seat is now what the server judges with
+                const vctl = seatCtl.vision;
+                vctl.savedKey = candKey(seatsBody.vision);
+                if (vctl.probe && vctl.probe.key === vctl.savedKey && vctl.probe.vision === 'pass') vctl.serverCaps = { vision: 'pass', visionProbedAt: vctl.probe.probedAt };
+                renderCaps('vision');
+              }
             } else {
               statusEl.textContent = '⚠️ ' + (data.error || 'Save failed');
             }
@@ -4202,6 +5033,55 @@
         return div;
       }
 
+      // <remesh-ui>
+      var remeshProgressEl = null;
+      // M10: the % lives on the source asset's Library tile (badge), keyed by "<category>/<name>"; the state survives a Library re-render
+      var remeshBadges = {};
+      function applyRemeshBadges() {
+        try {
+          document.querySelectorAll('.lib-item[data-kind="asset"]').forEach(function (el) {
+            const key = el.dataset.category + '/' + el.dataset.name;
+            let b = el.querySelector('.lib-badge');
+            if (Object.prototype.hasOwnProperty.call(remeshBadges, key)) {
+              if (!b) { b = document.createElement('span'); b.className = 'lib-badge'; el.appendChild(b); }
+              b.textContent = '⟳ ' + remeshBadges[key] + '%';
+            } else if (b) b.remove();
+          });
+        } catch (_) {}
+      }
+      function setRemeshBadge(asset, pct) { if (!asset) return; remeshBadges[asset] = pct; applyRemeshBadges(); }
+      function clearRemeshBadges() { remeshBadges = {}; applyRemeshBadges(); }
+      function clearRemeshProgress() { try { if (remeshProgressEl && remeshProgressEl.parentNode) remeshProgressEl.parentNode.removeChild(remeshProgressEl); } catch (_) {} remeshProgressEl = null; clearRemeshBadges(); try { if (typeof refreshRemeshBalance === 'function') refreshRemeshBalance(); } catch (_) {} }
+      // one handler for every remesh notice: progress (badge + the one chat line) or done (any end of the job: clears both)
+      function onRemeshNotice(obj) {
+        if (obj.done === true) { clearRemeshProgress(); try { if (typeof refreshLibrary === 'function') refreshLibrary(); } catch (_) {} return; }
+        if (obj.asset) setRemeshBadge(obj.asset, Math.round(Number(obj.pct) || 0));
+        if (!remeshProgressEl || !remeshProgressEl.isConnected) remeshProgressEl = appendBubble('phoenix', 'Remeshing ' + String(obj.asset || '').split('/').pop() + ' on Meshy…');   // one line, no percent (the % is on the tile)
+      }
+      // Sweep 2 G9: REMESH_ON / REMESH_DEFAULTS used to be set only when the gear or Settings was opened — after a reload the Library had no
+      // "Remesh via Meshy…". Read them once at startup and re-render the Library entry (loadAssets).
+      async function restoreRemeshConfig() {
+        try {
+          const c = await (await fetch('/config')).json();
+          const rmc = (c && c.remesh) || {};
+          REMESH_ON = rmc.enabled === true;
+          REMESH_DEFAULTS = { topology: rmc.topology === 'triangle' ? 'triangle' : 'quad', targetPolycount: rmc.targetPolycount !== undefined ? rmc.targetPolycount : 20000 };
+          if (typeof loadAssets === 'function') loadAssets();
+        } catch (_) { /* the Library simply shows no Remesh entry until Settings is opened */ }
+      }
+      async function syncRemeshStatus() {
+        try {
+          const j = await (await fetch('/remesh-status')).json();
+          if (j && j.running && j.asset) {
+            setRemeshBadge(j.asset, Math.round(Number(j.progress) || 0));
+            if (!remeshProgressEl) remeshProgressEl = appendBubble('phoenix', 'Remeshing ' + String(j.asset).split('/').pop() + ' on Meshy…');
+          } else if (j && j.running === false && (remeshProgressEl || Object.keys(remeshBadges).length)) {
+            clearRemeshProgress();   // R1: the job ended while the stream was down — drop the stale badge + line
+          }
+        } catch (_) {}
+      }
+      // </remesh-ui>
+
       function setInputEnabled(on) {
         inputEl.disabled  = !on;
         sendBtn.disabled  = !on;
@@ -4219,7 +5099,7 @@
       // i2i_edit joins hy_motion here: it spends ~3–4 min generating in ComfyUI and never touches
       // Blender, so the server defers the lock for it too — the UI must stay live meanwhile (a tile
       // arrives via SSE when done), not grey out for the whole edit. (Q3, 2026-08-06)
-      const NON_BLOCKING_ACTIONS = ['hy_motion', 'i2i_edit'];
+      const NON_BLOCKING_ACTIONS = ['hy_motion', 'i2i_edit', 'remesh_asset'];   // remesh: cloud job, no lock held
 
       // How many blocking operations are in flight. A non-blocking action finishing must NOT
       // re-enable the UI while a blocking one is still running — otherwise the buttons light up
@@ -4231,6 +5111,19 @@
         blockingInFlight = Math.max(0, blockingInFlight - 1);
         if (blockingInFlight === 0) { setInputEnabled(true); setActionsEnabled(true); }
       }
+
+      // <sse-sync>
+      // Sweep 2 G12: a completion event lost while the stream was down leaves blockingInFlight > 0 and the controls disabled until a reload.
+      // On every (re)open of the stream ask the server (GET /mcp/status: { job, busy }). `busy` is the chat/Blender LOCK = a blocking turn is running.
+      // No blocking turn -> release the blocking state, whatever detached job (hy_motion, i2i, image/mesh) is still running: those are non-blocking.
+      async function releaseStaleUi() {
+        if (blockingInFlight === 0) return;
+        try {
+          const j = await (await fetch('/mcp/status')).json();
+          if (j && j.busy === false) { blockingInFlight = 0; setInputEnabled(true); setActionsEnabled(true); }
+        } catch (_) { /* unknown: leave the UI as it is */ }
+      }
+      // </sse-sync>
 
       async function postAction(action, input) {
         const blocking = !NON_BLOCKING_ACTIONS.includes(action);
@@ -4254,7 +5147,7 @@
           return;
         }
         if (res.status === 409) {
-          appendBubble('busy-note', 'busy… try again in a moment');
+          appendBubble('busy-note', action === 'remesh_asset' ? 'A remesh is already running' : 'busy… try again in a moment');
           bailI2i();
           releaseUi(action);
           return;
@@ -4288,9 +5181,228 @@
         consoleEl.scrollTop = consoleEl.scrollHeight;
       }
 
+      // ── Checkpoints + rewind (v1.9 M5) ───────────────────────────────────────
+      // The panel lists the scene copies Phoenix saved before scene-changing steps. Rewind is a USER action only.
+      // Because a plain Ctrl+S inside a checkpoint copy would save into Phoenix's checkpoint folder instead of the
+      // project file, EVERY rewind asks: stay in the copy, or overwrite the project file.
+      let cpInCopy = false;
+      function cpFmtSize(b) { b = Number(b) || 0; return b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB'; }
+      function cpFmtTime(at) { const d = new Date(at); return isNaN(d.getTime()) ? String(at || '') : d.toLocaleTimeString(); }
+      function renderCheckpoints(data) {
+        const items = (data && Array.isArray(data.items)) ? data.items : [];
+        const list = document.getElementById('cp-list');
+        const empty = document.getElementById('cp-empty');
+        const summary = document.getElementById('cp-summary');
+        list.textContent = '';
+        for (const it of items) {
+          const li = document.createElement('li');
+          const cls = [];
+          if (it.current) cls.push('cp-current');
+          if (it.position === 'here') cls.push('cp-here');
+          if (it.position === 'ahead') { cls.push('cp-ahead'); li.title = 'undone — the next action removes this'; }
+          if (cls.length) li.className = cls.join(' ');
+          const meta = document.createElement('span');
+          meta.className = 'cp-meta';
+          // a 'tip' is the latest state saved by a rewind, not a tool step
+          meta.textContent = 'turn ' + it.turn + ' · ' + (it.kind === 'tip' ? 'latest state' : it.tool) + ' · ' + cpFmtTime(it.at) + ' · ' + cpFmtSize(it.bytes) + (it.current ? ' · current' : '') + (it.position === 'here' ? ' · you are here' : '');
+          li.appendChild(meta);
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'cp-rewind';
+          btn.textContent = it.position === 'ahead' ? 'Redo to here' : (it.position === 'here' ? 'Reset to here' : 'Rewind here');
+          btn.addEventListener('click', function () { openRewindDialog(it); });
+          li.appendChild(btn);
+          list.appendChild(li);
+        }
+        if (empty) empty.hidden = items.length > 0;
+        if (summary) summary.textContent = 'Checkpoints (' + items.length + ')' + (data && data.enabled === false ? ' — off' : '');
+        // The banner follows Blender's real state: it clears once no checkpoint copy is the open file any more.
+        cpInCopy = !!(data && data.inCopy) || items.some(function (it) { return it.current; });
+        const banner = document.getElementById('cp-banner');
+        if (banner) banner.hidden = !cpInCopy;
+      }
+      async function refreshCheckpoints() {
+        // Only while the Checkpoints panel is open (the read costs a Blender round trip). Exception: while the
+        // "in a checkpoint copy" banner is up, so it can clear itself once Blender leaves the copy.
+        const det = document.getElementById('cp-details');
+        if (!(det && det.open) && !cpInCopy) return;
+        try {
+          const res = await fetch('/checkpoints');
+          if (!res.ok) return;
+          renderCheckpoints(await res.json());
+        } catch (_) {}
+      }
+      async function doRewind(id, choice) {
+        let res, body = {};
+        try {
+          res = await fetch('/rewind', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, choice }) });
+          try { body = await res.json(); } catch (_) {}
+        } catch (err) { appendBubble('error', 'Network error: ' + err.message); return; }
+        if (res.status === 409) { appendBubble('busy-note', (body && body.error && body.error !== 'busy') ? body.error : 'busy… try again in a moment'); return; }
+        if (!res.ok) { appendBubble('error', 'Rewind: ' + ((body && body.error) || ('server error ' + res.status))); return; }
+        // success: the 'rewound' SSE event reloads the chat and refreshes the list. A no-op (already there) sends no event: say so.
+        if (body && body.note) { appendBubble('busy-note', body.note); refreshCheckpoints(); }
+      }
+      function openRewindDialog(it) {
+        const dlg = document.getElementById('cp-dialog');
+        const noProject = it.hasProject === false || it.projectPath === null;
+        document.getElementById('cp-dialog-what').textContent = 'Back to before ' + it.tool + ' in turn ' + it.turn + ' (' + cpFmtTime(it.at) + ').';
+        document.getElementById('cp-choice-overwrite').hidden = noProject;
+        document.getElementById('cp-hint-overwrite').hidden  = noProject;
+        document.getElementById('cp-noproject').hidden       = !noProject;
+        const finish = function (choice) {
+          if (typeof dlg.close === 'function') dlg.close(); else dlg.open = false;
+          if (choice) doRewind(it.id, choice);
+        };
+        document.getElementById('cp-choice-stay').onclick      = function () { finish('stay'); };
+        document.getElementById('cp-choice-overwrite').onclick = function () { finish('overwrite'); };
+        document.getElementById('cp-choice-cancel').onclick    = function () { finish(null); };   // Cancel = nothing happens
+        if (typeof dlg.showModal === 'function') dlg.showModal(); else dlg.open = true;
+        const first = document.getElementById('cp-choice-stay');
+        if (first && typeof first.focus === 'function') first.focus();
+      }
+      // The server cut the chat back: show the restored history instead of the undone exchange.
+      function reloadChat(history) {
+        messagesEl.textContent = '';
+        for (const m of (Array.isArray(history) ? history : [])) {
+          if (m && m.role === 'user') appendBubble('user', String(m.content));
+          else if (m && m.role === 'assistant') appendBubble('phoenix', String(m.content));
+        }
+      }
+      function onRewound(obj) {
+        reloadChat(obj.history);
+        if (obj.choice === 'stay') { cpInCopy = true; const b = document.getElementById('cp-banner'); if (b) b.hidden = false; }
+        refreshCheckpoints();
+      }
+      // <gear-save>
+      // M10 D4: the checkpoint on/off switch stays in the gear and saves ONLY itself (keep / max GB are validated in the Settings window)
+      async function saveCpEnabled() {
+        try {
+          await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ checkpoints: { enabled: document.getElementById('cp-enabled').checked } }) });
+        } catch (_) {}
+        if (typeof refreshCheckpoints === 'function') refreshCheckpoints();
+      }
+      // </gear-save>
+      async function saveCheckpointSettings() {
+        const keepRaw = document.getElementById('cp-keep').value, gbRaw = document.getElementById('cp-maxgb').value;
+        const keep = Number(keepRaw), maxGB = Number(gbRaw);
+        const bad = keepRaw === '' || !Number.isInteger(keep) || keep < 1 || keep > 100 ||
+                    gbRaw === '' || !Number.isFinite(maxGB) || maxGB < 0.1 || maxGB > 100;
+        const errEl = document.getElementById('cp-settings-err');
+        if (errEl) { errEl.textContent = bad ? 'Checkpoints to keep: a whole number 1–100; max disk: 0.1–100 GB — not saved.' : ''; errEl.hidden = !bad; }
+        if (bad) return;
+        try {
+          const res = await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ checkpoints: { enabled: document.getElementById('cp-enabled').checked, keep, maxGB } }) });
+          if (res && res.ok === false) {
+            // a 400 from the server is shown inline, not swallowed
+            let msg = 'The server refused the checkpoint settings (' + res.status + ').';
+            try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+            if (errEl) { errEl.textContent = msg + ' — not saved.'; errEl.hidden = false; }
+          }
+        } catch (_) {}
+        refreshCheckpoints();
+      }
+      async function saveMcpFlag(flag, checkboxId) {
+        const errEl = document.getElementById('mcp-settings-err');
+        try {
+          const res = await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mcp: { [flag]: document.getElementById(checkboxId).checked } }) });
+          if (res && res.ok === false) {
+            let msg = 'The server refused the MCP setting (' + res.status + ').';
+            try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+            if (errEl) { errEl.textContent = msg + ' — not saved.'; errEl.hidden = false; }
+          } else if (errEl) { errEl.textContent = ''; errEl.hidden = true; }
+        } catch (_) {}
+      }
+      async function saveMcpSettings() {
+        const errEl = document.getElementById('mcp-settings-err');
+        try {
+          const res = await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mcp: { allowBlenderRun: document.getElementById('mcp-allow-blender-run').checked } }) });
+          if (res && res.ok === false) {
+            let msg = 'The server refused the MCP setting (' + res.status + ').';
+            try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+            if (errEl) { errEl.textContent = msg + ' — not saved.'; errEl.hidden = false; }
+          } else if (errEl) { errEl.textContent = ''; errEl.hidden = true; }
+        } catch (_) {}
+      }
+      document.getElementById('mcp-allow-blender-run').addEventListener('change', saveMcpSettings);
+      document.getElementById('mcp-allow-unreal-run').addEventListener('change', function () { saveMcpFlag('allowUnrealRun', 'mcp-allow-unreal-run'); });
+      document.getElementById('mcp-allow-delete').addEventListener('change', function () { saveMcpFlag('allowDelete', 'mcp-allow-delete'); });
+      // ── Remesh settings (M9) ──
+      var REMESH_ON = false, REMESH_DEFAULTS = { topology: 'quad', targetPolycount: 20000 };
+      async function saveRemeshSettings() {
+        const errEl = document.getElementById('remesh-settings-err');
+        try {
+          const res = await fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ remesh: {
+              enabled: document.getElementById('remesh-enabled').checked,
+              maxUploadMB: parseFloat(document.getElementById('remesh-maxmb').value),
+            } }) });
+          if (res && res.ok === false) {
+            let msg = 'The server refused the remesh settings (' + res.status + ').';
+            try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (_) {}
+            if (errEl) { errEl.textContent = msg + ' — not saved.'; errEl.hidden = false; }
+          } else {
+            if (errEl) { errEl.textContent = ''; errEl.hidden = true; }
+            const j = await res.json();
+            if (j && j.remesh) { REMESH_ON = j.remesh.enabled === true; REMESH_DEFAULTS = { topology: j.remesh.topology, targetPolycount: j.remesh.targetPolycount }; }
+            if (typeof loadAssets === 'function') loadAssets();
+          }
+        } catch (_) {}
+      }
+      async function refreshRemeshBalance() {
+        const el = document.getElementById('remesh-balance');
+        if (!el) return;
+        el.textContent = 'Meshy balance: …';
+        try {
+          const j = await (await fetch('/remesh-balance')).json();
+          el.textContent = (j && j.ok && typeof j.balance === 'number') ? 'Meshy balance: ' + j.balance + ' credits' : 'balance unavailable';
+        } catch (_) { el.textContent = 'balance unavailable'; }
+      }
+      async function remeshKeyOp(key) {
+        const st = document.getElementById('remesh-key-status');
+        try {
+          const r = await fetch('/secrets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ref: 'meshy', key }) });
+          const j = await r.json();
+          if (!r.ok) { st.textContent = '⚠️ ' + (j.error || 'key not saved'); return; }
+          st.textContent = (j.keys && j.keys.meshy) ? 'key stored ✓' : 'not set';
+          document.getElementById('remesh-key').value = '';
+          refreshRemeshBalance();
+        } catch (_) { st.textContent = 'could not save the key'; }
+      }
+      document.getElementById('remesh-enabled').addEventListener('change', saveRemeshSettings);
+      document.getElementById('remesh-maxmb').addEventListener('change', saveRemeshSettings);
+      document.getElementById('remesh-key-save').addEventListener('click', function () { const v = document.getElementById('remesh-key').value.trim(); if (v) remeshKeyOp(v); });
+      document.getElementById('remesh-key-clear').addEventListener('click', function () { remeshKeyOp(''); });
+      document.getElementById('cp-enabled').addEventListener('change', saveCpEnabled);
+      document.getElementById('cp-keep').addEventListener('change', saveCheckpointSettings);
+      document.getElementById('cp-maxgb').addEventListener('change', saveCheckpointSettings);
+      document.getElementById('cp-details').addEventListener('toggle', function () { if (this.open) refreshCheckpoints(); });
+      // Page load: ONE read that only restores the "in a checkpoint copy" banner / inCopy state (the banner must survive a
+      // reload until Blender leaves the copy). The list itself is not rendered; the server bounds the read to 500 ms and
+      // only takes it while the chat lock is free.
+      async function loadCheckpointBanner() {
+        try {
+          const res = await fetch('/checkpoints');
+          if (!res.ok) return;
+          const data = await res.json();
+          const items = (data && Array.isArray(data.items)) ? data.items : [];
+          cpInCopy = !!(data && data.inCopy) || items.some(function (it) { return it.current; });
+          const banner = document.getElementById('cp-banner');
+          if (banner) banner.hidden = !cpInCopy;
+        } catch (_) {}
+      }
+      loadCheckpointBanner();
+
       // ── SSE ─────────────────────────────────────────────────────────────────
 
       const es = new EventSource('/events');
+
+      syncRemeshStatus();   // M10: a reload during a remesh shows the badge (and the one chat line) again
+      restoreRemeshConfig();   // sweep 2 G9
+      es.addEventListener('open', function () { syncRemeshStatus(); releaseStaleUi(); });   // M10 D2: closes the load-time race (a job that started between load and the stream opening)
 
       es.onmessage = function (e) {
         let obj;
@@ -4312,9 +5424,14 @@
         }
 
         if (obj.kind === 'reply') {
-          appendBubble('phoenix', obj.text);
+          if (obj.action === 'remesh_asset') clearRemeshProgress();   // D7: the in-place progress line goes away with the result
+          const remeshFailed = obj.action === 'remesh_asset' && /^(ERROR|REJECTED|BUSY)/.test(String(obj.text || ''));
+          if (remeshFailed) appendBubble('error', obj.text);
+          else appendBubble('phoenix', obj.text);
+          if (obj.stopped) appendBubble('busy-note', '⏸ Auto stopped: ' + (obj.stopped.reason || 'the render check did not confirm the last step'));
           if (!obj.background) releaseUi(obj.action);   // background notes (hy_motion) never held the lock
-          refreshLibrary();
+          if (!remeshFailed) refreshLibrary();   // D7: a failed remesh changed nothing in the Library
+          refreshCheckpoints();   // a scene-changing step may have added a checkpoint (M5)
           // A reply for i2i_edit means the run resolved WITHOUT a tile — an ERROR: string (bad
           // reference, etc.) comes back as a reply, not kind:'error'. Clear the "Editing… ~3–4 min"
           // status so it can't hang forever; the error text is already in the chat. (F5, 2026-08-06)
@@ -4353,6 +5470,7 @@
         }
 
         if (obj.kind === 'error') {
+          if (obj.action === 'remesh_asset') clearRemeshProgress();
           appendBubble('error', 'Error: ' + obj.message);
           releaseUi(obj.action);
           if (obj.action === 'i2i_edit' && window.__i2iClearStatus) window.__i2iClearStatus();
@@ -4360,7 +5478,21 @@
           return;
         }
 
+        if (obj.kind === 'notice' && obj.progress === 'remesh') {   // D7: ONE line, updated in place
+          onRemeshNotice(obj);
+          return;
+        }
+        if (obj.kind === 'notice' && obj.level === 'error') { appendBubble('error', obj.text); return; }   // F1: e.g. the "maybe charged" warning
         if (obj.kind === 'notice') { appendBubble('phoenix', obj.text); refreshLibrary(); return; }
+
+        // A call from an external agent over MCP (v1.9 M6): a marked line, never a user/assistant bubble and never chat history.
+        if (obj.kind === 'mcp') {
+          appendBubble('mcp', '🔌 MCP · ' + (obj.client || 'mcp') + ' · ' + (obj.tool || '') + (obj.phase === 'start' ? ' …' : '') + (obj.text ? '\n' + obj.text : ''));
+          if (obj.phase === 'done') { refreshLibrary(); refreshCheckpoints(); }
+          return;
+        }
+
+        if (obj.kind === 'rewound') { onRewound(obj); return; }
 
         if (obj.kind === 'acquire-progress') {
           const ui = window.__acqRows && window.__acqRows[obj.id];
@@ -4412,7 +5544,7 @@
           res = await fetch('/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, noTool: !!noTool }),
+            body: JSON.stringify({ message, noTool: !!noTool, mode: runMode }),
           });
         } catch (err) {
           appendBubble('error', 'Network error: ' + err.message);
@@ -4696,11 +5828,14 @@
             const btn = document.createElement('button');
             btn.className = 'lib-act-btn';
             btn.dataset.act = act;
-            btn.textContent = act === 'rename' ? '✎' : act === 'move' ? '🗀' : '🗑';
-            btn.title = act;
+            btn.textContent = act === 'rename' ? '✎' : act === 'move' ? '🗀' : act === 'remesh' ? '⬡' : '🗑';
+            btn.title = act === 'remesh' ? 'Remesh via Meshy…' : act;
             acts.appendChild(btn);
           });
           el.appendChild(acts);
+        }
+        if (opts.kind === 'asset' && opts.dataset && Object.prototype.hasOwnProperty.call(remeshBadges, opts.dataset.category + '/' + opts.dataset.name)) {
+          const bd = document.createElement('span'); bd.className = 'lib-badge'; bd.textContent = '⟳ ' + remeshBadges[opts.dataset.category + '/' + opts.dataset.name] + '%'; el.appendChild(bd);
         }
         return el;
       }
@@ -4747,6 +5882,90 @@
           }
         })(null, 0);
         return out;
+      }
+
+      // Remesh via Meshy (M9): topology + target polycount, then ONE postAction. The consent gates live on the server.
+      function openRemeshDialog(category, name, sizeMB) {
+        const back = document.createElement('div');
+        back.className = 'lib-pick-backdrop';
+        const box = document.createElement('div');
+        box.className = 'lib-pick';
+        const close = () => { back.remove(); box.remove(); };
+        const title = document.createElement('div');
+        title.className = 'lib-pick-title';
+        title.textContent = 'Remesh via Meshy';
+        box.appendChild(title);
+        const info = document.createElement('div');
+        info.className = 'lib-pick-row';
+        info.textContent = 'Uploads ' + name + (sizeMB ? ' (' + sizeMB + ' MB)' : '') + ' to Meshy · ~5 credits';
+        box.appendChild(info);
+        const bal = document.createElement('div');
+        bal.className = 'lib-pick-row'; bal.id = 'remesh-dlg-balance';
+        bal.textContent = 'Balance: …';
+        box.appendChild(bal);
+        (async function () {
+          try {
+            const j = await (await fetch('/remesh-balance')).json();
+            bal.textContent = (j && j.ok && typeof j.balance === 'number') ? 'Balance: ' + j.balance + ' credits · this remesh ≈ 5' : 'Balance unavailable';
+          } catch (_) { bal.textContent = 'Balance unavailable'; }
+        })();
+        const srcRow = document.createElement('div');
+        srcRow.className = 'lib-pick-row'; srcRow.id = 'remesh-dlg-source'; srcRow.hidden = true;
+        box.appendChild(srcRow);
+        const warnRow = document.createElement('div');
+        warnRow.className = 'lib-pick-row'; warnRow.id = 'remesh-dlg-warn'; warnRow.style.color = '#c98a2b'; warnRow.hidden = true;
+        box.appendChild(warnRow);
+        let srcTris = null;
+        const updateWarn = function () {
+          const n = parseInt(inpP.value, 10);
+          const heavier = srcTris !== null && Number.isFinite(n) && n >= srcTris;
+          warnRow.hidden = !heavier;
+          warnRow.textContent = heavier ? 'Target is higher than the source — the result gets heavier, not cleaner.' : '';
+        };
+        (async function () {
+          try {
+            const j = await (await fetch('/asset-faces?category=' + encodeURIComponent(category) + '&name=' + encodeURIComponent(name))).json();
+            if (j && j.ok && Number.isFinite(j.tris)) { srcTris = j.tris; srcRow.textContent = 'Source: ' + j.tris + ' triangles'; srcRow.hidden = false; updateWarn(); }
+          } catch (_) { /* no count -> no line, Remesh stays allowed */ }
+        })();
+        const rowT = document.createElement('div');
+        rowT.className = 'lib-pick-row';
+        const selT = document.createElement('select');
+        selT.id = 'remesh-dlg-topology';
+        ['quad', 'triangle'].forEach(function (v) { const o = document.createElement('option'); o.value = v; o.textContent = v; selT.appendChild(o); });
+        selT.value = REMESH_DEFAULTS.topology === 'triangle' ? 'triangle' : 'quad';
+        rowT.appendChild(document.createTextNode('Topology '));
+        rowT.appendChild(selT);
+        box.appendChild(rowT);
+        const rowP = document.createElement('div');
+        rowP.className = 'lib-pick-row';
+        const inpP = document.createElement('input');
+        inpP.type = 'number'; inpP.id = 'remesh-dlg-polycount'; inpP.min = '100'; inpP.max = '300000'; inpP.step = '100';
+        inpP.value = REMESH_DEFAULTS.targetPolycount || 20000; inpP.style.width = '90px';
+        inpP.addEventListener('input', updateWarn);
+        rowP.appendChild(document.createTextNode('Target polycount '));
+        rowP.appendChild(inpP);
+        box.appendChild(rowP);
+        const rowB = document.createElement('div');
+        rowB.className = 'lib-pick-row';
+        const go = document.createElement('button');
+        go.type = 'button'; go.className = 'modal-btn'; go.textContent = 'Remesh';
+        const no = document.createElement('button');
+        no.type = 'button'; no.className = 'modal-btn'; no.textContent = 'Cancel'; no.style.marginLeft = '8px';
+        go.addEventListener('click', function () {
+          const n = parseInt(inpP.value, 10);
+          if (!Number.isInteger(n) || n < 100 || n > 300000) { info.textContent = 'Target polycount must be an integer between 100 and 300000.'; return; }
+          close();
+          REMESH_DEFAULTS = { topology: selT.value, targetPolycount: n };   // M10: the next dialog opens with the last used values
+          try { fetch('/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remesh: { topology: selT.value, targetPolycount: n } }) }).catch(function () {}); } catch (_) {}
+          postAction('remesh_asset', { category, name, topology: selT.value, target_polycount: n });
+        });
+        no.addEventListener('click', close);
+        rowB.appendChild(go); rowB.appendChild(no);
+        box.appendChild(rowB);
+        back.addEventListener('click', close);
+        document.body.appendChild(back);
+        document.body.appendChild(box);
       }
 
       function openFolderPicker(itemKey, currentFolder) {
@@ -4829,7 +6048,7 @@
         }
 
         const mkItem = (it, depth) => {
-          const el = makeLibItem({ kind: it.kind, label: it.label, dataset: it.dataset, actions: ['move', 'rename', 'delete'] });
+          const el = makeLibItem({ kind: it.kind, label: it.label, dataset: it.dataset, actions: (it.kind === 'asset' && REMESH_ON) ? ['move', 'rename', 'remesh', 'delete'] : ['move', 'rename', 'delete'] });
           el.dataset.folderKey = it.key;
           if (depth !== null) { el.classList.add('in-folder'); el.style.setProperty('--depth', depth); }
           return el;
@@ -4922,7 +6141,7 @@
               key: 'asset:' + a.category + '/' + a.name,
               kind: 'asset',
               label: a.label || a.name,
-              dataset: { name: a.name, category: a.category },
+              dataset: { name: a.name, category: a.category, sizeMB: a.sizeMB == null ? '' : String(a.sizeMB) },
             })),
             it => it.dataset.category,
             LIB_CAT_ORDER,
@@ -5030,6 +6249,8 @@
               const nd = prompt('Display name:', item.dataset.display || '');
               if (nd && nd.trim()) postAction('rename_brush', { slug: item.dataset.slug, display: nd.trim() });
             }
+          } else if (act === 'remesh') {
+            if (kind === 'asset') openRemeshDialog(item.dataset.category, item.dataset.name, item.dataset.sizeMB);
           } else if (act === 'delete') {
             if (kind === 'asset') {
               if (confirm('Delete ' + item.dataset.category + '/' + item.dataset.name + '? This removes the file.')) postAction('delete_asset', { category: item.dataset.category, name: item.dataset.name });
@@ -5962,8 +7183,15 @@
         }
         return miss.length ? ('Missing: ' + miss.join(', ')) : 'All models for the active workflow are present.';
       }
+      // Sweep 2 G11: the first prop also needs the metaprompter and the category provider (utility) seats, not just the orchestrator
+      function _seatsReady(st) { const s = st && st.seats; return !s || Object.keys(s).every(function (k) { return !!(s[k] && s[k].ok); }); }
+      function _seatsHint(st) {
+        const s = (st && st.seats) || {}, bad = Object.keys(s).filter(function (k) { return !(s[k] && s[k].ok); });
+        if (!bad.length) return 'The prompt-writing (metaprompter) and category-provider seats answer too.';
+        return bad.map(function (k) { return (k === 'utility' ? 'Category provider' : 'Metaprompter') + ': ' + ((s[k] && s[k].how) || 'not ready'); }).join(' · ') + ' — set them in Settings → General → Seats.';
+      }
       function _coreReady(st) {
-        return !!(st && st.comfyui && st.comfyui.reachable && st.claudeCli && st.claudeCli.present && _wfReady(st));
+        return !!(st && st.comfyui && st.comfyui.reachable && st.brain && st.brain.ok && _wfReady(st) && _seatsReady(st));
       }
       function _onbPill(ok, optional) {
         const s = document.createElement('span');
@@ -5999,8 +7227,8 @@
 
         if (_onbStep === 0) {
           body.innerHTML = '<h2>Welcome to Phoenix</h2>'
-            + '<p>Phoenix turns a text prompt into a 3D prop — it drives your local ComfyUI through a guided pipeline: prompt → reference image → 3D mesh → Blender.</p>'
-            + '<p><b>What you\'ll need:</b> a running <b>ComfyUI</b> (+ models), the <b>Claude CLI</b>, and <b>Node</b>. This wizard checks each and helps you fix anything missing. Optional: LM Studio + Blender.</p>';
+            + '<p>Phoenix is a creative\'s control room for local AI — one window that runs your whole local toolchain: ComfyUI images, 3D meshes, Blender, Unreal and voice, driven by an assistant you choose.</p>'
+            + '<p><b>What you\'ll need:</b> a running <b>ComfyUI</b> (+ models), <b>Node</b>, and <b>one brain</b> — the Claude CLI, the Codex CLI (ChatGPT plan), a local model server (LM Studio / llama.cpp), or an API key. This wizard checks each and helps you fix anything missing. Optional: Blender.</p>';
         } else if (_onbStep === 1) {
           const h = document.createElement('h2'); h.textContent = 'Prerequisites'; body.appendChild(h);
           const list = document.createElement('div'); list.className = 'onb-list';
@@ -6008,8 +7236,9 @@
             ['Node.js', !!(st.node && st.node.present), false, 'Runtime — already running' + (st.node && st.node.version ? ' (' + st.node.version + ')' : '') + '.', null],
             ['ComfyUI', !!(st.comfyui && st.comfyui.reachable), false, 'The local generation backend Phoenix talks to.', 'https://github.com/comfyanonymous/ComfyUI'],
             ['Models / workflow', _wfReady(st), false, _modelsHint(st), 'https://github.com/comfyanonymous/ComfyUI#installing'],
-            ['Claude CLI', !!(st.claudeCli && st.claudeCli.present), false, 'Powers the assistant. Install it and sign in.', 'https://docs.claude.com/en/docs/claude-code'],
-            ['LM Studio', !!(st.lmstudio && st.lmstudio.reachable), true, 'Optional — local model for the metaprompter.', 'https://lmstudio.ai/'],
+            ['Brain', !!(st.brain && st.brain.ok), false, (st.brain && st.brain.ok && st.brain.how) ? st.brain.how : ((st.brain && st.brain.how ? st.brain.how + '. ' : '') + 'Pick one in Settings → General → Seats: Claude CLI, Codex CLI, a local model server, or an API key.'), null],
+            ['Prompt + category seats', _seatsReady(st), false, _seatsHint(st), null],
+            ['LM Studio', !!(st.lmstudio && st.lmstudio.reachable), true, 'Optional — local model for the metaprompter (or as the brain).', 'https://lmstudio.ai/'],
             ['Blender', !!(st.blender && st.blender.present), true, 'Optional — for import / scene sync.', 'https://www.blender.org/'],
           ];
           rows.forEach(function (r) {
@@ -6037,7 +7266,7 @@
               + '<p>Close this wizard, type a prompt in the chat (e.g. <i>"a wooden treasure chest"</i>), and Phoenix generates a reference image, then a 3D mesh. Approve each gate as it appears.</p>';
           } else {
             const h = document.createElement('h2'); h.textContent = 'Your first prop'; body.appendChild(h);
-            const p = document.createElement('p'); p.textContent = 'Almost — finish the required items on the previous step first (ComfyUI, Claude, and a runnable workflow must be green), then come back.'; body.appendChild(p);
+            const p = document.createElement('p'); p.textContent = 'Almost — finish the required items on the previous step first (ComfyUI, a brain, and a runnable workflow must be green), then come back.'; body.appendChild(p);
             const re = document.createElement('button'); re.className = 'modal-btn'; re.style.marginTop = '8px'; re.textContent = 'Re-check';
             re.addEventListener('click', async function () { _onbStatus = await fetchOnbStatus(); renderOnb(); });
             body.appendChild(re);
@@ -6087,6 +7316,81 @@
       refreshLibrary();
       initOnboarding();
     })();
+
+      // ── Panel layout (M10): drag handles + collapse, persisted per viewer ──────────────────────────────────────────
+      (function () {
+        const LAYOUT_KEY = 'phoenix.layout.v1';
+        const DEF = { chatW: 360, libW: 440 };
+        const CLAMP = { chat: [260, 700], lib: [300, 900], mid: 320 };
+        const main = document.getElementById('main-area'), chat = document.getElementById('chat-wrap'), lib = document.getElementById('library-wrap');
+        const hChat = document.getElementById('handle-chat'), hLib = document.getElementById('handle-lib');
+        if (!main || !chat || !lib || !hChat || !hLib) return;
+        let L = { chatW: DEF.chatW, libW: DEF.libW, chatCollapsed: false, libCollapsed: false };
+        try {
+          const raw = localStorage.getItem(LAYOUT_KEY);
+          const j = raw ? JSON.parse(raw) : null;
+          if (j && typeof j === 'object') {
+            if (Number.isFinite(j.chatW)) L.chatW = Math.min(CLAMP.chat[1], Math.max(CLAMP.chat[0], j.chatW));
+            if (Number.isFinite(j.libW)) L.libW = Math.min(CLAMP.lib[1], Math.max(CLAMP.lib[0], j.libW));
+            L.chatCollapsed = j.chatCollapsed === true; L.libCollapsed = j.libCollapsed === true;
+          }
+        } catch (_) { /* broken or missing -> defaults */ }
+        function save() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(L)); } catch (_) {} }
+        // D3: the effective widths — when the window is too narrow the library shrinks first, then the chat (never below their minimums),
+        // so the middle keeps its 320 px. The stored widths stay the user's choice and come back when the window widens.
+        function eff() {
+          const total = main.getBoundingClientRect().width;
+          let c = L.chatCollapsed ? 28 : L.chatW, l = L.libCollapsed ? 28 : L.libW;
+          let over = c + l + 12 + CLAMP.mid - total;
+          if (over > 0 && !L.libCollapsed) { const d = Math.min(over, l - CLAMP.lib[0]); l -= Math.max(0, d); over -= Math.max(0, d); }
+          if (over > 0 && !L.chatCollapsed) { const d = Math.min(over, c - CLAMP.chat[0]); c -= Math.max(0, d); }
+          return { c: c, l: l };
+        }
+        function apply() {
+          const e = eff();
+          chat.style.flex = '0 0 ' + (L.chatCollapsed ? L.chatW : e.c) + 'px';
+          lib.style.flex = '0 0 ' + (L.libCollapsed ? L.libW : e.l) + 'px';
+          chat.classList.toggle('collapsed', L.chatCollapsed);
+          lib.classList.toggle('collapsed', L.libCollapsed);
+          hChat.classList.toggle('hidden-by-collapse', L.chatCollapsed);
+          hLib.classList.toggle('hidden-by-collapse', L.libCollapsed);
+        }
+        function setCollapsed(which, on) {
+          L[which + 'Collapsed'] = on; apply(); save();
+          if (!on && which === 'chat') { const m = document.getElementById('messages'); if (m) m.scrollTop = m.scrollHeight; }
+        }
+        document.getElementById('chat-collapse').addEventListener('click', function () { setCollapsed('chat', true); });
+        document.getElementById('lib-collapse').addEventListener('click', function () { setCollapsed('lib', true); });
+        document.getElementById('chat-strip').addEventListener('click', function () { setCollapsed('chat', false); });
+        document.getElementById('lib-strip').addEventListener('click', function () { setCollapsed('lib', false); });
+        function drag(handle, which) {
+          const key = which + 'W', lim = CLAMP[which];
+          handle.addEventListener('dblclick', function () { L[key] = DEF[key]; apply(); save(); });
+          handle.addEventListener('pointerdown', function (e) {
+            e.preventDefault();
+            const cur = eff(); L.chatW = L.chatCollapsed ? L.chatW : cur.c; L.libW = L.libCollapsed ? L.libW : cur.l;   // commit what is shown
+            const startX = e.clientX, startW = L[key], total = main.getBoundingClientRect().width;
+            const otherW = which === 'chat' ? (L.libCollapsed ? 28 : L.libW) : (L.chatCollapsed ? 28 : L.chatW);
+            const max = Math.min(lim[1], total - otherW - CLAMP.mid - 12);   // the middle never goes below 320 px: the handle stops
+            handle.classList.add('dragging');
+            try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+            function move(ev) {
+              const dx = ev.clientX - startX;
+              L[key] = Math.round(Math.max(lim[0], Math.min(Math.max(lim[0], max), which === 'chat' ? startW + dx : startW - dx)));
+              apply();
+            }
+            function up() {
+              handle.classList.remove('dragging');
+              handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+              save();
+            }
+            handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+          });
+        }
+        drag(hChat, 'chat'); drag(hLib, 'lib');
+        apply();
+        try { window.addEventListener('resize', apply); } catch (_) {}
+      })();
   </script>
 
 </body>

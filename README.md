@@ -30,7 +30,7 @@ Each stage has an optional **gate** (pause for your approval). The generation en
 
 - **Node.js 20+**
 - **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)** running locally, with the models for the workflow you want to use (e.g. Flux, SD 1.5, Trellis).
-- **[Claude CLI](https://docs.claude.com/en/docs/claude-code)** (`claude`) — the assistant/orchestrator seats call it; sign in with your Anthropic account.
+- **One brain of your choice** for the assistant: the **[Claude CLI](https://docs.claude.com/en/docs/claude-code)** (`claude`, sign in with your Anthropic account), the **Codex CLI** (ChatGPT plan), a local model server (LM Studio / llama.cpp), or an API key — pick it in Settings ▸ General ▸ Seats.
 - *Optional:* **[LM Studio](https://lmstudio.ai/)** (local model for the metaprompter), **Blender** (import / scene sync).
 - *Optional (for the Voice/Unreal tabs):* **Unreal Engine 5.8+** with the Python plugin and a real `python` on your PATH (Unreal bridge — see **Connect Unreal**); a **CrispASR** speech server plus `.gguf` voice packs (Voice / SFX tabs — this is what powers the integrated default engine); an **ffmpeg** binary for voice/SFX effects (auto‑detected from `imageio‑ffmpeg` if present, otherwise set `voice.ffmpeg`). The picker's other engines (Chatterbox, CosyVoice) additionally need a voice‑service dispatcher that a future version will ship.
 
@@ -80,6 +80,27 @@ With Blender open and the addon enabled, the import stage drops generated props 
 
 With the editor open and a project loaded, the Unreal actions light up (a red/absent indicator means one of the three above is missing — the bridge's error message names which). Tested on **UE 5.8**. *Optional:* set `apps.unrealEngine` to your install folder (e.g. `C:\Program Files\Epic Games\UE_5.8`); left empty, Phoenix uses the newest `UE_*` it finds.
 
+## Use Phoenix from Claude Code / Codex / Cursor
+
+Phoenix also runs as an **MCP server**, so an external coding agent can generate props, import them and check the result with Phoenix's render vision — the agent is the brain, Phoenix is the tool. Add it once (replace `<abs>` with your Phoenix folder; Settings ▸ Connections shows the exact lines):
+
+```bash
+claude mcp add --scope user phoenix -- node "<abs>/phoenix-mcp.js"
+codex mcp add phoenix -- node "<abs>/phoenix-mcp.js"
+```
+
+Cursor — `.cursor/mcp.json`:
+
+```json
+{"mcpServers":{"phoenix":{"command":"node","args":["<abs>/phoenix-mcp.js"]}}}
+```
+
+**Phoenix must be running** (start it with `server.bat` on Windows, or `node server.js`). Every MCP call shows up live in the Phoenix chat window, marked with 🔌.
+
+**What an agent can do.** Every Phoenix tool except the Edit tab's `i2i_edit` is available, in groups: **generate** (`generate_prop`, `generate_image`, `image_to_3d`) · **scene** (`import_asset`, `use_brush`, `apply_material`, `inspect_render` — Phoenix renders the scene and a vision model judges it) · **humans & animation** (`make_human`, `place_human`, `animate_human`, `sequence_animations`, `hy_motion` text→motion, `save_animation`, `list_animations`) · **custom rigs** (`list_custom_rigs`, `assign_skeleton`, `spawn_rig`, `animate_clip`, `sequence_clips`, `prepare_mesh`, `bind_mesh`, `save_clip`, `save_mesh`) · **characters** (`list_characters`, `save_character`, `spawn_character`) · **library** (`list_assets`, `list_brushes`, `list_materials`, `read_palette`, `save_as_brush`, `brush_preview`, `rename_asset`, `rename_brush`) · **Unreal** (`brush_to_unreal`, `unreal_to_blender`, `unreal_to_brush`, `character_to_unreal`, `inspect_unreal` — needs a running Unreal Editor with the Phoenix bridge) · **control** (`read_state`, `job_status`, `stop`). Tools that change your open Blender scene take a checkpoint first (on/off in the ⚙ panel, limits in Settings ▸ General), and one heavy job runs at a time. **Three things are off until you tick them in Settings ▸ Connections:** `blender_run` (arbitrary Python in your Blender scene), `unreal_run` (arbitrary Python in Unreal) and the deletes `delete_asset` / `delete_brush` / `delete_material` (permanent — a checkpoint cannot bring a deleted file back). `brush_to_unreal` / `character_to_unreal` re-import into the same `/Game` path and replace those Unreal assets (they can be regenerated from Phoenix). Voice/TTS, sound effects and the workflow downloader are not available over MCP yet.
+
+**Long generations:** `generate_prop` / `generate_image` take several minutes. Claude Code: set the `MCP_TOOL_TIMEOUT` environment variable (milliseconds). Codex: add `[mcp_servers.phoenix]` with `tool_timeout_sec = 3600` to `~/.codex/config.toml`. If a client times out anyway, Phoenix keeps working — check with `job_status` / `list_assets`.
+
 ## Features
 
 - **Chat‑driven generation** with per‑stage gates (prompt / image / mesh).
@@ -93,6 +114,13 @@ With the editor open and a project loaded, the Unreal actions light up (a red/ab
 - **Unreal Engine bridge** *(new in 1.7.0)* — place brushes and spawn saved characters into an already‑running Unreal editor, pull Unreal assets back into Blender as glTF, and let the assistant screenshot the viewport to check its own work. See **Connect Unreal** below.
 - **Mesh preview** *(new in 1.7.0)* — inspect a brush's geometry right in the browser (a vendored model‑viewer, no CDN) before it goes anywhere.
 - **Image editing (i2i)** *(new in 1.8.0)* — a branch between the image and the mesh: recolour or restyle a reference with **Qwen‑Image‑Edit**, or isolate a part on white with **SAM3** for a cleaner mesh. Edits arrive as tiles you can refine or send straight to 3D. See **[Edit an image (i2i)](#edit-an-image-i2i)** below.
+- **Your brain, your choice — per seat** *(new in 1.9.0)* — every role (orchestrator, troubleshooter, metaprompter, vision, and the category provider — `utility` in the config) picks its own provider: the **Claude CLI**, the **Codex CLI** (ChatGPT plan), a **local OpenAI‑compatible server** (LM Studio / llama.cpp) or an **API key**. A model that is going to drive tools must pass a **tool test** first (a local orchestrator also a short **competence benchmark**); a non‑Claude **vision** seat must pass a **vision test** (it has to read a colour card next to the render) before it can be saved. Pick them in *Settings ▸ General ▸ Seats*.
+- **Ask / Auto run modes** *(new in 1.9.0)* — **Ask** stops at the gates as before; **Auto** runs to the end and only stops when the render check does not clearly confirm a step. Tool steps per turn are budgeted (default 3 in Ask, 8 in Auto — *Settings ▸ General*).
+- **Checkpoints with rewind** *(new in 1.9.0)* — before each step that changes your open Blender scene Phoenix saves a copy (your own file is never touched) — in chat and over MCP alike, taken right where Blender is actually touched (a generated mesh right before it is imported, an applied animation right before it is applied); the Library and Human-tab buttons do not take one yet (apart from that import); the Checkpoints panel under the chat rewinds to any of them, and a rewind can itself be undone. On/off in the ⚙ panel, how many to keep and the disk budget in *Settings ▸ General*.
+- **Phoenix as an MCP server** *(new in 1.9.0)* — an external agent (Claude Code / Codex / Cursor) can use the whole Phoenix toolset; see **Use Phoenix from Claude Code / Codex / Cursor** above.
+- **GPU share** *(new in 1.9.0, best effort)* — before an image or mesh stage Phoenix asks a local LLM server that shares the GPU to unload its model (LM Studio, Ollama, or a llama.cpp router server). Only for the llama.cpp router does Phoenix wait until the model is gone; for LM Studio and Ollama it does not confirm the unload, and if unloading fails the job still runs. The model reloads on its next request.
+- **Remesh via Meshy** *(new in 1.9.0, optional, paid)* — rebuild a staged mesh's topology through Meshy's cloud API (about 5 Meshy credits per remesh). Off until you tick it in *Settings ▸ Connections* and store your own Meshy key; the Library entry *Remesh via Meshy…* shows your balance, the source triangle count and a live % on the asset. GLB cannot store quads, so a Meshy *quad* result comes back as triangle pairs — Phoenix joins them back into quads when you import it.
+- **Resizable, collapsible panels** *(new in 1.9.0)* — drag the handles between the assistant, the middle area and the Library, or collapse the assistant / Library to a thin strip; the layout is remembered per browser.
 
 ### Characters and animation
 
@@ -175,7 +203,7 @@ fresh as the last import or explicit refresh.
 
 Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on first run (or copy it yourself — `copy` on Windows, `cp` on macOS/Linux). Key fields:
 
-- **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`, `vision`).
+- **`seats`** — which model each role uses (`orchestrator`, `metaprompter`, `troubleshooter`, `vision`, and `utility` — the *category provider*, the small model that picks a category for a prop). Each seat has a **`provider`**: `claude-cli` (your Claude Code login, the default), `codex-cli` (your ChatGPT plan through the Codex CLI — an empty `model` means Codex's own default), or `openai-compat` with an `endpoint` name from `endpoints` (`local` = a local server such as LM Studio / llama.cpp, no key; a cloud entry names an `apiKeyRef` — keys live in `.secrets/`, never in this file). A seat without `provider` still works: a model named `claude*` uses the CLI, anything else the local server. Easiest is *Settings ▸ General ▸ Seats*, which also runs the tool / vision tests.
 - **`endpoints`** — ComfyUI + local‑model URLs. `comfyui` runs your image, mesh **and** i2i/edit
   workflows; optional **`comfyui_bild`** is a *second* ComfyUI instance for i2i workflows tagged
   `instance:'bild'` — only needed if you run Qwen‑Image‑Edit and Trellis in separate environments
@@ -208,11 +236,17 @@ Phoenix creates `phoenix-config.json` from `phoenix-config.example.json` on firs
   model *look at it*, instead of reporting "fixed ✓" from text alone. `focused` is the default and
   covers the animation/mesh/brush tools; `full` adds asset placement and `blender_run`. The seat that
   does the looking is **`seats.vision`**.
+- **`gates.mode`** — the default run mode, `ask` or `auto` (the toggle above the chat input picks per message). Tool steps per turn: `orchestrator.maxToolCalls` (Ask, default 3) and `orchestrator.maxToolCallsAuto` (Auto, default 8).
+- **`checkpoints`** — `{ enabled, keep, maxGB }`: save a scene copy before scene‑changing steps (default on), how many to keep (1–100, default 10) and the disk budget in GB (default 2).
+- **`mcp`** — `allowBlenderRun`, `allowUnrealRun`, `allowDelete`: the three MCP tools that are off until you enable them (*Settings ▸ Connections*).
+- **`remesh`** — `{ enabled, provider: "meshy", topology, targetPolycount, maxUploadMB }`: the optional paid Meshy remesh (off by default; the key is stored in `.secrets/`). `topology` / `targetPolycount` are the defaults the Library's Remesh dialog opens with.
 - **`apps`** — local paths: `blender` (the Blender executable), `comfyOutput` (the folder Phoenix
   reads ComfyUI's generated files from; leave empty to use the default `~/Documents/ComfyUI/output`),
   `unrealEngine` (your UE install folder — optional, Phoenix otherwise takes the newest `UE_*` it finds),
   and `python` (a real Python 3 for the Unreal bridge if `python` isn't already on your PATH — see
   **Connect Unreal**).
+  Also `codex` — the full path to the Codex CLI binary, only needed if Phoenix cannot find `codex` itself.
+- **Advanced environment overrides** — `GEMMA_MODEL` replaces the metaprompter's model and `LOCAL_API` replaces the `endpoints.local` URL, for the current process only. Normally you set these in the config or Settings instead.
 
 Runtime/user files (`phoenix-config.json`, `workflows.json`, `palette.json`, `output/`, …) are git‑ignored — Phoenix recreates them on first run.
 

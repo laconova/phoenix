@@ -8,6 +8,7 @@ const path = require('path');
 const os   = require('os');
 const net  = require('net');
 const blenderIpc = require('./blender-ipc');
+const checkpoints = require('./checkpoints');   // scene checkpoints before scene-changing tools (v1.9 M5)
 const unrealIpc  = require('./unreal-ipc');
 const unrealVision = require('./unreal-vision');
 const { brushToUnreal, ensureBrushGlb } = require('./brush-to-unreal');
@@ -21,6 +22,8 @@ const { characterToUnreal } = require('./character-to-unreal');
 const claudeCli = require('./claude-cli');
 const { runPreflight } = require('./preflight');
 const dbg = require('./debug-log');
+const providers = require('./providers');
+const capabilities = require('./providers/capabilities');
 const pipeline = require('./pipeline');
 const jobs = require('./jobs');
 const lock = require('./lock');
@@ -45,7 +48,8 @@ const CONFIG_EXAMPLE_FILE = path.join(__dirname, 'phoenix-config.example.json');
 const HISTORY_FILE  = path.join(__dirname, 'session', 'history.json');
 const STATE_FILE    = path.join(__dirname, 'session', 'state.json');
 const HISTORY_KEEP  = 10;
-const MAX_TOOL_CALLS = 3;
+const MAX_TOOL_CALLS = 3;        // default tool budget in Ask (seats.orchestrator.maxToolCalls overrides)
+const MAX_TOOL_CALLS_AUTO = 8;   // default tool budget in Auto (seats.orchestrator.maxToolCallsAuto overrides)
 
 const BLENDER_ONLY_TOOLS = ['blender_run', 'read_state', 'list_assets', 'list_brushes', 'use_brush', 'save_as_brush', 'import_asset', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'hy_motion', 'inspect_render'];
 const BLENDER_ONLY_SYSTEM = 'BLENDER-ONLY MODE (active this turn): The generation tools (generate_image, image_to_3d, generate_prop) are DISABLED. Build the requested asset by modelling it directly in Blender with bpy via the blender_run tool — use primitives, modifiers, transforms, and materials. Do NOT call any image/3D generation tool; if you do, it will be rejected.';
@@ -144,10 +148,11 @@ TOOLS:
 - make_human      creates a parametric MakeHuman character directly in the Blender scene (MPFB2), with a skin material + body parts. Body sliders are 0..1, optional (omit = 0.5 neutral). A skin is auto-matched to gender/age/race; eyes+teeth+eyebrows+eyelashes are ON by default. INPUT: {"gender": 0=female..1=male, "age": 0=young..1=old, "muscle": 0..1, "weight": 0..1, "height": 0=short..1=tall, "proportions": 0..1, "cupsize": 0..1, "firmness": 0..1, "race": {"asian":0..1,"caucasian":0..1,"african":0..1}, "rig": false|"default"|"mixamo" (add a skeleton; use "mixamo" if you will animate it via animate_human), "name": "optional", "skin": false (procedural, no assets) | "substr" (pick a skin asset by name), "eyes"/"teeth"/"eyebrows"/"eyelashes": true|false, "eyeColor": "brown|blue|green|grey|...", "hair": true (default style) | "short01|long01|afro01|bob01|ponytail01|braid01|...", "clothes": "male_casualsuit01" or ["...","..."], "targets": {"nose/nose-scale-horiz-more": 0.7, ...} (MakeHuman detail targets 0..1), "staged": true (build hidden in a staging collection for the tab's Preview & Place flow instead of dropping it visibly into the scene)}
 - place_human     commits the currently staged human (from a make_human call with staged:true) into the scene at the origin, visible. INPUT: {}
 - animate_human    applies a Mixamo FBX animation to a MakeHuman character that was built with rig:"mixamo". Retargets + bakes the animation onto the character (source rig removed), sets the scene frame range. The FBX must already be in the animations/ folder (dropped via the Human tab). INPUT: {"fbx": "Low Crawl.fbx" (filename in animations/), "character": "optional target name — defaults to the mixamo-rigged character in the scene"}
-- hy_motion       generates an animation FROM A TEXT DESCRIPTION (HY-Motion in ComfyUI) and applies it to a rig:"mixamo" character — use this when the user describes a motion that is not already an FBX in animations/ ("make him walk in a circle and sit down"). Takes ~230s for 6s of motion; the clip is saved in animations/ for reuse. INPUT: {"prompt": "a person walks forward and looks around" (English, describe the MOTION not the character), "duration": 6 (seconds, 1-20), "seed": optional int for a repeatable result, "apply": true (set false to only generate), "character": "optional target name"}
+- hy_motion       generates an animation FROM A TEXT DESCRIPTION (HY-Motion in ComfyUI) and applies it to a rig:"mixamo" character — use this when the user describes a motion that is not already an FBX in animations/ ("make him walk in a circle and sit down"). Takes ~230s for 6s of motion; the clip is saved in animations/ for reuse. INPUT: {"prompt": "a person walks forward and looks around" (English, describe the MOTION not the character), "duration": 6 (seconds, 1-12), "seed": optional int for a repeatable result, "apply": true (set false to only generate), "character": "optional target name"}
 - save_animation   saves the animation currently ON a rig:"mixamo" character (hand-keyframed, or a built sequence) as a reusable FBX clip in animations/, so it can be re-applied and sequenced. Use when the user asks to save/export/keep the current animation. INPUT: {"name": "my_clip" (filename to save under), "character": "optional source name — defaults to the mixamo-rigged character in the scene"}
 - sequence_animations  chains several Mixamo FBX clips onto a rig:"mixamo" character as blended NLA strips. Each clip is retargeted WITH its own real root motion and offset so it starts exactly where the previous clip stood at the seam — no snap-back, no foot sliding. Use append:true to add clips to the END of the existing sequence instead of rebuilding. INPUT: {"fbxs": ["Idle.fbx","Walking.fbx",...] (ordered, from animations/), "blend": 8 (crossfade frames), "speed": 0 (OPTIONAL extra forward drift in metres/frame — leave at 0 for normal clips; only genuine Mixamo "In Place" clips need a value), "append": false, "character": "optional target"}
 - inspect_render  renders the CURRENT Blender scene (EEVEE, non-destructive) and returns a vision verdict (PASS/FAIL + what is visibly wrong). Use it to SEE a result instead of guessing: after a visual change (spawn, animation, mesh/rig edit, placement) to confirm it actually looks right, and BEFORE claiming anything visual is fixed. INPUT: {} or {"question": "specific thing to check, e.g. is the deer head attached and undamaged"}
+- remesh_asset   rebuilds the topology of a STAGED GLB through Meshy (PAID cloud: it UPLOADS the mesh to Meshy and spends credits, about 5 per remesh) and stages the result as a NEW file next to the original (the original stays; textures are re-baked; Meshy normalises the size). Needs the Settings opt-in and runs in Auto only — in Ask mode tell the user to use the Library's "Remesh via Meshy…" button instead. INPUT: {"name": "filename.glb", "category": "optional", "topology": "quad|triangle", "target_polycount": 20000}. The result is NOT in the scene — import_asset next.
 
 WORKFLOW RULES:
 - Flow control (when to stop for approval between image / 3D / import) is handled automatically by the system based on settings — you do NOT need to tell the user to approve or ask permission between steps. Just call the tool the user's request implies, then relay the tool result. For a 3D prop call generate_image (or image_to_3d to continue from an existing image); for image-only requests use generate_image; never refuse an image-only request.
@@ -300,7 +305,8 @@ function callBlender(code) {
 
 // ─── Tool implementations ─────────────────────────────────────────────────────
 
-const STAGING_BASE = path.join(__dirname, 'staging');
+let STAGING_BASE = path.join(__dirname, 'staging');
+function _setStagingBase(p) { STAGING_BASE = p || path.join(__dirname, 'staging'); }   // test seam (M9): staging writes of the remesh tests go to a temp dir
 
 // ─── Conductor advance result → status string ─────────────────────────────────
 // Factual, no "ASK the user" wording. Called by toolGenerateImage / toolImageTo3d.
@@ -444,7 +450,7 @@ async function toolUnrealRun(input, _state, cfg) {
 
 // Carry a brush from the library into Unreal in one call. The heavy lifting (GLB cache, scene
 // import, material verification) lives in brush-to-unreal.js — this is only the tool seam.
-async function toolBrushToUnreal(input, _state, cfg) {
+async function toolBrushToUnreal(input, _state, cfg, opts) {
   const name = input && input.name;
   if (!name) return 'ERROR: name required';
   try {
@@ -453,6 +459,7 @@ async function toolBrushToUnreal(input, _state, cfg) {
       unrealPath:    input.unreal_path,
       refresh:       !!input.refresh,
       keepInBlender: !!input.keep_in_blender,
+      beforeBlender: opts && opts.checkpointHook,   // sweep 1c: checkpoint only where Blender is really used (not on a pure cache hit)
       cfg,
     });
     const lines = r.steps.map(s => '  ' + s);
@@ -469,7 +476,7 @@ async function toolBrushToUnreal(input, _state, cfg) {
 
 // The other direction: pull an Unreal asset back into Blender. Mirror of toolBrushToUnreal, and
 // the heavy lifting is in unreal-to-blender.js — this is only the tool seam.
-async function toolUnrealToBlender(input, _state, cfg) {
+async function toolUnrealToBlender(input, _state, cfg, opts) {
   const asset = input && input.asset;
   if (!asset) return 'ERROR: asset required, e.g. "/Game/MHExport/spudermin_Body"';
   try {
@@ -477,6 +484,7 @@ async function toolUnrealToBlender(input, _state, cfg) {
       asset,
       refresh:    !!input.refresh,
       exportOnly: !!input.export_only,
+      beforeBlender: opts && opts.checkpointHook,
       cfg,
     });
     const lines = r.steps.map(s => '  ' + s);
@@ -498,7 +506,7 @@ async function toolUnrealToBlender(input, _state, cfg) {
 
 // Unreal asset -> Blender -> brush library, in one call. Closes the round trip: brush_to_unreal
 // sends geometry out, this turns something that only existed in Unreal into a placeable brush.
-async function toolUnrealToBrush(input, _state, cfg) {
+async function toolUnrealToBrush(input, _state, cfg, opts) {
   const asset = input && input.asset;
   if (!asset) return 'ERROR: asset required, e.g. "/Game/Props/SM_Crate"';
   try {
@@ -510,6 +518,7 @@ async function toolUnrealToBrush(input, _state, cfg) {
       force:         !!input.force,
       refresh:       !!input.refresh,
       keepInBlender: !!input.keep_in_blender,
+      beforeBlender: opts && opts.checkpointHook,
       cfg,
     });
     return `Brush "${r.slug}" saved from ${r.asset}\n` + r.steps.map(s => '  ' + s).join('\n') +
@@ -546,13 +555,13 @@ async function toolCharacterToUnreal(input, _state, cfg) {
 // exactly the missing artefact, so this reuses it rather than inventing a second thumbnail path.
 // On-demand by the user's choice (2026-07-31): the first click on a brush costs one Blender export,
 // every later one is instant.
-async function toolBrushPreview(input, _state, cfg) {
+async function toolBrushPreview(input, _state, cfg, opts) {
   const name = input && input.name;
   if (!name) return 'ERROR: name required';
   try {
-    const r = await ensureBrushGlb({ name, cfg });
+    const r = await ensureBrushGlb({ name, cfg, beforeBlender: opts && opts.checkpointHook });
     return `PREVIEW_READY ${path.relative(__dirname, r.glb).replace(/\\/g, '/')} — ` +
-           `${r.cached ? 'from cache' : 'exported from Blender'} (${r.bytes} bytes)`;
+           `${r.cached ? 'from cache' : 'exported from Blender'} (${r.bytes} bytes)` + (r.notes || []).map(n => '\n' + n).join('');
   } catch (e) {
     return 'BRUSH_PREVIEW_ERROR: ' + (e.message || String(e)) +
            (/not responding|IPC/i.test(e.message || '')
@@ -581,6 +590,8 @@ async function toolInspectUnreal(input, _state, cfg) {
              'they want a visual check.';
     }
 
+    const noVision = visionGuard(cfg);
+    if (noVision) return 'INSPECT_UNREAL_ERROR: ' + noVision + '\nNothing was looked at. Do not describe the level.';
     const r = await unrealVision.captureUnreal({
       cfg,
       mode:   (input && input.mode)   || prefs.visionMode,
@@ -594,7 +605,7 @@ async function toolInspectUnreal(input, _state, cfg) {
     // standing in a scene that holds a capacitor and a tree trunk (live, 2026-07-31). A path is
     // not evidence; somebody has to LOOK. So the image goes through the vision seat, exactly like
     // inspect_render does for Blender, and what comes back is a VERDICT.
-    const model = visionModel(cfg);   // own seat — the judge is not the orchestrator
+    // The judge is the vision seat, not the orchestrator — askVisionSeat resolves it from cfg.
 
     // Hand the judge the level's actual contents. Without it, it can only describe shapes — it
     // called an oak trunk "a canopy/shelter structure" and a capacitor "a translucent canister"
@@ -621,7 +632,7 @@ async function toolInspectUnreal(input, _state, cfg) {
         'misplaced. Only describe what you can SEE. If the image is empty or shows nothing but ' +
         'ground and sky, say exactly that.') + inventory;
 
-    const verdict = await renderCheck.askVision(claudeCli, model, r.file, question);
+    const verdict = await renderCheck.askVisionSeat(cfg, r.file, question, { claudeCli });
 
     const caveat = r.mode === 'camera'
       ? '\n\n(camera route — no viewport post-processing, so emissive materials do not glow here; ' +
@@ -634,11 +645,13 @@ async function toolInspectUnreal(input, _state, cfg) {
   }
 }
 
-async function toolBlenderRun(input, _state, _cfg) {
+// Shared by the real tool and the M2.1 benchmark (which passes its own isolated callBlender):
+// identical result formatting, so a benchmark turn sees exactly what a live turn would.
+async function blenderRunWith(input, call) {
   const code = input.code;
   if (!code) return 'ERROR: no code provided';
   try {
-    const result = await callBlender(code);
+    const result = await call(code);
     // Blender MCP returns print() output in result.stdout (not result.output)
     const out = (result.stdout || result.output || '').trim();
     if (result.status === 'error') {
@@ -654,16 +667,22 @@ async function toolBlenderRun(input, _state, _cfg) {
   }
 }
 
-async function toolImportAsset(input, state, cfg) {
+async function toolBlenderRun(input, _state, _cfg) {
+  return blenderRunWith(input, callBlender);
+}
+
+async function toolImportAsset(input, state, cfg, opts) {
   const ctx = {
     stage:   'mesh',
     glb:     input.name || input.path || '',
     cleanup: input.cleanup,
   };
+  // M5: runTurn already took the checkpoint for this tool call — runImportStage must not take a second one.
+  if (opts && opts.checkpointed) ctx.checkpointed = true;
 
-  const r = await pipeline.runImportStage(ctx);
+  const r = await pipeline.runImportStage(ctx, { cfg, turn: state && state.turnSeq });
   if (!r.ok) return `ERROR: ${r.error}`;
-  return `Imported: ${r.artifact} — asset is now in the Blender scene.`;
+  return `Imported: ${r.artifact} — asset is now in the Blender scene.` + (r.quadsRestored ? ` — quads restored: ${r.quadsRestored.quads} quads, ${r.quadsRestored.tris} tris` : '') + (r.checkpointWarning ? '\n' + r.checkpointWarning : '');
 }
 
 async function toolGenerateProp(input, state, cfg) {
@@ -816,9 +835,15 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
       if (meshGateOff && ctx.glb) {
         await lock.acquire();
         try {
-          const imp = await pipeline.runImportStage(ctx);   // single Blender-socket op, now serialized
-          if (!imp.ok) throw new Error(imp.error);
-          status = 'Generated image + mesh and imported "' + imp.artifact + '" into the scene.';
+          const rs = opts && opts.runState && opts.runState.stopped;
+          if (rs) {
+            // The Auto run that started this job was stopped by the brake: leave the mesh staged (as with the mesh gate on).
+            status = 'Mesh staged, not imported — the Auto run was stopped (' + rs.reason + ').';
+          } else {
+            const imp = await pipeline.runImportStage(ctx, { cfg, turn: state && state.turnSeq });   // single Blender-socket op, now serialized
+            if (!imp.ok) throw new Error(imp.error);
+            status = 'Generated image + mesh and imported "' + imp.artifact + '" into the scene.' + (imp.checkpointWarning ? '\n' + imp.checkpointWarning : '');
+          }
         } finally {
           lock.release();
         }
@@ -924,9 +949,15 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
       if (meshGateOff && ctx.glb) {
         await lock.acquire();
         try {
-          const imp = await pipeline.runImportStage(ctx);   // single Blender-socket op, now serialized
-          if (!imp.ok) throw new Error(imp.error);
-          status = 'Generated image + mesh and imported "' + imp.artifact + '" into the scene.';
+          const rs = opts && opts.runState && opts.runState.stopped;
+          if (rs) {
+            // The Auto run that started this job was stopped by the brake: leave the mesh staged (as with the mesh gate on).
+            status = 'Mesh staged, not imported — the Auto run was stopped (' + rs.reason + ').';
+          } else {
+            const imp = await pipeline.runImportStage(ctx, { cfg, turn: state && state.turnSeq });   // single Blender-socket op, now serialized
+            if (!imp.ok) throw new Error(imp.error);
+            status = 'Generated image + mesh and imported "' + imp.artifact + '" into the scene.' + (imp.checkpointWarning ? '\n' + imp.checkpointWarning : '');
+          }
         } finally {
           lock.release();
         }
@@ -951,6 +982,9 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
   if (!state.staged) state.staged = [];
   const glbName = path.basename(ctx.glb);
   if (!state.staged.includes(glbName)) state.staged.push(glbName);
+
+  // M6.1: the MCP route already took the M5 checkpoint for this call (forceCheckpoint) — the import must not take a second one.
+  if (opts && opts.checkpointed) ctx.checkpointed = true;
 
   // Advance — checks gates.mesh; auto-runs import if gate is off
   const adv = await pipeline.advance(ctx, cfg);
@@ -1096,6 +1130,36 @@ async function toolRenameBrush(input) {
   } catch (e) { return 'ERROR: ' + e.message; }
 }
 
+// M10: triangle count of a staged GLB from its JSON chunk alone (no Blender, no binary chunk read). Only files listStagedFiles() knows are
+// reachable, so a traversal name never resolves. -> { ok:true, tris } | { ok:false, error }
+function assetFaces(category, name) {
+  let fd = null;
+  try {
+    if (typeof category !== 'string' || typeof name !== 'string' || !name.toLowerCase().endsWith('.glb')) return { ok: false, error: 'invalid asset' };
+    const hit = listStagedFiles().find(f => f.category === category && f.name === name);
+    if (!hit) return { ok: false, error: 'asset not found' };
+    fd = fs.openSync(hit.path, 'r');
+    const head = Buffer.alloc(20);
+    if (fs.readSync(fd, head, 0, 20, 0) < 20 || head.toString('latin1', 0, 4) !== 'glTF' || head.toString('latin1', 16, 20) !== 'JSON') return { ok: false, error: 'not a GLB' };
+    const len = head.readUInt32LE(12);
+    if (len < 2 || len > 8 * 1024 * 1024) return { ok: false, error: 'not a GLB' };   // sweep 3 I: a real JSON chunk is far smaller than 8 MB
+    const buf = Buffer.alloc(len);
+    if (fs.readSync(fd, buf, 0, len, 20) < len) return { ok: false, error: 'not a GLB' };
+    const j = JSON.parse(buf.toString('utf8'));
+    const acc = Array.isArray(j.accessors) ? j.accessors : [];
+    let idx = 0;
+    for (const m of (Array.isArray(j.meshes) ? j.meshes : [])) for (const p of (m.primitives || [])) {
+      if (p.mode !== undefined && p.mode !== 4) continue;
+      const ai = p.indices !== undefined ? p.indices : (p.attributes && p.attributes.POSITION);
+      const c = acc[ai] && acc[ai].count;
+      if (Number.isSafeInteger(c) && c >= 0) idx += Math.floor(c / 3);
+    }
+    if (!Number.isSafeInteger(idx)) return { ok: false, error: 'unreadable' };
+    return { ok: true, tris: idx };
+  } catch (e) { return { ok: false, error: 'unreadable' }; }
+  finally { if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} } }
+}
+
 async function toolDeleteAsset(input) {
   const { category, name } = input || {};
   const CATS = Object.keys(palette.loadPalette().categories);
@@ -1110,6 +1174,177 @@ async function toolDeleteAsset(input) {
     if (labels.assets) { delete labels.assets[category + '/' + safe]; saveLibraryLabels(labels); }
     return 'Deleted ' + category + '/' + safe;
   } catch (e) { return 'ERROR: ' + e.message; }
+}
+
+// ─── remesh_asset (v1.9 M9) — Meshy remesh, paid cloud, opt-in ────────────────────────────────────────────────────────
+// Consent is code, not a prompt: Settings opt-in (cfg.remesh.enabled), a stored key, and never a chat turn in Ask mode.
+// Holds no GPU and no Blender lock; ONE remesh at a time (own flag, set before the first await).
+let remeshInFlight = false;
+// F1: a create that timed out / lost its connection after sending may have been charged. For 15 min nothing but the Library button may
+// retry THAT asset (a model / agent retrying would pay twice). The listener (server.js) shows the warning to the UI directly.
+const MAYBE_CHARGED_MS = 15 * 60 * 1000;
+// Sweep 3b: the paid-task records and the maybe-charged blocks live in remesh-store.js (session/remesh-tasks.json): they survive a restart.
+//   block: asset path -> time (the 15-minute retry block).  task: sha256(uploaded bytes)+params -> { taskId } for a Meshy task that exists but whose GLB is
+//   not yet written to staging. An identical remesh RECONCILES that task (GET status -> download / keep polling / clear) and never creates a second one.
+const remeshStore = require('./remesh-store');
+const crypto = require('crypto');
+const remeshEvents = new (require('events').EventEmitter)();
+function remeshBusy() { return remeshInFlight; }
+// M10: the running job, for the asset badge — {asset:'<category>/<name>', progress} or null (never the key).
+let remeshJob = null;
+function remeshStatus() { return remeshJob ? { running: true, asset: remeshJob.asset, progress: remeshJob.progress } : { running: false }; }
+const remeshTag = (n) => (n >= 1000 ? +(n / 1000).toFixed(1) : +(n / 1000).toFixed(3)) + 'k';
+async function toolRemeshAsset(input, _state, cfg, opts) {
+  opts = opts || {};
+  const rc = (cfg && cfg.remesh && typeof cfg.remesh === 'object') ? cfg.remesh : {};
+  if (rc.enabled !== true) return 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Connections';
+  const secrets = require('./providers/secrets');
+  const key = secrets.getKey('meshy');
+  if (!key) return 'REJECTED: no Meshy API key — add it in Settings → Connections';
+  // D1 (Amendment 1): default-deny. Allowed: (a) the Library button (/action passes its own marker uiButton:true), (b) MCP (/mcp/call: mode:'auto',
+  // runState without a mode), (c) a chat turn only when runTurn's resolved runState.mode === 'auto'. `background` plays NO role (/chat sets it too).
+  const rsMode = opts.runState && opts.runState.mode;
+  const allowed = opts.uiButton === true || rsMode === 'auto' || (opts.mode === 'auto' && rsMode === undefined);
+  if (!allowed) return "REJECTED: remesh runs in Auto or from the Library's Remesh button (it uploads the mesh and spends credits).";
+  if (remeshInFlight) return 'BUSY: a remesh is already running';
+  remeshInFlight = true;
+  let doneAsset = null;
+  try {
+    input = input || {};
+    let name = typeof input.name === 'string' ? input.name.trim() : '';
+    let category = typeof input.category === 'string' ? input.category.trim() : '';
+    if (!name) return 'ERROR: name required (a staged .glb from list_assets)';
+    if (!category && name.includes('/')) { const i = name.indexOf('/'); category = name.slice(0, i); name = name.slice(i + 1); }
+    const hits = listStagedFiles().filter(f => f.name === name && (!category || f.category === category));
+    if (!hits.length) return 'ERROR: staged file not found: ' + (category ? category + '/' : '') + name;
+    if (hits.length > 1) return 'ERROR: ' + name + ' exists in several categories (' + hits.map(h => h.category).join(', ') + ') — pass category';
+    const src = hits[0];
+    const topology = input.topology === undefined || input.topology === null ? (rc.topology || 'quad') : input.topology;
+    const target = input.target_polycount === undefined || input.target_polycount === null ? (rc.targetPolycount === undefined ? 20000 : rc.targetPolycount) : input.target_polycount;
+    // Sweep 3e: the file is read ONCE; the key is the sha-256 of exactly these bytes + the parameters, and the SAME buffer is what gets uploaded - hash and upload
+    // can never describe different content. Not hashable (unreadable) = refused BEFORE anything is sent. A file over the upload limit gets no key; the remesh refuses it
+    // by size before any request.
+    let resumeKey = null, fileBytes;
+    const limitMB = Number.isFinite(rc.maxUploadMB) && rc.maxUploadMB > 0 ? rc.maxUploadMB : 60;
+    try {
+      const st0 = fs.statSync(src.path);
+      if (!st0.isFile()) return 'ERROR: ' + src.name + ' is not a file — nothing was sent';
+      if (st0.size > limitMB * 1048576) {
+        const mb = st0.size / 1048576;
+        return 'ERROR: ' + src.name + ' is ' + Number(mb.toFixed(mb < 1 ? 3 : 1)) + ' MB — larger than the remesh upload limit (' + limitMB + ' MB, Settings → Connections)';
+      }
+      fileBytes = fs.readFileSync(src.path);
+      resumeKey = crypto.createHash('sha256').update(fileBytes).digest('hex') + '|' + String(topology) + '|' + String(target);
+    } catch (e) { return 'ERROR: could not read ' + src.name + ' to prepare the remesh (' + ((e && e.message) || e) + ') — nothing was sent'; }
+    // Sweep 3f: no key + buffer = no request. The tool never lets the provider read the path itself.
+    if (!resumeKey || !Buffer.isBuffer(fileBytes)) return 'ERROR: could not prepare ' + src.name + ' for the remesh — nothing was sent';
+    const resume = resumeKey ? remeshStore.getTask(resumeKey) : null;
+    // an unreadable store file is NOT an empty store: no NEW paid submission until it is fixed (resuming a known task is still fine)
+    if (!resume && remeshStore.health().unreadable) return 'ERROR: remesh-tasks.json (the record of paid Meshy tasks, in Phoenix\'s session folder) is unreadable — fix it, or delete it after checking your Meshy dashboard (Tasks) for unfinished remeshes, then try again (it may also just be locked by another program for a moment). Nothing was sent.';
+    // Sweep 3c: when a record could not be written to disk (file locked / disk full) the in-process mirror still protects THIS session, but a restart
+    // would lose it - so every error says so and names the Meshy task to check on the dashboard.
+    let persistFailId = null, intentUnsaved = false;
+    const warn = () => (persistFailId ? ' — the paid-task record could not be saved (Meshy task ' + persistFailId + '): check your Meshy dashboard before retrying, and do not restart Phoenix before this remesh is finished' : '');
+    // Sweep 3e: an UNRESOLVED submission intent (a create that was or may have been sent: timeout, 5xx, Phoenix died mid-POST) for this very content blocks automatic
+    // resubmission. Chat / MCP never override it. The Library button may, but only after the 15-minute hold and with a warning in the result.
+    let overrideNote = '', prevIntentAt = null;
+    if (!resume && resumeKey) {
+      const intentAt = remeshStore.getIntent(resumeKey);
+      if (intentAt !== null) {
+        const ageMin = (Date.now() - intentAt) / 60000, holdMin = remeshStore.HOLD_MS / 60000;
+        if (opts.uiButton !== true) return "REJECTED: the last remesh of " + src.name + " may have been created and charged — check your Meshy dashboard (Tasks); retry from the Library's Remesh button.";
+        if (ageMin < holdMin) return 'REJECTED: the last remesh of ' + src.name + ' may have been created and charged ' + Math.max(1, Math.round(ageMin)) + ' min ago — check your Meshy dashboard (Tasks) first; the Library button can retry after ' + holdMin + ' minutes.';
+        overrideNote = ' ⚠ The earlier attempt for this mesh was never confirmed and may have been charged — check your Meshy dashboard (Tasks) for a duplicate.';
+        prevIntentAt = intentAt;   // kept (original timestamp) unless THIS attempt succeeds or reconciles it
+        // shown when the override STARTS, and appended to every result of this attempt
+        try { remeshEvents.emit('maybe-charged', 'Retrying ' + src.name + ' after an unconfirmed earlier attempt.' + overrideNote); } catch (_) { /* a listener must never break the tool */ }
+      }
+    }
+    const fin = (text) => text + overrideNote;
+    // a failure that proves NOTHING was sent / charged resolves the intent THIS attempt wrote - but an earlier unresolved one (a Library override) is put back with its original time
+    const clearOwnIntent = () => { if (!resumeKey) return; if (prevIntentAt !== null) remeshStore.setIntent(resumeKey, prevIntentAt); else remeshStore.delIntent(resumeKey); };
+    const meshy = require('./providers/meshy');
+    remeshJob = { asset: src.category + '/' + src.name, progress: 0 };
+    doneAsset = remeshJob.asset;
+    let lastPct = 0;
+    try { remeshEvents.emit('progress', { asset: remeshJob.asset, pct: 0 }); } catch (_) { /* a listener must never break the tool */ }   // M10 R2: every start path (Library, chat/Auto, MCP) shows the % on the tile
+    if (typeof opts.onStart === 'function') { try { opts.onStart(remeshJob.asset); } catch (_) { /* a listener must never break the tool */ } }
+    const meshyOpts = {
+      topology, targetPolycount: target, key, baseUrl: rc.meshyBase, maxUploadMB: rc.maxUploadMB,
+      pollMs: rc.pollMs, timeoutMs: rc.timeoutMs, createTimeoutMs: rc.createTimeoutMs, requestTimeoutMs: rc.requestTimeoutMs, maxDownloadBytes: rc.maxDownloadBytes, downloadStallMs: rc.downloadStallMs, downloadTimeoutMs: rc.downloadTimeoutMs,   // test seams (config-file only; the Settings route never accepts them)
+      resumeTaskId: resume ? resume.taskId : undefined,
+      bytes: fileBytes, requireBytes: true,
+      // persisted right before the create POST leaves (so a crash mid-POST leaves a trace). FAIL CLOSED (3f): if the intent did not reach the disk (or no room), NO request is made
+      beforeCreate: () => { let ok = false; try { ok = !!resumeKey && remeshStore.setIntent(resumeKey, Date.now()) === true; } catch (_) { ok = false; } if (!ok) intentUnsaved = true; return ok; },
+      // recorded the moment the create succeeded (replacing the intent): from here on the task is paid work that must stay recoverable until its GLB is staged
+      onCreated: (id) => { if (resumeKey && remeshStore.taskReplacesIntent(resumeKey, { taskId: id, at: Date.now() }) === false) persistFailId = id; },
+      onProgress: (p) => {
+        const q = Math.round(Number(p) || 0);
+        if (remeshJob) remeshJob.progress = q;
+        if (q !== lastPct && remeshJob) { lastPct = q; try { remeshEvents.emit('progress', { asset: remeshJob.asset, pct: q }); } catch (_) { /* a listener must never break the tool */ } }
+        if (typeof opts.onProgress === 'function') opts.onProgress(p);
+      }, signal: opts.signal,
+    };
+    fileBytes = null;   // sweep 3f: our own reference is dropped once the buffer is handed over (the provider drops its reference right after the POST)
+    const r = await meshy.remesh(src.path, meshyOpts);
+    if (!r.ok) {
+      // the store could not secure the submission: nothing was sent
+      if (r.code === 'refused') {
+        clearOwnIntent();
+        return fin('ERROR: could not record the submission — nothing was sent. Phoenix\'s safety record (session/remesh-tasks.json) could not be written or is full; fix that (or wait a moment if another program holds the file) and try again.');
+      }
+      // Meshy itself ended the task (FAILED / CANCELED / gone): nothing is recoverable or pending any more
+      if (r.terminal && resumeKey) remeshStore.delTask(resumeKey);
+      // a failure that proves nothing was sent / charged (refused request, connect error, cancelled before sending) resolves the intent; a timeout / 5xx / lost answer keeps it
+      if (!r.taskId && r.code !== 'create_timeout' && resumeKey && !resume) clearOwnIntent();
+      // the task finished and is paid, only the download failed: the record (written at create time) stays; the next identical remesh downloads it again
+      if (r.downloadable && r.taskId) {
+        return 'ERROR: ' + r.error + ' — the remesh itself finished and is already paid; press Remesh again to download it again (no second charge).' + warn() + overrideNote;
+      }
+      if (r.taskId && !r.terminal) {
+        if (r.cancelConfirmed === true) { if (resumeKey) remeshStore.delTask(resumeKey); }   // Meshy confirmed the cancel: nothing is pending
+        else {
+          // the cancel was NOT confirmed: the task may still run and be charged. Keep the task id - an identical retry reconciles THAT task
+          const msg = r.error + ' — Meshy did not confirm the cancel, so the task may still be charged. Pressing Remesh again with the same settings checks THAT task (no second charge).' + warn();
+          try { remeshEvents.emit('maybe-charged', msg); } catch (_) { /* a listener must never break the tool */ }
+          return 'ERROR: ' + msg + overrideNote;
+        }
+      }
+      if (r.code === 'create_timeout') {
+        // the intent written before the POST stays: it is the hold. (If even that could not be written, only this session is protected - say so.)
+        try { remeshEvents.emit('maybe-charged', r.error); } catch (_) { /* a listener must never break the tool */ }
+        return 'ERROR: ' + r.error + warn() + overrideNote;
+      }
+      return 'ERROR: ' + r.error + warn() + overrideNote;
+    }
+    const stem = src.name.replace(/[.]glb$/i, '');
+    const tag = '_meshy_' + (topology === 'triangle' ? 'tri' : 'quad') + remeshTag(target);
+    const dir = path.dirname(src.path);
+    let outName = stem + tag + '.glb';
+    for (let n = 2; ; n++) {
+      try { fs.writeFileSync(path.join(dir, outName), r.glb, { flag: 'wx' }); break; }
+      catch (e) {
+        if (e && e.code === 'EEXIST' && n < 1000) { outName = stem + tag + '_' + n + '.glb'; continue; }
+        // the task is paid and its record stays: pressing Remesh again downloads it again once the disk problem is fixed
+        return 'ERROR: could not write ' + outName + ': ' + ((e && e.message) || e) + ' — the remesh itself finished and is already paid; fix this and press Remesh again (no second charge).' + warn() + overrideNote;
+      }
+    }
+    if (resumeKey) remeshStore.delTask(resumeKey);   // only now - the GLB is staged
+    const secs = Math.round(r.ms / 1000);
+    let text = 'Remeshed ' + src.name + ' → ' + outName + ' (' + (topology === 'triangle' ? 'triangle' : 'quad') + ', ~' + target + ', ' +
+      (r.credits === null ? '? credits' : r.credits + ' credits') + ', ' + secs + ' s). Textures re-baked by Meshy.';
+    const b = await meshy.balance({ key, baseUrl: rc.meshyBase });
+    if (b.ok) text += ' Balance: ' + b.balance + ' credits.';
+    text += ' Not in the scene — import_asset next. Meshy normalises the size — check the scale after import.';
+    return text + overrideNote;
+  } catch (e) {
+    return 'ERROR: ' + ((e && e.message) || e);
+  } finally {
+    remeshInFlight = false;
+    remeshJob = null;
+    // M10 D2: ANY end of a job (ok, error, chat / Auto / MCP / Library start) tells the page to drop the badge + the chat line
+    if (doneAsset) { try { remeshEvents.emit('done', doneAsset); } catch (_) { /* a listener must never break the tool */ } }
+  }
 }
 
 async function toolDeleteBrush(input) {
@@ -1232,7 +1467,7 @@ async function toolSpawnCharacter(input, _state, cfg) {
 // it twice. apply:false stops after generating.
 // The work itself, independent of who asked for it. takeLock says whether THIS function owns the
 // Blender lock for the apply step — the three callers differ, see toolHyMotion below.
-async function runHyMotion(inp, cfg, takeLock) {
+async function runHyMotion(inp, cfg, takeLock, runState, cpHook) {
   // Generation runs in ComfyUI and touches no Blender.
   const gen = await generateMotion(inp, cfg);
   if (gen.error) return 'ERROR: ' + gen.error;
@@ -1245,8 +1480,16 @@ async function runHyMotion(inp, cfg, takeLock) {
   // Applying DOES touch Blender — seconds, not minutes.
   if (takeLock) await lock.acquire();
   try {
+    // M4: an Auto run that was stopped by the brake while this job was generating must not touch the scene afterwards.
+    if (runState && runState.stopped) {
+      return 'Motion generated, not applied — the Auto run was stopped (' + runState.stopped.reason + ').' +
+             ' The clip is kept: ' + gen.file;
+    }
+    // Sweep 1c: the checkpoint is taken HERE, right before Blender is touched (not before the ~4 min generation, which would
+    // make a rewind discard unrelated edits made meanwhile, and would be skipped if Blender was only down at the start).
+    const cpNote = typeof cpHook === 'function' ? await cpHook() : '';
     const applied = await animateHuman({ fbx: gen.file, character: inp.character }, cfg);
-    return made + '\n' + applied;
+    return made + '\n' + applied + (cpNote || '');
   } finally {
     if (takeLock) lock.release();
   }
@@ -1275,7 +1518,7 @@ async function toolHyMotion(input, _state, cfg, opts = {}) {
     const started = jobs.start({ kind: 'motion', label: inp.description || 'text→motion' }, async () => {
       let text;
       try {
-        text = await runHyMotion(inp, cfg, true);
+        text = await runHyMotion(inp, cfg, true, opts.runState, opts.checkpointHook);
       } catch (e) {
         text = 'ERROR: ' + ((e && e.message) || e);
       }
@@ -1289,7 +1532,7 @@ async function toolHyMotion(input, _state, cfg, opts = {}) {
 
   // Fallback covers /action, the CLI, and any /chat caller without onNote: keep the old behaviour,
   // including not re-acquiring a lock the caller already holds.
-  return runHyMotion(inp, cfg, !opts.holdsLock);
+  return runHyMotion(inp, cfg, !opts.holdsLock, opts.runState, opts.checkpointHook);
 }
 
 // inspect_render — render the CURRENT scene and get a vision verdict, so the
@@ -1301,15 +1544,24 @@ async function toolInspectRender(input, _state, cfg) {
   const q = (input && typeof input.question === 'string' && input.question.trim())
     ? input.question.trim() : undefined;
   const outAbs = path.join(__dirname, 'output', 'render-check.png');
-  const model = visionModel(cfg);   // own seat — the judge is not the orchestrator
+  const noVision = visionGuard(cfg);
+  if (noVision) return 'inspect_render could not complete: ' + noVision;
   try {
-    const r = await renderCheck.checkRender({ blenderIpc, claudeCli }, { outAbs, model, question: q, cfg });
+    const r = await renderCheck.checkRender({ blenderIpc, claudeCli }, { outAbs, question: q, cfg });
     return r.verdict + '\n\n(frame ' + r.frame + ')  → output/render-check.png';
   } catch (e) {
+    // M6.1 Part E: the render itself worked and only the vision call failed → say so (the Blender hint would send the user
+    // to the wrong place). The text deliberately does NOT start with "inspect_render could not complete": the render exists,
+    // so this is neither a failure nor "no evidence" — the caller still has the image, just no verdict.
+    if (e && e.visionFailed) {
+      return INSPECT_VISION_DOWN + ': ' + (e.message || String(e)) + ' — check the vision seat in Settings' +
+        '\n\n(frame ' + e.frame + ')  → output/render-check.png';
+    }
     return 'inspect_render could not complete: ' + (e.message || String(e)) +
       ' — is Blender open with the Phoenix IPC addon enabled?';
   }
 }
+const INSPECT_VISION_DOWN = 'rendered, but the vision model could not look';
 
 // ── i2i / Edit-Tab (v1.8) ─────────────────────────────────────────────────────
 // Run one image-to-image edit through the i2i engine (Qwen-Image-Edit on the Bild instance for
@@ -1382,6 +1634,7 @@ const TOOLS = {
   use_brush:      toolUseBrush,
   apply_material: toolApplyMaterial,
   rename_asset:   toolRenameAsset,
+  remesh_asset:   toolRemeshAsset,
   rename_brush:   toolRenameBrush,
   delete_asset:   toolDeleteAsset,
   delete_brush:   toolDeleteBrush,
@@ -1392,31 +1645,17 @@ const TOOLS = {
 
 // ─── Claude CLI call ──────────────────────────────────────────────────────────
 
-function callClaude(messages, cfg, extraSystem) {
-  const contextLines = [];
-  for (const m of messages.slice(0, -1)) {
-    const tag = m.role === 'user' ? 'Human' : 'Assistant';
-    contextLines.push(`${tag}: ${m.content}`);
-  }
-  const lastUser = messages[messages.length - 1].content;
-
-  const contextBlock = contextLines.length
-    ? `<conversation_history>\n${contextLines.join('\n\n')}\n</conversation_history>\n\n`
-    : '';
-
-  const userMsg = contextBlock + lastUser;
-  const model = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.model) || 'claude-sonnet-4-6';
+function callClaude(messages, cfg, extraSystem, complete) {
   // buildSystemPrompt(), not the startup snapshot — picks up palette categories added since boot
   const base = buildSystemPrompt();
   const systemPrompt = extraSystem ? (base + '\n\n' + extraSystem) : base;
-
-  const _t = Date.now();
-  // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
-  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'], timeout: 300000 })
-    .then(result => {
-      dbg.llm('orchestrator', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
-      return result;
-    });
+  // M2.1 injection (benchmark): opts.complete(messages, system) replaces the seat call. Absent = today's path.
+  if (typeof complete === 'function') {
+    return Promise.resolve(complete(messages, systemPrompt)).then(r => (r && typeof r === 'object') ? String(r.text || '') : String(r == null ? '' : r));
+  }
+  // Seat → provider (Claude CLI / local server / OpenAI): see providers/index.js.
+  return providers.complete('orchestrator', cfg, { system: systemPrompt, messages, purpose: 'chat', timeoutMs: 300000 })
+    .then(r => r.text);
 }
 
 // ─── Tool dispatch parser ─────────────────────────────────────────────────────
@@ -1486,6 +1725,21 @@ function parseToolCall(text) {
   }
 }
 
+// Same extraction as parseToolCall, but it REPORTS whether the INPUT parsed (parseToolCall hides a
+// JSON failure behind input:{}). → { found:false } | { found:true, ok, name, input?, why? }.
+// Used by the capability probe (providers/capabilities.js).
+function parseToolCallStrict(text) {
+  const clean = String(text || '').replace(/^```[\w]*\r?\n?/gm, '').replace(/^```\r?$/gm, '');
+  const m = clean.match(/TOOL:\s*(\w+)\s*[\r\n]+INPUT:\s*(\{)/);
+  if (!m) return { found: false, ok: false, why: 'no TOOL block' };
+  const name = m[1].trim();
+  const objStr = extractBalancedObject(clean, m.index + m[0].length - 1);
+  if (!objStr) return { found: true, ok: false, name, why: 'bad INPUT JSON' };
+  try { return { found: true, ok: true, name, input: JSON.parse(objStr) }; } catch (_) {}
+  try { return { found: true, ok: true, name, input: JSON.parse(sanitizeJsonControlChars(objStr)) }; } catch (_) {}
+  return { found: true, ok: false, name, why: 'bad INPUT JSON' };
+}
+
 function stripToolBlock(text) {
   let out = text.replace(/```[\w]*\r?\n?/g, '').replace(/```/g, '');
   // Remove each balanced TOOL…INPUT{ … } block (quote/brace-aware, not a fragile regex).
@@ -1510,7 +1764,7 @@ function stripToolBlock(text) {
 // ⚠ The gate is DELIBERATELY not a tool call. It runs as plain code after the
 // action, so (a) a model that "forgot" to look cannot skip it — the protection
 // is code, not a request — and (b) it does not consume the turn's
-// MAX_TOOL_CALLS budget (3). Cost is one separate claude-CLI call carrying the
+// tool budget (default 3 in Ask, 8 in Auto). Cost is one separate claude-CLI call carrying the
 // image; the picture never enters the orchestrator's own context, only the verdict.
 const VISION_GATE_FOCUSED = [
   'animate_human', 'sequence_animations', 'animate_clip', 'sequence_clips',
@@ -1526,6 +1780,39 @@ const VISION_GATE_FULL = VISION_GATE_FOCUSED.concat([
   'make_human', 'place_human', 'import_asset', 'apply_material', 'blender_run',
 ]);
 
+// v1.9 M6.1: tools that change the open Blender scene but are NOT in VISION_GATE_FULL. execToolStep takes the M5 checkpoint
+// first for them — in a CHAT turn (label <tool>) and over MCP (POST /mcp/call also sets toolOpts.forceCheckpoint; label
+// mcp_<tool>), so both doors cover the same tools. The render-vision gate is NOT widened by this list. The one place this
+// list lives (server.js imports it).
+//   hy_motion: ends in the scene (applied animation) · brush_to_unreal / unreal_to_blender / unreal_to_brush /
+//   character_to_unreal: each may add, remove or unhide objects in the open scene · brush_preview: places the brush into
+//   the scene to export it (a failed export leaves the objects there).
+//   image_to_3d is deliberately NOT here (Amendment 2 B4): pipeline.runImportStage takes the checkpoint right before the
+//   import, as in chat — a checkpoint before the minutes-long mesh stage would be taken too early and for nothing when a
+//   mesh gate stops the run.
+// B1: a FORCED checkpoint (only this path, never the VISION_GATE_FULL path) pings Blender first (<= 3 s); no answer = nothing
+// in Blender to lose = skip silently. hy_motion apply:false and unreal_to_blender export_only:true never touch the scene.
+const MCP_FORCE_CHECKPOINT = [
+  'hy_motion', 'brush_preview',
+  'brush_to_unreal', 'unreal_to_blender', 'unreal_to_brush', 'character_to_unreal',
+];
+
+// Sweep 1c: the forced-checkpoint tools whose Blender work can start late or not at all — they take their checkpoint themselves via
+// opts.checkpointHook (see execToolStep). character_to_unreal is NOT here: its first action is the Blender export.
+const DEFERRED_FORCED = ['hy_motion', 'brush_preview', 'brush_to_unreal', 'unreal_to_blender', 'unreal_to_brush'];
+
+// One forced checkpoint (B1: ping Blender first, <= 3 s; no answer = nothing to lose = skip with ONE neutral line). Returns the line to
+// append to the tool result, or ''. Respects checkpoints.enabled. ctx = { label, turn, history }.
+async function takeForcedCheckpoint(name, cfg, ctx) {
+  if (!checkpoints.settings(cfg).enabled) return '';
+  let alive = true;
+  try { alive = (await blenderIpc.probeBlender(cfg, 3000)) === 'reachable'; } catch (_) { alive = false; }
+  if (!alive) return '\n(no checkpoint — Blender did not answer within 3 s)';
+  const cp = await checkpoints.take(ctx.label || name, { cfg, turn: ctx.turn, history: ctx.history });
+  if (cp && cp.ok === false) return '\n⚠ checkpoint failed before ' + name + ': ' + cp.error + ' — this step cannot be rewound.';
+  return '';
+}
+
 // Ein Werkzeug meldet Misserfolg (oder "faengt gerade erst an") in mehr Formen als ein
 // blosses "ERROR". Wer hier eine Form vergisst, laesst den Gate eine Szene beurteilen,
 // die die Aktion nie angefasst hat — und verkauft das Ergebnis als Beweis.
@@ -1539,6 +1826,16 @@ function toolResultIsNoEvidence(result) {
       || result.startsWith('🚀');
 }
 
+// MCP (v1.9 M6): did the tool FAIL? The same failure shapes as toolResultIsNoEvidence (a "🚀 Started …" is not a failure)
+// plus BUSY (generate_prop while a job runs). The server returns it as `failed`; the MCP client turns it into isError.
+function toolResultFailed(result) {
+  if (typeof result !== 'string') return false;
+  // Sweep 2 G7: every tool-specific <NAME>_ERROR prefix counts (UNREAL_ERROR, BRUSH_PREVIEW_ERROR, BRUSH_TO_UNREAL_ERROR, UNREAL_TO_BLENDER_ERROR,
+  // UNREAL_TO_BRUSH_ERROR, CHARACTER_TO_UNREAL_ERROR, INSPECT_UNREAL_ERROR, PYTHON_ERROR, BLENDER_ERROR …), not just a hand-kept list
+  return /^(([A-Z][A-Z0-9]*_)*ERROR\b|REJECTED|BUSY|Pipeline failed|inspect_render could not complete)/.test(result)
+      || result.startsWith('⚠️');
+}
+
 // Which model actually LOOKS at the render. This is a JUDGE, not an orchestrator —
 // it is the only thing in Phoenix that can contradict a "fixed ✓" claim. It therefore
 // gets its OWN seat: before this, render_check took cfg.seats.orchestrator.model, so
@@ -1546,10 +1843,13 @@ function toolResultIsNoEvidence(result) {
 // 2026-07-25 while wiring the gate). Falls back to the orchestrator only when no vision
 // seat is configured, so an old config keeps working unchanged.
 function visionModel(cfg) {
-  const seats = (cfg && cfg.seats) || {};
-  return (seats.vision && seats.vision.model)
-      || (seats.orchestrator && seats.orchestrator.model)
-      || 'claude-opus-4-8';
+  return providers.resolveSeat('vision', cfg).model;
+}
+
+// Why the vision seat cannot judge right now (message to report instead of calling it), else null (v1.9 M3):
+// Claude → fine · ChatGPT plan → no image path · local/OpenAI → only after its vision test passed.
+function visionGuard(cfg) {
+  return renderCheck.visionSeatProblem(cfg);
 }
 
 let _visionModeWarned = false;
@@ -1575,33 +1875,294 @@ function visionGateFires(cfg, toolName) {
 
 // ─── Agentic turn ─────────────────────────────────────────────────────────────
 
+const TOOL_RESULT_NUDGE = "If this answers the user's question, reply in plain text now. Only emit another TOOL block if a follow-up action is strictly required.";
+
+// Capability gate (v1.9 M2): a seat whose tool test FAILED must not run. No stored result (null =
+// untested, e.g. a v1.8.1 config) runs as before. → null | { fail:true, forced:bool }
+function seatToolFailure(seatName, cfg) {
+  try {
+    const seat = providers.resolveSeat(seatName, cfg);
+    const caps = capabilities.getCaps(seat);
+    if (caps && caps.tools === 'fail') return { fail: true, forced: !!caps.forced };
+    // M2.1: a LOCAL orchestrator that passed the format test but failed the competence benchmark must not run
+    // either (an unavailable / never-run benchmark is not a failure). Cloud and CLI seats are only graded.
+    if (seatName === 'orchestrator' && caps && seat.provider === 'openai-compat' && seat.kind === 'local') {
+      const v = require('./bench/bench').benchVerdict(caps.bench);   // old-shape / unavailable / never run = not a failure here
+      if (v.state === 'fail') return { fail: true, forced: false, bench: v };
+    }
+    return null;
+  } catch (_) { return null; }
+}
+
+// ─── Run mode (v1.9 M4: Ask / Auto) ───────────────────────────────────────────
+// One switch per run. Ask = today (the three gates stop and wait, small tool budget). Auto = run to the end:
+// the prompt/image/mesh gates are switched off for THIS run only and the budget is maxToolCallsAuto.
+// Pure: the user's cfg is never mutated — Auto works on a shallow copy, Ask returns cfg itself.
+// ⚠ The render-vision gate (gates.vision) is deliberately left untouched — Auto never switches it off.
+const toolBudgetOf = (v, dflt) => (typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 50) ? v : dflt;
+function runConfig(cfg, mode) {
+  const orch = (cfg && cfg.seats && cfg.seats.orchestrator) || {};
+  const cfgMode = cfg && cfg.gates && cfg.gates.mode;
+  const m = (mode === 'ask' || mode === 'auto') ? mode : ((cfgMode === 'ask' || cfgMode === 'auto') ? cfgMode : 'ask');
+  let cfgRun = cfg, budget;
+  if (m === 'auto') {
+    cfgRun = Object.assign({}, cfg, { gates: Object.assign({}, cfg && cfg.gates, { prompt: false, image: false, mesh: false }) });
+    budget = toolBudgetOf(orch.maxToolCallsAuto, MAX_TOOL_CALLS_AUTO);
+  } else {
+    budget = toolBudgetOf(orch.maxToolCalls, MAX_TOOL_CALLS);
+  }
+  return { cfg: cfgRun, mode: m, budget, visionOff: visionGateMode(cfgRun) === 'off' };
+}
+
+// Clear reading of a render-gate verdict (Amendment 1): markdown stripped, ALL lines searched.
+// any FAIL -> 'fail'; else any PASS -> 'pass'; else 'none'.
+function verdictOf(text) {
+  const t = String(text == null ? '' : text).replace(/[*_`]/g, '');
+  const hits = [...t.matchAll(/VERDICT\s*[:\-–—]?\s*(PASS|FAIL)/gi)].map(m => m[1].toUpperCase());
+  if (hits.includes('FAIL')) return 'fail';
+  return hits.includes('PASS') ? 'pass' : 'none';
+}
+
+// Auto's brake: does this render-gate result mean "the check did not confirm the last step"? -> reason | null.
+// Auto continues ONLY on a clear PASS; UNVERIFIED (prefix), FAIL, no verdict at all, empty -> stop.
+function autoStopReason(verdict) {
+  const v = String(verdict == null ? '' : verdict);
+  if (v.trimStart().startsWith('⚠ UNVERIFIED')) return 'the vision model could not prove it saw the render';
+  const k = verdictOf(v);
+  if (k === 'fail') return 'the check says the result is not correct';
+  if (k === 'none') return 'the check gave no clear verdict';
+  return null;
+}
+
+// The vision gate's question. With the user's request of this turn the judge can also catch "not what was asked"
+// (live test 07.10.: it only got the tool name, so a clearly wrong scene passed). Empty request → the old question.
+function gateQuestion(userInput, toolName) {
+  let req = userInput == null ? '' : String(userInput).replace(/\s+/g, ' ').trim();
+  { const cps = Array.from(req); if (cps.length > 500) req = cps.slice(0, 500).join('') + '…'; }   // by code points: never split a surrogate pair
+  if (!req) {
+    return 'The action just performed was: ' + toolName +
+           '. Does the scene look correct and undamaged after it? Answer with ' +
+           "'VERDICT: PASS' or 'VERDICT: FAIL' on the first line, then one short sentence. FAIL only if something is visibly " +
+           'broken or the action clearly did not happen.';
+  }
+  return 'The user asked: "' + req + '"\nThe step just performed was: ' + toolName + '.\n' +
+         "Answer with 'VERDICT: PASS' or 'VERDICT: FAIL' on the first line, then one short sentence. FAIL if something is " +
+         'visibly broken, if the scene clearly contradicts what the user asked, or if the action clearly did not happen. ' +
+         'A step that is only one part of a longer request is not a FAIL just because the rest is still missing.';
+}
+
+// ─── One tool, executed + checked (shared by runTurn and the MCP route; v1.9 M6 Part A) ───────────────────
+// The two halves of runTurn's per-tool block, moved here unchanged: execToolStep = M5 checkpoint → tool;
+// gateStep = the render-vision gate and the artifact broadcasts. Both read the test seams from toolOpts
+// (toolOpts is runTurn's opts + runState, so complete / tools / noVisionGate / onArtifact are all there).
+async function execToolStep(name, input, fn, { state, cfg, turnNo, history, toolOpts }) {
+  // M5: a scene-changing tool gets a checkpoint of the open Blender file FIRST — before EVERY VISION_GATE_FULL tool, unless
+  // checkpoints.enabled is false or a test seam is set: opts.complete (the benchmark; its headless Blender is throw-away)
+  // or opts.tools (an injected tool map). A wrapper around a listed tool still checkpoints.
+  // A broken checkpoint never blocks the tool; it adds one visible line.
+  const complete = typeof toolOpts.complete === 'function', opts = toolOpts;
+  let callOpts = toolOpts, cpWarn = '';
+  // Under a test seam no checkpoint is taken here — and none may be taken by a nested runImportStage either
+  // (an injected map holding the real import_asset): tell the tool path it is "already checkpointed".
+  // M6.1: the scene-changing tools that are NOT in VISION_GATE_FULL (MCP_FORCE_CHECKPOINT) get the same forced checkpoint
+  // (B1 ping first, skip silently when Blender does not answer) in a chat turn and over MCP (which also sets
+  // toolOpts.forceCheckpoint). Sweep 1b: chat used to skip them.
+  const forcedOnly = !VISION_GATE_FULL.includes(name) && (toolOpts.forceCheckpoint === true || MCP_FORCE_CHECKPOINT.includes(name));
+  const noSceneTouch = forcedOnly && ((name === 'hy_motion' && input && input.apply === false) ||
+                                      (name === 'unreal_to_blender' && input && input.export_only === true));
+  const cpTool = VISION_GATE_FULL.includes(name) || (forcedOnly && !noSceneTouch);
+  if ((complete || opts.tools) && cpTool) callOpts = Object.assign({}, toolOpts, { checkpointed: true });
+  // Sweep 1c — a forced checkpoint is taken right where Blender is actually touched, not at the start of the step. For the tools in
+  // DEFERRED_FORCED the tool receives opts.checkpointHook and calls it immediately before its Blender work (hy_motion: before the apply,
+  // after the ~4 min generation; brush tools: only when Blender really runs, not on a cache hit). The hook is idempotent and returns the
+  // neutral/warning line (or ''), which the tool appends to its result. No second checkpoint is taken here for these.
+  if (!complete && !opts.tools && forcedOnly && cpTool && DEFERRED_FORCED.includes(name)) {
+    if (checkpoints.settings(cfg).enabled) {
+      let hooked = null;
+      callOpts = Object.assign({}, toolOpts, { checkpointed: true, checkpointHook: () => (hooked || (hooked = takeForcedCheckpoint(name, cfg, { label: toolOpts.checkpointLabel || name, turn: turnNo, history }))) });
+    } else callOpts = Object.assign({}, toolOpts, { checkpointed: true });
+  } else if (!complete && !opts.tools && forcedOnly && cpTool && checkpoints.settings(cfg).enabled) {
+    // character_to_unreal: Blender is the first thing it does, so the checkpoint up front IS where Blender is touched.
+    const note = await takeForcedCheckpoint(name, cfg, { label: toolOpts.checkpointLabel || name, turn: turnNo, history });
+    callOpts = Object.assign({}, toolOpts, { checkpointed: true });
+    if (note) cpWarn = note;
+  } else if (!complete && !opts.tools && cpTool && !forcedOnly && checkpoints.settings(cfg).enabled) {
+    const cp = await checkpoints.take(toolOpts.checkpointLabel || name, { cfg, turn: turnNo, history });
+    callOpts = Object.assign({}, toolOpts, { checkpointed: true });   // import_asset → runImportStage: not twice
+    if (cp && cp.ok === false) cpWarn = '\n⚠ checkpoint failed before ' + name + ': ' + cp.error + ' — this step cannot be rewound.';
+  }
+  let toolResult;
+  try {
+    toolResult = await fn(input, state, cfg, callOpts);
+  } catch (e) {
+    toolResult = `ERROR: ${e.message}`;
+  }
+  if (cpWarn) toolResult = (typeof toolResult === 'string' ? toolResult : String(toolResult)) + cpWarn;
+  return toolResult;
+}
+
+async function gateStep(name, toolResult, { cfg, userInput, toolOpts, toolStart }) {
+  const noEvidence = toolResultIsNoEvidence(toolResult);
+  const RENDER_CHECK_REL = 'output/render-check.png';
+  const renderCheckAbs = path.join(__dirname, 'output', 'render-check.png');
+
+  // Zeigt den Render nur, wenn er von DIESEM Aufruf stammt. Ohne die Prüfung wirft
+  // ein fehlgeschlagener Lauf das ALTE Bild in den Image-Tab, als wäre es das neue —
+  // die /action-Route hat diese Wache schon immer, dem Chat-Pfad fehlte sie.
+  const broadcastIfFresh = (since) => {
+    if (typeof toolOpts.onArtifact !== 'function') return;
+    try {
+      if (fs.statSync(renderCheckAbs).mtimeMs >= since - 1000) {
+        // source:'inspect' — a diagnostic render must NOT become the i2i edit reference (F3). Covers
+        // the automatic vision gate too, which shows its render through this same helper.
+        toolOpts.onArtifact({ slot: 'image', source: 'inspect', rel: RENDER_CHECK_REL });
+      }
+    } catch (_) { /* keine Datei = nichts zu zeigen */ }
+  };
+
+  let gateNote = '';
+  let stopReason = null, verdict = null;   // Auto only: the gate did not confirm the step → the run stops after this tool
+  const gateOff = !!toolOpts.noVisionGate;
+  if (!gateOff && !noEvidence && visionGateFires(cfg, name) && visionGuard(cfg)) {
+    gateNote = '\n\nRENDER GATE: could not look at the scene (' + visionGuard(cfg) +
+               '). Do not assume the result is fine — tell the user you could not verify it visually.';
+    stopReason = 'the render check could not look: ' + visionGuard(cfg);
+    verdict = 'none';
+  } else if (!gateOff && !noEvidence && visionGateFires(cfg, name)) {
+    const gateStart = Date.now();
+    dbg.event('progress', { label: 'vision-gate', name, phase: 'start' });
+    try {
+      const r = await renderCheck.checkRender({ blenderIpc, claudeCli }, {
+        outAbs: renderCheckAbs, cfg,
+        // Eigene, KURZE Frist: der Standardwert von render_check ist 600 s, und der
+        // Chat-Turn hält währenddessen das globale Lock — ein hängendes Blender würde
+        // Phoenix sonst minutenlang auf 409-busy nageln. Ein Blick, der zwei Minuten
+        // braucht, ist ohnehin ein gescheiterter Blick.
+        timeoutMs: 120000, visionTimeout: 120000,
+        question: gateQuestion(userInput, name),
+      });
+      gateNote = '\n\nRENDER GATE (automatic — the render was taken FOR you, you did not call it):\n' +
+                 r.verdict + '\n(frame ' + r.frame + ')  → ' + RENDER_CHECK_REL + '\n' +
+                 'This is evidence about the CURRENT scene. Do NOT claim a visual result the render contradicts.';
+      broadcastIfFresh(gateStart);
+      stopReason = autoStopReason(r.verdict);
+      verdict = verdictOf(r.verdict);
+      dbg.event('progress', { label: 'vision-gate', name, phase: 'done' });
+    } catch (e) {
+      gateNote = '\n\nRENDER GATE: could not look at the scene (' + (e.message || String(e)) +
+                 '). Do not assume the result is fine — tell the user you could not verify it visually.';
+      verdict = 'none';
+      stopReason = 'the render check could not look: ' + (e.message || String(e));
+      dbg.event('progress', { label: 'vision-gate', name, phase: 'error' });
+    }
+  }
+  // A model-invoked inspect_render belongs in the Image tab too. The /action route
+  // broadcast it, the chat path never did — which is why the render stayed invisible
+  // even though it had been taken (live-test finding 2026-07-25).
+  if (!noEvidence && name === 'inspect_render') broadcastIfFresh(toolStart);
+  // Same for the Unreal render — a picture nobody sees is a claim, not evidence. Its own file,
+  // so the freshness check cannot pass off a stale Blender render as the Unreal one.
+  if (!noEvidence && name === 'inspect_unreal') {
+    const UNREAL_CHECK_REL = 'output/unreal-check.png';
+    if (typeof toolOpts.onArtifact === 'function') {
+      try {
+        if (fs.statSync(path.join(__dirname, UNREAL_CHECK_REL)).mtimeMs >= toolStart - 1000) {
+          toolOpts.onArtifact({ slot: 'image', source: 'inspect', rel: UNREAL_CHECK_REL });   // not an i2i reference (F3)
+        }
+      } catch (_) { /* vision off or nothing written — nothing to show */ }
+    }
+  }
+  return { gateNote, stopReason, verdict, rendered: verdict !== null };
+}
+
+// v1.9 M6: ONE tool, the way a chat turn runs it (M5 checkpoint → tool → render-vision gate with the request in the
+// question), without the orchestrator LLM. Used by POST /mcp/call with runConfig(cfg, 'auto').cfg. The caller owns the
+// lock. → { result, gateNote, verdict: 'pass'|'fail'|'none'|null (null = no gate ran), stopReason, rendered }
+async function runOneTool(name, input, { state, cfg, turnNo, history, userInput, toolOpts }) {
+  const opts = Object.assign({ runState: { stopped: null } }, toolOpts || {});
+  const toolMap = (opts.tools && typeof opts.tools === 'object') ? opts.tools : TOOLS;
+  const fn = Object.prototype.hasOwnProperty.call(toolMap, name) ? toolMap[name] : undefined;
+  const toolStart = Date.now();
+  dbg.event('progress', { label: 'tool', name, phase: 'start' });
+  dbg.tool(name, 'call', input);
+  const toolResult = fn
+    ? await execToolStep(name, input, fn, { state, cfg, turnNo, history, toolOpts: opts })
+    : `ERROR: unknown tool "${name}"`;
+  dbg.tool(name, 'result', toolResult);
+  if (typeof toolResult === 'string' && (toolResult.startsWith('PYTHON_ERROR') || toolResult.startsWith('ERROR'))) dbg.pyerr(toolResult);
+  dbg.event('progress', { label: 'tool', name, phase: 'done' });
+  const g = await gateStep(name, toolResult, { cfg, userInput, toolOpts: opts, toolStart });
+  let verdict = g.verdict, stopReason = g.stopReason;
+  // A gate that could not PROVE it saw the render (stopReason) must not read as PASS (tester A1): UNVERIFIED is its own state.
+  if (g.stopReason && verdict === 'pass') verdict = 'unverified';
+  // inspect_render IS the render check: its headline is its own verdict, not "not run" (A7).
+  if (name === 'inspect_render' && verdict === null && !toolResultIsNoEvidence(toolResult)) {
+    verdict = verdictOf(toolResult);
+    stopReason = autoStopReason(toolResult);
+    if (/^\s*⚠ UNVERIFIED/.test(String(toolResult))) verdict = 'unverified';
+    // M6.1 Part E: rendered fine, the vision call failed → NO VERDICT with the real reason (not "gave no clear verdict").
+    if (String(toolResult).startsWith(INSPECT_VISION_DOWN)) { verdict = 'none'; stopReason = String(toolResult).split('\n')[0]; }
+  }
+  return { result: toolResult, gateNote: g.gateNote, verdict, stopReason, rendered: g.rendered };
+}
+
 async function runTurn(userInput, history, state, cfg, opts = {}) {
   const blenderOnly = !!opts.blenderOnly;
   const allowedTools = blenderOnly ? BLENDER_ONLY_TOOLS : null;
-  const extraSystem  = blenderOnly ? BLENDER_ONLY_SYSTEM : '';
+  // M2.1 injection seams (benchmark): opts.complete / opts.tools / opts.systemSuffix / opts.noVisionGate.
+  // All absent = exactly the normal path.
+  const extraSystem  = [blenderOnly ? BLENDER_ONLY_SYSTEM : '', opts.systemSuffix || ''].filter(Boolean).join('\n\n');
+  const toolMap      = (opts.tools && typeof opts.tools === 'object') ? opts.tools : TOOLS;
+  const complete     = typeof opts.complete === 'function' ? opts.complete : null;
+  // M4: from here on EVERY use of the config inside the turn is run.cfg (Auto = gates off on a copy). The benchmark
+  // (opts.complete) is always Ask with budget 3 — its scores must not move with a user setting.
+  const run = runConfig(cfg, complete ? 'ask' : opts.mode);
+  const withMode = (o) => Object.assign(o, { mode: run.mode });   // every result reports the mode it ran as
+  run.stopped = null;   // set when an Auto run is stopped by the brake; detached jobs read it (phase C)
+  const toolOpts = Object.assign({}, opts, { runState: run });
+  const toolBudget = complete ? MAX_TOOL_CALLS : run.budget;
+  cfg = run.cfg;
   const historyMessages = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3;
-  const window = history.slice(-historyMessages * 2);
+  // M5: history entries may carry a `turn` field — only role/content ever reach the model.
+  const window = history.slice(-historyMessages * 2).map(m => ({ role: m.role, content: m.content }));
   window.push({ role: 'user', content: userInput });
+  const turnNo = Number((state && state.turnSeq) || 0) || 0;
 
   let toolCalls = 0;
   let messages = [...window];
 
+  // The orchestrator has no override: a failed tool test refuses the turn before any model call.
+  // (An injected complete is not the stored seat — the benchmark is how a candidate earns that seat.)
+  const guard = complete ? null : seatToolFailure('orchestrator', cfg);
+  if (guard) {
+    return withMode({ text: guard.bench
+      ? 'The orchestrator model solved only ' + guard.bench.passed + '/' + guard.bench.total + ' benchmark tasks over ' + guard.bench.runs + ' runs (local models need ' + guard.bench.need + ') — pick another model in Settings.'
+      : 'The orchestrator model failed the tool test — pick another model in Settings.', messages });
+  }
+
+  // Auto + vision gate off: nothing can brake the run, so say so on the reply (only when a tool actually ran).
+  const autoWarn = (text) => (run.mode === 'auto' && run.visionOff && toolCalls > 0)
+    ? withMode({ text: '⚠ Auto ran without render vision — nothing checked the result visually.\n\n' + text, messages, visionOff: true })
+    : withMode({ text, messages });
+
   while (true) {
-    const raw = await callClaude(messages, cfg, extraSystem);
+    const raw = await callClaude(messages, cfg, extraSystem, complete);
     const toolCall = parseToolCall(raw);
 
-    if (!toolCall || toolCalls >= MAX_TOOL_CALLS) {
-      if (toolCalls >= MAX_TOOL_CALLS && toolCall) {
+    if (!toolCall || toolCalls >= toolBudget) {
+      if (toolCalls >= toolBudget && toolCall) {
         // Claude is still in tool-call mode at the limit — force a text response
         messages.push({ role: 'assistant', content: raw });
         messages.push({ role: 'user', content: 'TOOL_LIMIT_REACHED: Reply to the user in plain text now. No more TOOL blocks.' });
-        const finalRaw = await callClaude(messages, cfg, extraSystem);
+        const finalRaw = await callClaude(messages, cfg, extraSystem, complete);
         const text = stripToolBlock(finalRaw).trim();
-        return { text: text || '(reached tool limit — no summary)', messages };
+        // Sweep 2 G6: the summary the user sees is also what the history keeps (otherwise the last assistant message stays the TOOL block)
+        messages.push({ role: 'assistant', content: text || '(reached tool limit — no summary)' });
+        return autoWarn(text || '(reached tool limit — no summary)');
       }
       const text = stripToolBlock(raw).trim();
       messages.push({ role: 'assistant', content: raw });
-      return { text: text || '(no response)', messages };
+      return autoWarn(text || '(no response)');
     }
 
     // Execute tool
@@ -1610,8 +2171,8 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     dbg.event('progress', { label: 'tool', name: toolCall.name, phase: 'start' });
     dbg.tool(toolCall.name, 'call', toolCall.input);
     let toolResult;
-    const fn = TOOLS[toolCall.name];
-    if (toolCall.name === 'i2i_edit') {
+    const fn = Object.prototype.hasOwnProperty.call(toolMap, toolCall.name) ? toolMap[toolCall.name] : undefined;
+    if (toolCall.name === 'i2i_edit' && !opts.tools) {
       // i2i editing is a UI-tab action (Edit · i2i), decided UI-only (Q2, 2026-08-06). From a chat
       // turn it would run 3–4 min holding the /chat lock (freezing the app), and its I2I_TILE marker
       // is only parsed on the /action path — so the tile would never appear and the raw path would
@@ -1621,13 +2182,11 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     } else if (allowedTools && !allowedTools.includes(toolCall.name)) {
       toolResult = `ERROR: tool "${toolCall.name}" is disabled in Blender-only mode. Model the asset directly with blender_run (bpy) instead — do not use generation tools.`;
     } else if (!fn) {
-      toolResult = `ERROR: unknown tool "${toolCall.name}"`;
+      toolResult = opts.tools
+        ? `ERROR: ${toolCall.name} is not available in the benchmark — use blender_run`
+        : `ERROR: unknown tool "${toolCall.name}"`;
     } else {
-      try {
-        toolResult = await fn(toolCall.input, state, cfg, opts);
-      } catch (e) {
-        toolResult = `ERROR: ${e.message}`;
-      }
+      toolResult = await execToolStep(toolCall.name, toolCall.input, fn, { state, cfg, turnNo, history, toolOpts });
     }
     dbg.tool(toolCall.name, 'result', toolResult);
     if (typeof toolResult === 'string' && (toolResult.startsWith('PYTHON_ERROR') || toolResult.startsWith('ERROR'))) dbg.pyerr(toolResult);
@@ -1638,67 +2197,7 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     // claim it worked. Never fires on a failed tool (the scene isn't in the state
     // the action intended, so the render would judge the wrong thing), and a broken
     // gate never kills the turn — it says "could not look" instead of going quiet.
-    const noEvidence = toolResultIsNoEvidence(toolResult);
-    const RENDER_CHECK_REL = 'output/render-check.png';
-    const renderCheckAbs = path.join(__dirname, 'output', 'render-check.png');
-
-    // Zeigt den Render nur, wenn er von DIESEM Aufruf stammt. Ohne die Prüfung wirft
-    // ein fehlgeschlagener Lauf das ALTE Bild in den Image-Tab, als wäre es das neue —
-    // die /action-Route hat diese Wache schon immer, dem Chat-Pfad fehlte sie.
-    const broadcastIfFresh = (since) => {
-      if (typeof opts.onArtifact !== 'function') return;
-      try {
-        if (fs.statSync(renderCheckAbs).mtimeMs >= since - 1000) {
-          // source:'inspect' — a diagnostic render must NOT become the i2i edit reference (F3). Covers
-          // the automatic vision gate too, which shows its render through this same helper.
-          opts.onArtifact({ slot: 'image', source: 'inspect', rel: RENDER_CHECK_REL });
-        }
-      } catch (_) { /* keine Datei = nichts zu zeigen */ }
-    };
-
-    let gateNote = '';
-    if (!noEvidence && visionGateFires(cfg, toolCall.name)) {
-      const gateModel = visionModel(cfg);   // own seat — see visionModel()
-      const gateStart = Date.now();
-      dbg.event('progress', { label: 'vision-gate', name: toolCall.name, phase: 'start' });
-      try {
-        const r = await renderCheck.checkRender({ blenderIpc, claudeCli }, {
-          outAbs: renderCheckAbs, model: gateModel, cfg,
-          // Eigene, KURZE Frist: der Standardwert von render_check ist 600 s, und der
-          // Chat-Turn hält währenddessen das globale Lock — ein hängendes Blender würde
-          // Phoenix sonst minutenlang auf 409-busy nageln. Ein Blick, der zwei Minuten
-          // braucht, ist ohnehin ein gescheiterter Blick.
-          timeoutMs: 120000, visionTimeout: 120000,
-          question: 'The action just performed was: ' + toolCall.name +
-                    '. Does the scene look correct and undamaged after it?',
-        });
-        gateNote = '\n\nRENDER GATE (automatic — the render was taken FOR you, you did not call it):\n' +
-                   r.verdict + '\n(frame ' + r.frame + ')  → ' + RENDER_CHECK_REL + '\n' +
-                   'This is evidence about the CURRENT scene. Do NOT claim a visual result the render contradicts.';
-        broadcastIfFresh(gateStart);
-        dbg.event('progress', { label: 'vision-gate', name: toolCall.name, phase: 'done' });
-      } catch (e) {
-        gateNote = '\n\nRENDER GATE: could not look at the scene (' + (e.message || String(e)) +
-                   '). Do not assume the result is fine — tell the user you could not verify it visually.';
-        dbg.event('progress', { label: 'vision-gate', name: toolCall.name, phase: 'error' });
-      }
-    }
-    // A model-invoked inspect_render belongs in the Image tab too. The /action route
-    // broadcast it, the chat path never did — which is why the render stayed invisible
-    // even though it had been taken (live-test finding 2026-07-25).
-    if (!noEvidence && toolCall.name === 'inspect_render') broadcastIfFresh(toolStart);
-    // Same for the Unreal render — a picture nobody sees is a claim, not evidence. Its own file,
-    // so the freshness check cannot pass off a stale Blender render as the Unreal one.
-    if (!noEvidence && toolCall.name === 'inspect_unreal') {
-      const UNREAL_CHECK_REL = 'output/unreal-check.png';
-      if (typeof opts.onArtifact === 'function') {
-        try {
-          if (fs.statSync(path.join(__dirname, UNREAL_CHECK_REL)).mtimeMs >= toolStart - 1000) {
-            opts.onArtifact({ slot: 'image', source: 'inspect', rel: UNREAL_CHECK_REL });   // not an i2i reference (F3)
-          }
-        } catch (_) { /* vision off or nothing written — nothing to show */ }
-      }
-    }
+    const { gateNote, stopReason } = await gateStep(toolCall.name, toolResult, { cfg, userInput, toolOpts, toolStart });
 
     // Feed result back into messages
     // The hint after the result nudges Claude to reply in text if the answer is complete,
@@ -1706,9 +2205,20 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     const assistantMsg = { role: 'assistant', content: raw };
     const resultMsg    = {
       role: 'user',
-      content: `TOOL_RESULT [${toolCall.name}]:\n${toolResult}${gateNote}\n\nIf this answers the user's question, reply in plain text now. Only emit another TOOL block if a follow-up action is strictly required.`,
+      content: `TOOL_RESULT [${toolCall.name}]:\n${toolResult}${gateNote}\n\n${TOOL_RESULT_NUDGE}`,
     };
     messages.push(assistantMsg, resultMsg);
+
+    // Auto's brake (Part B): the check did not confirm the step → stop here and report, no further tool runs.
+    if (run.mode === 'auto' && stopReason) {
+      run.stopped = { reason: stopReason, tool: toolCall.name };   // detached jobs from this turn must not import any more
+      messages.push({ role: 'user', content: 'AUTO_STOPPED: the render check did not confirm the last step (' + stopReason + '). Stop here. ' +
+        'Tell the user in plain text what you did, what the check saw, and what they should decide. No more TOOL blocks.' });
+      const stopRaw = await callClaude(messages, cfg, extraSystem, complete);
+      const stopText = stripToolBlock(stopRaw).trim() || ('(Auto stopped: ' + stopReason + ')');
+      messages.push({ role: 'assistant', content: stopText });   // Sweep 2 G6: history keeps the summary, not a TOOL block
+      return withMode({ text: stopText, messages, stopped: run.stopped });
+    }
   }
 }
 
@@ -1819,12 +2329,13 @@ async function main() {
       }
 
       try {
+        state.turnSeq = (Number(state.turnSeq) || 0) + 1;   // M5: monotonically increasing turn number
         const { text, messages } = await runTurn(input, history, state, cfg);
 
         // Update history with the full exchange
-        history.push({ role: 'user', content: input });
+        history.push({ role: 'user', content: input, turn: state.turnSeq });
         const lastAssistant = messages.findLast(m => m.role === 'assistant');
-        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content });
+        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content, turn: state.turnSeq });
         saveHistory(history);
         saveState(state);
 
@@ -2110,28 +2621,13 @@ const TROUBLESHOOTER_TOOLS = {
   read_troubleshooting: tsReadTroubleshooting,
 };
 
-// ── Seat-aware Claude caller (parallel to callClaude; does NOT change the orchestrator) ──
-// Takes explicit { model, systemPrompt } instead of reading from cfg.seats.orchestrator
-// and SYSTEM_PROMPT. The orchestrator's callClaude is completely untouched.
+// ── Seat-aware caller (parallel to callClaude; does NOT change the orchestrator) ──
+// Takes an explicit seat name + systemPrompt instead of reading SYSTEM_PROMPT; the seat's
+// provider/model come from cfg via providers.complete().
 
-function callClaudeSeat(messages, { model, systemPrompt }) {
-  const contextLines = [];
-  for (const m of messages.slice(0, -1)) {
-    const tag = m.role === 'user' ? 'Human' : 'Assistant';
-    contextLines.push(tag + ': ' + m.content);
-  }
-  const lastUser = messages[messages.length - 1].content;
-  const contextBlock = contextLines.length
-    ? '<conversation_history>\n' + contextLines.join('\n\n') + '\n</conversation_history>\n\n'
-    : '';
-  const userMsg = contextBlock + lastUser;
-  const _t = Date.now();
-  // Prompt text (system + userMsg) must never be a command-line arg — see claude-cli.js.
-  return claudeCli.runStream(model, systemPrompt, userMsg, { extraFlags: ['--tools', '', '--strict-mcp-config'], timeout: 300000 })
-    .then(result => {
-      dbg.llm('troubleshooter', { msgCount: messages.length, ms: Date.now() - _t, respChars: result.length });
-      return result;
-    });
+function callSeat(seatName, messages, systemPrompt, cfg, purpose) {
+  return providers.complete(seatName, cfg, { system: systemPrompt, messages, purpose, timeoutMs: 300000 })
+    .then(r => r.text);
 }
 
 // ── Troubleshooter turn loop — mirrors runTurn but uses TROUBLESHOOTER_TOOLS only ──
@@ -2140,7 +2636,6 @@ function callClaudeSeat(messages, { model, systemPrompt }) {
 
 async function runTroubleshootTurn(messages, cfg, preflightOutput) {
   const seatCfg = (cfg.seats && cfg.seats.troubleshooter) || {};
-  const model   = seatCfg.model || 'claude-sonnet-4-6';
   const historyMessages = seatCfg.historyMessages || 8;
 
   // Apply a history window: keep the last N pairs + current user msg at the tail
@@ -2151,12 +2646,19 @@ async function runTroubleshootTurn(messages, cfg, preflightOutput) {
   // Cap at 1 (not the global 3) to avoid extra full-prompt re-spawns. See changelog 2026-06-27.
   const maxTsToolCalls = 1;
 
+  // A failed tool test refuses the troubleshooter too — unless the user forced it (then answers are marked).
+  const tsFail = seatToolFailure('troubleshooter', cfg);
+  if (tsFail && !tsFail.forced) {
+    return { text: 'The troubleshooter model failed the tool test — pick another model in Settings.', messages };
+  }
+  const _mark = t => (tsFail ? '⚠ Unverified — this model failed the tool test.\n\n' + t : t);
+
   const systemPrompt = buildTroubleshooterPrompt(cfg, preflightOutput);
   let toolCalls = 0;
   let msgs = [...limited];
 
   while (true) {
-    const raw = await callClaudeSeat(msgs, { model, systemPrompt });
+    const raw = await callSeat('troubleshooter', msgs, systemPrompt, cfg, 'troubleshoot');
     const toolCall = parseToolCall(raw);
 
     if (!toolCall || toolCalls >= maxTsToolCalls) {
@@ -2164,13 +2666,13 @@ async function runTroubleshootTurn(messages, cfg, preflightOutput) {
         // Still emitting tool calls at limit — force plain-text reply
         msgs.push({ role: 'assistant', content: raw });
         msgs.push({ role: 'user', content: 'TOOL_LIMIT_REACHED: Reply to the user now in plain English text. No more TOOL blocks.' });
-        const finalRaw = await callClaudeSeat(msgs, { model, systemPrompt });
+        const finalRaw = await callSeat('troubleshooter', msgs, systemPrompt, cfg, 'troubleshoot');
         const text = stripToolBlock(finalRaw).trim();
-        return { text: text || '(tool limit reached — no summary)', messages: msgs };
+        return { text: _mark(text || '(tool limit reached — no summary)'), messages: msgs };
       }
       const text = stripToolBlock(raw).trim();
       msgs.push({ role: 'assistant', content: raw });
-      return { text: text || '(no response)', messages: msgs };
+      return { text: _mark(text || '(no response)'), messages: msgs };
     }
 
     // Execute tool — only TROUBLESHOOTER_TOOLS are allowed
@@ -2229,8 +2731,7 @@ ${existingContext}
 
 Output ONLY the JSON object for the new category.`;
 
-  const model = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.model) || 'claude-sonnet-4-6';
-  const raw = await callClaudeSeat([{ role: 'user', content: userMsg }], { model, systemPrompt });
+  const raw = await callSeat('orchestrator', [{ role: 'user', content: userMsg }], systemPrompt, cfg, 'helper');
 
   // Extract JSON from response
   let parsed = null;
@@ -2365,8 +2866,7 @@ ${jsonText}
 Output ONLY the JSON object.`;
 
   // 7. Call the orchestrator seat
-  const model = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.model) || 'claude-sonnet-4-6';
-  const raw = await callClaudeSeat([{ role: 'user', content: userMsg }], { model, systemPrompt });
+  const raw = await callSeat('orchestrator', [{ role: 'user', content: userMsg }], systemPrompt, cfg, 'helper');
 
   // 8. Parse JSON from raw (same pattern as draftPaletteCategory)
   let parsed = {};
@@ -2427,7 +2927,9 @@ function claudeCliCheck() {
     const finish = (val) => { if (done) return; done = true; clearTimeout(timer); try { if (child) child.kill(); } catch {} resolve(val); };
     const timer = setTimeout(() => finish({ present: false, error: 'timeout' }), 8000);
     try {
-      child = spawn('claude', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
+      const cc = require('./claude-cli');   // Sweep 2 F4: resolved exe with shell:false; unresolved -> ONE command string with shell:true (no args array: no DEP0190)
+      const plan = cc.planSpawn(cc.target(), ['--version']);
+      child = plan.args ? spawn(plan.file, plan.args, { encoding: 'utf8', ...plan.opts }) : spawn(plan.file, { encoding: 'utf8', ...plan.opts });
     } catch (e) { finish({ present: false, error: e.message }); return; }
     child.stdout.on('data', d => out += d);
     child.stderr.on('data', d => err += d);
@@ -2438,8 +2940,64 @@ function claudeCliCheck() {
 
 // ─── Onboarding status aggregate ─────────────────────────────────────────────
 
-async function onboardingStatus(cfg) {
+// The "brain" (v1.9 M7): does the orchestrator seat WORK — whichever provider it is. Cached M2 tool-test result first
+// (a seat runTurn would refuse is never green), else the provider's own presence check.
+// Never throws. deps = { fetchImpl, getKey, codexLoginStatus } (test seams); cc = the Claude CLI probe result.
+async function brainStatus(cfg, cc, deps, seatName) {
+  seatName = seatName || 'orchestrator';
+  let provider = 'claude-cli', model = '';
+  try {
+    const seat = providers.resolveSeat(seatName, cfg);
+    provider = seat.provider; model = seat.model || '';
+    // Green only when runTurn would actually run this seat: the same guard it applies (a failed tool test — forced or
+    // not — or a failed local benchmark refuses the turn), combined with the presence check below.
+    const guard = seatName === 'orchestrator' ? seatToolFailure('orchestrator', cfg) : null;   // the tool test / benchmark belong to the orchestrator only
+    if (guard) {
+      return { ok: false, provider, model, how: guard.bench
+        ? (model || provider) + ' solved only ' + guard.bench.passed + '/' + guard.bench.total + ' benchmark tasks — pick another brain in Settings → General → Seats'
+        : 'the tool test failed for ' + (model || provider) + ' — pick another brain in Settings → General → Seats' };
+    }
+    const caps = seatName === 'orchestrator' ? capabilities.getCaps(seat) : null;
+    if (caps && caps.tools === 'pass') {
+      const d = new Date(caps.probedAt);
+      const when = isNaN(d) ? '' : ' ' + String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0') + '.';
+      return { ok: true, provider, model, how: 'tool test passed' + when };
+    }
+    if (provider === 'claude-cli') {
+      return cc && cc.present
+        ? { ok: true, provider, model, how: 'Claude CLI found' + (cc.version ? ' (' + cc.version + ')' : '') }
+        : { ok: false, provider, model, how: 'Claude CLI not found' + (cc && cc.error ? ' (' + cc.error + ')' : '') };
+    }
+    if (provider === 'codex-cli') {
+      const st = await (deps.codexLoginStatus || ((c) => require('./providers/codex-cli').loginStatus({ cfg: c })))(cfg);
+      if (st && st.loggedIn) return { ok: true, provider, model, how: 'Codex CLI logged in' + (st.mode === 'chatgpt' ? ' (ChatGPT plan)' : '') };
+      if (st && st.missing) return { ok: false, provider, model, how: 'Codex CLI not found — install it (npm install -g @openai/codex)' };
+      return { ok: false, provider, model, how: 'Codex CLI is not logged in — run codex login' };
+    }
+    // openai-compat: the endpoint must answer /models; a cloud endpoint also needs a stored key
+    let host = seat.url;
+    try { host = new URL(seat.url).host; } catch (_) { /* keep the raw url */ }
+    const headers = {};
+    if (seat.kind === 'cloud') {
+      const key = (deps.getKey || providers.getKey)(seat.apiKeyRef);
+      if (!key) return { ok: false, provider, model, how: 'no API key stored for ' + (seat.apiKeyRef || seat.endpointName) + ' — add it in Settings' };
+      headers.Authorization = 'Bearer ' + key;
+    }
+    try {
+      const r = await (deps.fetchImpl || fetch)(String(seat.url).replace(/\/+$/, '') + '/models', { headers, signal: AbortSignal.timeout(4000) });
+      if (r && r.ok) return { ok: true, provider, model, how: (seat.kind === 'cloud' ? 'API endpoint ' : 'local model at ') + host + ' answers' };
+      return { ok: false, provider, model, how: 'the model server at ' + host + ' answered HTTP ' + (r && r.status) };
+    } catch (e) {
+      return { ok: false, provider, model, how: 'the model server at ' + host + ' is not reachable (' + ((e && e.message) || String(e)) + ')' };
+    }
+  } catch (e) {
+    return { ok: false, provider, model, how: (e && e.message) || String(e) };
+  }
+}
+
+async function onboardingStatus(cfg, deps) {
   cfg = cfg || {};
+  deps = deps || {};
   const completed  = !!(cfg.onboarding && cfg.onboarding.completed);
   const comfyBase  = (cfg.endpoints && cfg.endpoints.comfyui) || 'http://localhost:8188';
   const localBase  = (cfg.endpoints && cfg.endpoints.local)   || 'http://localhost:1234/v1';
@@ -2464,7 +3022,13 @@ async function onboardingStatus(cfg) {
     }
   } catch (e) { comfyui = { reachable: false, base: comfyBase, error: (e && e.message) || String(e) }; }
 
-  const claudeCli = await claudeCliCheck();
+  let claudeCli;
+  try { claudeCli = await (deps.claudeCliCheck || claudeCliCheck)(); }
+  catch (e) { claudeCli = { present: false, error: (e && e.message) || String(e) }; }
+  const brain = await brainStatus(cfg, claudeCli, deps);
+  // Sweep 2 G11: the first-prop flow also needs the metaprompter and the category provider (`utility`); readiness covers them, not just the brain
+  const seats = {};
+  for (const n of ['metaprompter', 'utility']) seats[n] = await brainStatus(cfg, claudeCli, deps, n);
 
   let lmstudio = { reachable: false, base: localBase };
   try {
@@ -2477,7 +3041,7 @@ async function onboardingStatus(cfg) {
   try { blenderPresent = !!(blenderPath && fs.existsSync(blenderPath)); } catch {}
   const blender = { present: blenderPresent, path: blenderPath };
 
-  return { completed, node, comfyui, claudeCli, lmstudio, blender };
+  return { completed, node, comfyui, claudeCli, brain, seats, lmstudio, blender };
 }
 
-module.exports = { runTurn, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };
+module.exports = { remeshEvents, remeshBusy, remeshStatus, assetFaces, _clearMaybeCharged: () => { remeshStore.clear(); }, _remeshStore: remeshStore, _setStagingBase, MCP_FORCE_CHECKPOINT, blenderRunWith, runTurn, runOneTool, toolResultFailed, runConfig, verdictOf, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, parseToolCallStrict, TOOL_RESULT_NUDGE, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };

@@ -9,7 +9,10 @@
 // render is NON-DESTRUCTIVE — the user's engine/resolution/filepath are saved
 // and restored in a `finally` around the check.
 //
-// The vision call reuses the existing claude CLI: the image path is passed
+// v1.9 M3: the judge is the VISION SEAT. A Claude seat keeps the path below (CLI + Read tool); a local/OpenAI
+// seat gets the image BYTES plus a generated colour-stripe test card it must read first (providers/vision-proof.js).
+//
+// The Claude vision call reuses the existing claude CLI: the image path is passed
 // explicitly and the model is told to open it with the Read tool (allowed for
 // this one call only; the orchestrator's normal calls stay tool-less). The path
 // is NOT passed as an `@`-mention — that tokenizes at whitespace and silently
@@ -18,6 +21,9 @@
 
 const path = require('path');
 const fs = require('fs');
+const providers = require('./providers');
+const capabilities = require('./providers/capabilities');
+const proof = require('./providers/vision-proof');
 
 const VISION_SYSTEM =
   'You are a render-QA inspector for a 3D animation pipeline in Blender. You are shown a ' +
@@ -91,7 +97,14 @@ async function askVision(claudeCli, model, imgAbs, question, timeout = 150000) {
     timeout,
   });
   let env;
-  try { env = JSON.parse(raw); } catch (_) { return String(raw || '').trim(); } // non-JSON: return as-is
+  try { env = JSON.parse(raw); } catch (_) {
+    // Sweep 2 G8: without the envelope there is no num_turns proof that the image was opened - a bare "VERDICT: PASS" must not pass as a verified one.
+    return '⚠ UNVERIFIED — the vision model\'s answer could not be read as a JSON envelope, so there is no proof it opened the image; ' +
+      'this verdict is NOT based on the render and must not be trusted.\n\n' + (String(raw || '').trim() || '(no verdict returned)');
+  }
+  if (!env || typeof env !== 'object') {
+    return '⚠ UNVERIFIED — the vision model\'s answer was not a JSON envelope, so there is no proof it opened the image.\n\n' + String(raw || '').trim();
+  }
   const verdict = String(env.result || '').trim();
   const denials = Array.isArray(env.permission_denials) ? env.permission_denials.length : 0;
   const readRan = Number(env.num_turns || 0) > 1 && denials === 0 && env.is_error !== true;
@@ -103,24 +116,80 @@ async function askVision(claudeCli, model, imgAbs, question, timeout = 150000) {
   return verdict;
 }
 
+// The colour word list is shuffled per call (see vision-proof.colorWordList) — a fixed order let an unsure model parrot it.
+const visionBytesPrompt = (rng) =>
+  'Two images are attached. IMAGE 1 is a small test card with three vertical colour stripes. IMAGE 2 is the render. ' +
+  'On the FIRST line write exactly `COLORS: <left>, <middle>, <right>` naming the stripes of IMAGE 1, using only these ' +
+  'words: ' + proof.colorWordList(rng) + '. Then answer the following about IMAGE 2 only:\n\n';
+
+// Why the vision seat may NOT judge right now, or null when it may. Claude seats: always fine (their proof is the
+// Read tool). Local/OpenAI/ChatGPT plan: the vision test must have passed for exactly this
+// provider|endpoint|model — also when the seat is inherited from a local orchestrator (never judges untested).
+function visionSeatProblem(cfg) {
+  let seat;
+  try { seat = providers.resolveSeat('vision', cfg); } catch (e) { return e.message; }
+  if (seat.provider === 'claude-cli') return null;
+  const v = capabilities.getVision(seat);
+  return v && v.vision === 'pass' ? null : 'vision test not passed for ' + (seat.model || 'Codex default') + ' — run it in Settings → General → Seats';
+}
+
+// Ask the vision SEAT about an image on disk → the verdict string. Claude: askVision, unchanged. Local/OpenAI: card +
+// render as two images; the verdict only counts when the model named the card's stripes (else UNVERIFIED prefix).
+async function askVisionSeat(cfg, imgAbs, question, { timeoutMs = 150000, claudeCli, complete, rng, dbg } = {}) {
+  const seat = providers.resolveSeat('vision', cfg);
+  if (seat.provider === 'claude-cli') return askVision(claudeCli, seat.model, imgAbs, question, timeoutMs);
+  const problem = visionSeatProblem(cfg);
+  if (problem) throw new Error(problem);
+  let render;
+  try { render = fs.readFileSync(imgAbs); } catch (_) { throw new Error('render file missing'); }
+  const card = proof.makeCard(rng);
+  const prompt = visionBytesPrompt(rng);   // a separate draw from the card's colours
+  const t0 = Date.now();
+  const r = await (complete || providers.complete)('vision', cfg, {
+    system: VISION_SYSTEM, messages: [{ role: 'user', content: prompt + question }],
+    images: [{ mime: 'image/png', data: card.png }, { mime: 'image/png', data: render }], purpose: 'vision', timeoutMs,
+  });
+  const chk = proof.checkProof(r.text, card.colors);
+  const ok = r.imagesSent === 2 && chk.ok;
+  const detail = r.imagesSent === 2 ? chk.detail : 'the images were not sent to the model';
+  try {
+    const log = dbg || require('./debug-log');
+    log.event('vision-proof', { provider: seat.provider, model: seat.model, ok, detail, ms: Date.now() - t0 });
+  } catch (_) {}
+  const verdict = proof.stripColorsLine(r.text) || '(no verdict returned)';
+  if (ok) return verdict;
+  return '⚠ UNVERIFIED — the vision model did not prove it saw the images (' + detail + '), so this verdict is NOT ' +
+    'based on the render and must not be trusted.\n\n' + verdict;
+}
+
 /**
  * checkRender — render the current scene and get a vision verdict.
  * deps: { blenderIpc, claudeCli }
- * opts: { outAbs (required), model, question, cfg, resX, resY, timeoutMs, visionTimeout }
+ * opts: { outAbs (required), question, cfg (required for the vision step), resX, resY, timeoutMs, visionTimeout }
+ *   (opts.model is ignored since M3 — the vision seat decides; kept so old callers do not break)
+ * deps may also carry { complete, rng } (tests).
  * Returns { imagePath, verdict, frame }.
  */
 async function checkRender(deps, opts) {
   const { blenderIpc, claudeCli } = deps;
   const outAbs = opts.outAbs;
-  const model = opts.model || 'claude-opus-4-8';
   const question =
     opts.question ||
     "Look at this render. Answer with 'VERDICT: PASS' or 'VERDICT: FAIL' on the first " +
     'line, then one short sentence. FAIL only if something is visibly broken (holes, torn ' +
     'mesh, missing/pink textures, floating or clipping geometry, broken proportions).';
   const info = await renderCurrentScene(blenderIpc, outAbs, opts.cfg, opts);
-  const verdict = await askVision(claudeCli, model, outAbs, question, opts.visionTimeout);
+  // M6.1: the render exists from here on. A vision failure is tagged so the caller can tell it from a failed render
+  // (visionFailed → 'rendered, but the vision model could not look'); the message itself is unchanged.
+  let verdict;
+  try {
+    verdict = await askVisionSeat(opts.cfg, outAbs, question, { timeoutMs: opts.visionTimeout, claudeCli, complete: deps.complete, rng: deps.rng, dbg: deps.dbg });
+  } catch (e) {
+    const err = (e instanceof Error) ? e : new Error(String(e));
+    try { err.visionFailed = true; err.imagePath = outAbs; err.frame = info.frame; } catch (_) { /* frozen error: keep it as is */ }
+    throw err;
+  }
   return { imagePath: outAbs, verdict: String(verdict || '').trim(), frame: info.frame };
 }
 
-module.exports = { checkRender, renderCurrentScene, askVision, VISION_SYSTEM };
+module.exports = { checkRender, renderCurrentScene, askVision, askVisionSeat, visionSeatProblem, VISION_SYSTEM };

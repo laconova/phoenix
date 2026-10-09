@@ -64,3 +64,6 @@ CLAUDE.md
 # NOT shipped — decided 2026-07-28. They live in the dev tree only, where they are tracked.
 dev-notes/
 workflows/custom/
+
+# tool-test results per model (providers/capabilities.js) — machine-local, never shipped
+capabilities.json

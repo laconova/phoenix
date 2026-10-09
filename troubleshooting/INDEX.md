@@ -5,7 +5,7 @@ that ONE entry from `entries/`. Keys are exact substrings you'll see in errors, 
 
 | Symptom / error string (match on any) | Entry |
 |---|---|
-| Phoenix "Can't reach ComfyUI" · connection refused :8000 · port 8188 vs 8000 mismatch · gen never starts · image tab empty | `entries/comfyui-port-8188.md` |
+| Phoenix "Can't reach ComfyUI" · connection refused on the ComfyUI port · the endpoint port differs from the port ComfyUI really listens on (its default is 8188) · gen never starts · image tab empty | `entries/comfyui-port-8188.md` |
 | `No module named 'sqlalchemy'` at ComfyUI startup · ComfyUI exits immediately after an update · Phoenix "Can't reach ComfyUI" although nothing in Phoenix changed · all mesh generation dead at once | `entries/comfyui-missing-sqlalchemy.md` |
 | `No module named 'cumesh'` · `No module named 'triton'` · Trellis nodes missing from the menu · `IMPORT FAILED ...Trellis2-GGUF` | `entries/trellis-torch-too-new.md` |
 | `install.py` picked a `manylinux`/`...linux_x86_64.whl` · "wheel not supported on this platform" · cumesh imports but node fails on load | `entries/trellis-linux-wheel-on-windows.md` |
