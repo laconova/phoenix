@@ -11,7 +11,9 @@ function subscribe(fn) { _listeners.add(fn); return () => _listeners.delete(fn);
 
 // ─── Log directory & stream ───────────────────────────────────────────────────
 
-const LOG_DIR = path.join(__dirname, 'logs');
+// PHOENIX_DEBUG_LOG_DIR: test seam so suites never write into the real logs/.
+const LOG_DIR = (typeof process.env.PHOENIX_DEBUG_LOG_DIR === 'string' && process.env.PHOENIX_DEBUG_LOG_DIR)
+  ? process.env.PHOENIX_DEBUG_LOG_DIR : path.join(__dirname, 'logs');
 
 // Stream is created lazily on first write to avoid side effects at require time.
 let _stream  = undefined; // undefined = not yet initialised; null = failed

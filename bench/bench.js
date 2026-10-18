@@ -78,7 +78,7 @@ async function startBench(cfg, deps = {}) {
   env.PHOENIX_BENCH_MAX_SECONDS = String(Math.min(36000, Math.ceil(budgetMs / 1000)));
   let child;
   try {
-    child = spawn(exe, ['-b', '--factory-startup', '--python', DRIVER], { env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(exe, ['-b', '--python', DRIVER], { env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     try { fsx.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
     throw new Error('Blender could not be started: ' + e.message);

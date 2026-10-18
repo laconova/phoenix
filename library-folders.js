@@ -22,6 +22,7 @@
  * Item keys are stable and namespaced:
  *   asset:<category>/<filename.glb>     — same key shape library-labels.json already uses
  *   brush:<slug>
+ *   video:<relative path>               — v1.10 LIB2: the Videos tab has its OWN tree (folders with scope:'video')
  * The namespace matters: a brush and an asset may legitimately share a name.
  */
 
@@ -29,6 +30,13 @@ const fs   = require('fs');
 const path = require('path');
 
 const FILE = path.join(__dirname, 'library-folders.json');
+// test seam: PHOENIX_LIBRARY_FOLDERS_FILE points the module at a temp file (read at call time)
+const fileNow = () => process.env.PHOENIX_LIBRARY_FOLDERS_FILE || FILE;
+
+// v1.10 LIB2: a folder may carry scope:'video' (the Videos tab tree). No scope = the asset/brush tree, unchanged.
+const SCOPES = ['video'];
+const scopeOf = (f) => (f && f.scope === 'video') ? 'video' : null;
+const keyScope = (key) => (/^video:/.test(key) ? 'video' : null);
 
 const EMPTY = () => ({ version: 1, folders: [], assignments: {}, collapsed: [] });
 
@@ -38,7 +46,7 @@ const EMPTY = () => ({ version: 1, folders: [], assignments: {}, collapsed: [] }
 // a transient read must never cost the user every folder + assignment.
 function readTree(strict) {
   let raw;
-  try { raw = fs.readFileSync(FILE, 'utf8'); }
+  try { raw = fs.readFileSync(fileNow(), 'utf8'); }
   catch (e) {
     if (e && e.code === 'ENOENT') return EMPTY();
     if (strict) throw e;
@@ -64,9 +72,9 @@ function load() { return readTree(false); }
 function save(o) {
   // tmp + rename: a truncated write here would lose the whole tree, and the next load would
   // silently return EMPTY() — i.e. every folder gone with no error anywhere.
-  const tmp = FILE + '.tmp-' + process.pid;
+  const tmp = fileNow() + '.tmp-' + process.pid;
   fs.writeFileSync(tmp, JSON.stringify(o, null, 2), 'utf8');
-  fs.renameSync(tmp, FILE);
+  fs.renameSync(tmp, fileNow());
 }
 
 let _seq = 0;
@@ -112,7 +120,15 @@ function apply(op) {
     case 'create': {
       if (!name) return { ok: false, error: 'Folder name required.' };
       if (op.parent && !byId(o, op.parent)) return { ok: false, error: 'Parent folder no longer exists.' };
+      if (op.scope != null && SCOPES.indexOf(op.scope) < 0) return { ok: false, error: 'Bad folder scope.' };
+      let scope = op.scope != null ? op.scope : null;
+      if (op.parent) {
+        const pScope = scopeOf(byId(o, op.parent));
+        if (scope === null) scope = pScope;                       // a subfolder lives in its parent's tree
+        else if (scope !== pScope) return { ok: false, error: 'A folder cannot be created in the other tree.' };
+      }
       const f = { id: newId(), name: name.slice(0, 60), parent: op.parent || null };
+      if (scope) f.scope = scope;
       o.folders.push(f);
       save(o);
       return { ok: true, data: o, created: f.id };
@@ -153,6 +169,7 @@ function apply(op) {
       if (target) {
         if (!byId(o, target))          return { ok: false, error: 'Target folder no longer exists.' };
         if (target === f.id)           return { ok: false, error: 'A folder cannot contain itself.' };
+        if (scopeOf(byId(o, target)) !== scopeOf(f)) return { ok: false, error: 'A folder cannot move between the video tree and the asset tree.' };
         if (isDescendant(o, target, f.id)) return { ok: false, error: 'Cannot move a folder into its own subfolder.' };
       }
       f.parent = target;
@@ -162,9 +179,12 @@ function apply(op) {
 
     case 'assign': {
       const key = typeof op.key === 'string' ? op.key : '';
-      if (!/^(asset|brush):.+/.test(key)) return { ok: false, error: 'Bad item key.' };
+      if (!/^(asset|brush|video):.+/.test(key) || (keyScope(key) && key.indexOf('..') >= 0)) return { ok: false, error: 'Bad item key.' };
       if (op.folder) {
-        if (!byId(o, op.folder)) return { ok: false, error: 'Folder no longer exists.' };
+        const tf = byId(o, op.folder);
+        if (!tf) return { ok: false, error: 'Folder no longer exists.' };
+        // v1.10 LIB2: video keys only into video folders, asset/brush keys only into folders without a scope
+        if (scopeOf(tf) !== keyScope(key)) return { ok: false, error: keyScope(key) ? 'Videos can only be filed into video folders.' : 'Assets and brushes cannot be filed into a video folder.' };
         o.assignments[key] = op.folder;
       } else {
         delete o.assignments[key];     // back to its palette category
@@ -191,4 +211,4 @@ function apply(op) {
   }
 }
 
-module.exports = { load, apply, FILE };
+module.exports = { load, apply, FILE, fileNow };

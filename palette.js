@@ -7,7 +7,7 @@ const path = require('path');
 // Required by both phoenix.js (CLI) and assistant.js / server.js (server).
 // No project-local requires — only fs and path — to avoid require cycles.
 
-const PALETTE_FILE = path.join(__dirname, 'palette.json');
+const PALETTE_FILE = process.env.PHOENIX_PALETTE_FILE || path.join(__dirname, 'palette.json');   // env: test seam only
 
 const DEFAULT_PALETTE = {
   version: 1,
@@ -80,13 +80,17 @@ function validateCategory(key, cat) {
   if (typeof cat.style !== 'string' || !cat.style) {
     return { ok: false, error: 'style must be a non-empty string', field: key };
   }
-  if (!Number.isInteger(cat.target_face_num) || cat.target_face_num < 200 || cat.target_face_num > 300000) {
+  // v1.10 ADV: cfg / steps / target_face_num are workflow parameters now (workflow-params.json). palette.json may still carry them
+  // (rollback-safe), so they are no longer REQUIRED - but a value that is present is still range-checked.
+  // (an object value is a v1.10 ADV param directive {override, value} - the server routes it to workflow-params, it is not a palette number)
+  const plain = (v) => v !== undefined && !(v !== null && typeof v === 'object');
+  if (plain(cat.target_face_num) && (!Number.isInteger(cat.target_face_num) || cat.target_face_num < 200 || cat.target_face_num > 300000)) {
     return { ok: false, error: 'target_face_num must be an integer 200–300000', field: key };
   }
-  if (typeof cat.cfg !== 'number' || cat.cfg < 0 || cat.cfg > 20) {
+  if (plain(cat.cfg) && (typeof cat.cfg !== 'number' || cat.cfg < 0 || cat.cfg > 20)) {
     return { ok: false, error: 'cfg must be a number 0–20', field: key };
   }
-  if (!Number.isInteger(cat.steps) || cat.steps < 1 || cat.steps > 100) {
+  if (plain(cat.steps) && (!Number.isInteger(cat.steps) || cat.steps < 1 || cat.steps > 100)) {
     return { ok: false, error: 'steps must be an integer 1–100', field: key };
   }
   return { ok: true };

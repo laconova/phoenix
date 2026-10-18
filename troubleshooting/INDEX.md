@@ -29,5 +29,9 @@ that ONE entry from `entries/`. Keys are exact substrings you'll see in errors, 
 | i2i / Edit material change returns a **black image** · edit comes back **unchanged** (still wood) · CFG/strength slider doesn't help · rewording a material edit doesn't help | `entries/i2i-material-edit-black-or-unchanged.md` |
 | **SAM3 Isolate** errors · `SAM3Segment` fails to queue · `BertModel.get_head_mask` / transformers error on GroundingDINO/`Segment` · isolate returns empty or the whole image · SAM3 workflow fails on a missing/positional `device` | `entries/i2i-sam3-isolate-fails.md` |
 | Installing on **Linux** (any step) · `sudo: a password is required` · `ensurepip is not available` · venv has no pip · no-root install · which Python for image vs mesh (3.11 vs 3.12 split) · Ubuntu setup from scratch | `linux-troubleshoot.md` (umbrella — Linux install recipe + Linux-specific traps) |
+| Acquire failed: `needs 24.5 GB disk at` · `ENOSPC` · `no space left on device` · a Library ⬇ Acquire refuses to start because the drive is too full | `entries/acquire-disk-full.md` |
+| Acquire failed: `download failed HTTP 401 for` · `download failed HTTP 403 for` · a gated or moved Hugging Face model (Phoenix has no HF token support) | `entries/acquire-hf-gated.md` |
+| Acquire failed or cancelled: `sha256 mismatch for` · `ECONNRESET` · `ETIMEDOUT` · `socket hang up` · `empty working tree (interrupted clone?)` · Acquire cancelled and the row still shows missing | `entries/acquire-interrupted.md` |
+| Acquire failed: `no acquisition target configured for instance` · `comfyInstall.trellis.root` · `voiceInstall.voice.root` · `already exists and is not a git repository` · files installed but ComfyUI still misses them | `entries/acquire-wrong-comfy-root.md` |
 
 **Not here?** It's a new trap → after solving it, add a row above + an entry (keep the entry format).

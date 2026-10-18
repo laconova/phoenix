@@ -13,7 +13,7 @@
 const http = require('http');
 const readline = require('readline');
 
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 const PHOENIX_URL = process.env.PHOENIX_URL || 'http://127.0.0.1:7777';
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const NOT_RUNNING = 'Phoenix is not running — start it (server.bat on Windows, or node server.js) and try again.';
@@ -22,7 +22,7 @@ const log = (...a) => { try { process.stderr.write('[phoenix-mcp] ' + a.join(' '
 const send = (obj) => { process.stdout.write(JSON.stringify(obj) + '\n'); };
 
 // ─── tool catalogue ───────────────────────────────────────────────────────────
-// M6.1: every Phoenix tool except i2i_edit (a UI-only decision). The classes and the opt-ins mirror server.js MCP_CLASS /
+// M6.1: every Phoenix tool except i2i_edit (a UI-only decision) and the 1.10 tools generate_from_refs / make_video (not wired yet). The classes and the opt-ins mirror server.js MCP_CLASS /
 // MCP_OPTIN; the tools below go through POST /mcp/call, the R-client ones (list_animations, list_custom_rigs,
 // list_characters, job_status, stop) are answered with plain GET/POST routes and never reach /mcp/call.
 

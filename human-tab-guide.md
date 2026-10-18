@@ -124,6 +124,31 @@ Needs **Rig = Mixamo**. All clips live in one shared library.
   clips; only Mixamo "In Place" clips (which carry no root motion) need a value there.
 - **💾 Save FBX** — store the animation currently on the selected character as a reusable clip.
 
+### Checking a sequence seam
+
+When a chained sequence looks wrong, test one seam before blaming the whole chain:
+
+1. Put **two short clips** (2–4 s each) in the Playlist. Make sure the scene runs at the frame rate the
+   clips were made for (Blender ▸ Output ▸ Frame Rate), or the seam lands on a different frame than
+   you expect.
+2. **Sequence**, then step frame by frame through the frames around the seam — the end of clip 1
+   minus the blend length up to a few frames after it.
+3. Look for two things:
+   - **Root jump:** the hips snap sideways or up/down in a single frame. Each clip should start exactly
+     where the previous one stood.
+   - **Foot contact:** the feet stay on the floor through the crossfade instead of sliding or sinking.
+
+Three different things move a figure, and they are easy to mix up:
+
+- **Travel** is the motion inside the clip itself (the hips walking forward). Phoenix keeps it and
+  starts each clip where the last one ended.
+- **Drift** is an error some generated clips carry: they slowly sink or rise while they play. Phoenix
+  measures it on the footfalls and straightens it out per clip; the reason and the method are written
+  up in the *Vertical drift* comment in [`animate_human.js`](animate_human.js).
+- **Blend** is the crossfade at the seam. It smooths the pose; it does not move the figure.
+
+If a seam still jumps after that, it is worth an issue — attach the two clip names and the frame number.
+
 ---
 
 ## Tips & limits

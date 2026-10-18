@@ -34,3 +34,5 @@ stages (best effort); when that does not work (see above), unload manually betwe
 - LM Studio's TTL (~1 h) will *eventually* free it — never soon enough for a pipeline run.
 - Automatic, best effort: Phoenix asks LM Studio / Ollama / llama.cpp-router to unload before image and mesh stages (the manual
   `lms unload --all` is the fallback).
+- GPU share only unloads seats Phoenix itself uses. A model loaded by another app (e.g. a llama.cpp router seat used elsewhere)
+  stays resident — unload it there, or point one of Phoenix's seats at it so GPU share can manage it.

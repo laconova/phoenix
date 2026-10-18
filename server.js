@@ -11,6 +11,7 @@ const capabilities = require('./providers/capabilities');   // tool-protocol pro
 const dbg       = require('./debug-log.js');
 const lock      = require('./lock');
 const palette   = require('./palette');
+const wfp       = require('./workflow-params');   // v1.10 ADV: per-workflow params (cfg/steps/sampler/size/faces ...), one store, two views
 const libFolders = require('./library-folders');
 const workflows = require('./workflows');
 const animLib   = require('./animate_human');
@@ -23,11 +24,79 @@ const pipeline  = require('./pipeline');
 const checkpoints = require('./checkpoints');   // scene checkpoints + rewind (v1.9 M5)
 const jobs      = require('./jobs');
 const i2iEngine = require('./i2i');   // baseForInstance — so the deps check hits each workflow's own instance
+const records = require('./records');   // output record behind the Library's Images / Videos tabs (v1.10 C1)
+const storyboard = require('./storyboard.js');   // shots as timeline events (v1.10 V1)
+const remoteAccess = require('./remote-access');   // <r1-remote> R1: use Phoenix from the phone - second loopback listener behind "tailscale serve", laptop-approved pairing
+const remoteTailscale = require('./remote-tailscale');
 const downloader = require('./downloader');   // workflow/engine acquisition core (Stage 1)
+
+// <b3-acquire-log>
+// v1.10 B3 — in-memory acquire log (last 200 lines per workflow id, process lifetime only, nothing on disk)
+// so a failed install can be copied into a bug report. EVERY line is redacted BEFORE it is stored (and before
+// it is broadcast); there is no store-first-redact-on-read path.
+const ACQUIRE_LOG_MAX = 200;
+const acquireLogs = new Map();   // workflow id → string[]
+const acquireRunning = new Set();   // <b2r-uninstall> workflow ids with an acquire in flight — an uninstall of one is refused
+const FAQ_ENTRY_BASE = 'https://github.com/laconova/phoenix/blob/master/troubleshooting/entries/';
+
+function collectConfigSecrets(node, out, depth) {
+  if (!node || typeof node !== 'object' || depth > 8) return;
+  for (const k of Object.keys(node)) {
+    const v = node[k];
+    if (typeof v === 'string') { if (/key|token|secret|password/i.test(k) && v.length >= 6) out.push(v); }
+    else if (v && typeof v === 'object') collectConfigSecrets(v, out, depth + 1);
+  }
+}
+// Redactor for one acquire: secrets-store values + secret-named config fields (non-empty, >= 6 chars) + token patterns.
+function makeAcquireRedactor(cfg) {
+  const vals = [];
+  try {
+    for (const ref of Object.keys(providers.listKeys())) {
+      const v = providers.getKey(ref);
+      if (typeof v === 'string' && v.length >= 6) vals.push(v);
+    }
+  } catch (_) { /* no secrets store → patterns only */ }
+  try { collectConfigSecrets(cfg, vals, 0); } catch (_) {}
+  const uniq = Array.from(new Set(vals)).sort((x, y) => y.length - x.length);
+  return function redact(text) {
+    let t = String(text == null ? '' : text);
+    for (const v of uniq) t = t.split(v).join('[redacted]');
+    return t
+      .replace(/Bearer\s+\S+/g, '[redacted]')
+      .replace(/hf_[A-Za-z0-9]{20,}/g, '[redacted]')
+      .replace(/sk-[A-Za-z0-9_-]{20,}/g, '[redacted]')
+      .replace(/(token|key|password)=\S+/gi, '$1=[redacted]');
+  };
+}
+function deepRedact(v, redact) {
+  if (typeof v === 'string') return redact(v);
+  if (Array.isArray(v)) return v.map(x => deepRedact(x, redact));
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v)) o[k] = deepRedact(v[k], redact); return o; }
+  return v;
+}
+// One progress event → one log line (already-redacted event in): 'line' → the line; others → '[<phase>] <step> <error|warning>'.
+function acquireLogText(p) {
+  if (p.phase === 'line') return String(p.line == null ? '' : p.line);
+  const nm = (p.step && p.step.name) || '';
+  const extra = p.error || p.warning || '';
+  return ('[' + p.phase + '] ' + nm + (extra ? ' ' + extra : '')).trim();
+}
+function acquireLogPush(id, line) {
+  let ring = acquireLogs.get(id);
+  if (!ring) { ring = []; acquireLogs.set(id, ring); }
+  ring.push(line);
+  if (ring.length > ACQUIRE_LOG_MAX) ring.splice(0, ring.length - ACQUIRE_LOG_MAX);
+}
+function acquireFaqFields(text) {
+  const faq = downloader.acquireFaq(text);
+  return { faq, faq_url: faq ? FAQ_ENTRY_BASE + faq + '.md' : null };
+}
+// </b3-acquire-log>
 
 // ─── Working dir (used for /file security checks) ─────────────────────────────
 
 const workingDir = __dirname;
+const servable = require('./servable');
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +113,7 @@ const clients = new Set();
 function broadcast(obj) {
   const payload = 'data: ' + JSON.stringify(obj) + '\n\n';
   for (const res of clients) {
+    if (res.writableEnded || res.destroyed) { clients.delete(res); continue; }   // <r1-remote> a stream the server just closed (Disconnect / switch-off) must not be written to
     try {
       res.write(payload);
     } catch (_) {
@@ -52,10 +122,63 @@ function broadcast(obj) {
   }
 }
 
+// <r1-remote> remote-access state goes to the laptop's own page only: a phone's /events stream never receives it (and it carries no payload, just "look again")
+function broadcastLocal(obj) {
+  const payload = 'data: ' + JSON.stringify(obj) + '\n\n';
+  for (const res of clients) {
+    if (remote.isRemoteStream(res)) continue;
+    if (res.writableEnded || res.destroyed) { clients.delete(res); continue; }
+    try { res.write(payload); } catch (_) { clients.delete(res); }
+  }
+}
+const remote = remoteAccess.create({
+  secretsDir: () => process.env.PHOENIX_SECRETS_DIR || path.join(workingDir, '.secrets'),
+  transport: remoteTailscale.create(),
+  getHandler: () => handler,
+  onChange: () => broadcastLocal({ kind: 'remote' }),
+  log: (m) => { try { console.error(m); } catch (_) {} },
+});
+// </r1-remote>
+
 // In-flight guard for the one action that deliberately does NOT take the Blender lock while it
 // works (hy_motion — see the /action route). Module-level because the route is re-entered per
 // request; a single boolean is enough, since exactly one action defers.
 let deferredInFlight = false;
+// <sb3> the voice packs /voice-state last saw (the storyboard view only reads this, it never calls the voice server) and the Speak-in-progress keys
+// (board:shot = whole shot, board:shot:lid = one line): a second click while one is running answers 409
+const sbVoiceSeen = { names: null };
+const sbSpeakBusy = new Set();
+
+// <v1b3-video> v1.10 V1b-3: the video-backend registry (EMPTY in v1.10 - V2 local preview / V3 fal+Kling register themselves).
+// A backend = { id, label, available(cfg) -> {ok, reason}, estimate(shotRequest) -> {line, usd} | null, start(shotRequest, {confirmed}) }.
+// estimate() non-null = PAID: the UI shows `line` next to Make video and start() is only called with confirmed:true after the user confirmed it.
+// shotRequest = { startImage (absolute path), prompt (compilePrompt 'video'), duration_s, aspect, refs [{role,label,path(abs)}], lines [{speaker,line,take}] }.
+// gpu:true -> start() runs inside the shared jobs slot (busy -> 409 with the jobs reason, and it blocks keyframes); gpu:false/absent -> cloud, no slot.
+// start() may return a value or a Promise (a result {ok:false, error} or a rejection = failure); a finished clip is set by the BACKEND via storyboard.updateShot(board, shot, { clip: {path, backend, made_at} }).
+const NO_VIDEO_BACKEND = 'No video backend yet — local preview (V2) and fal/Kling (V3) arrive with their own build steps.';
+const videoBackends = [];
+function registerVideoBackend(b) {
+  if (!b || typeof b !== 'object' || typeof b.id !== 'string' || !b.id || typeof b.label !== 'string'
+    || typeof b.available !== 'function' || typeof b.estimate !== 'function' || typeof b.start !== 'function') {
+    throw new TypeError('a video backend needs { id, label, available(cfg), estimate(shotRequest), start(shotRequest, {confirmed}) } (+ optional gpu: true|false)');
+  }
+  if (b.gpu !== undefined && typeof b.gpu !== 'boolean') throw new TypeError('a video backend\'s gpu flag must be true or false');
+  b.gpu = b.gpu === true;   // default false = a cloud backend (fal/Kling): no GPU slot; true = a local GPU backend: it runs in the shared jobs slot
+  const i = videoBackends.findIndex(x => x.id === b.id);
+  if (i >= 0) videoBackends[i] = b; else videoBackends.push(b);
+  return b.id;
+}
+function unregisterVideoBackend(id) {
+  const i = videoBackends.findIndex(x => x.id === id);
+  if (i >= 0) videoBackends.splice(i, 1);
+  return i >= 0;
+}
+// in-memory per-shot progress / last failure of the two long actions ('<board>:<shot>' -> true | text); a page reload still shows them
+const sbKeyframeBusy = new Map(), sbKeyframeErr = new Map(), sbVideoBusy = new Map(), sbVideoErr = new Map();
+// v1.10 V2: a local (gpu) backend's progress line while it runs, the note it leaves with a finished clip, and which shots run in the jobs slot (those can be stopped)
+const sbVideoProgress = new Map(), sbVideoNote = new Map(), sbVideoGpu = new Map();   // sbVideoGpu: '<board>:<shot>' -> the jobs-slot id of its running local run (Stop names it)
+const sbStops = new Map();   // jobs-slot id -> what its Stop did at ComfyUI (the backend's cancelPrompt answer), for /stop's reply; keyed by run so a second /stop cannot reset it
+// </v1b3-video>
 
 // Last Blender filepath GET /checkpoints could read (null = unknown); served as "stale" while a turn holds the lock.
 let lastCpFilepath = null;
@@ -220,23 +343,8 @@ function _artifactPathToUrl(rawPath) {
 // ─── /file security helper ────────────────────────────────────────────────────
 
 function resolveFileParam(p) {
-  // Returns { abs, allowed } or null if p missing/invalid
-  if (!p || typeof p !== 'string') return null;
-  // Guard against path traversal
-  if (p.includes('..')) return null;
-  const abs = path.resolve(workingDir, p);
-  const allowedRoots = [
-    path.resolve(workingDir, 'output'),
-    path.resolve(workingDir, 'staging'),
-    // Cached brush GLBs, so the mesh viewer can preview a brush. READ-ONLY like the others, and
-    // deliberately still outside staging/ — being servable and being listed as a staged asset are
-    // two different things, and conflating them is what produced phantom library entries.
-    path.resolve(workingDir, 'brush-cache'),
-  ];
-  const allowed = allowedRoots.some(root =>
-    abs === root || abs.startsWith(root + path.sep)
-  );
-  return { abs, allowed };
+  // Returns { abs, allowed } or null if p missing/invalid (the rule lives in servable.js, shared with generate_from_refs)
+  return servable.resolveFileParam(workingDir, p);
 }
 
 function extToMime(ext) {
@@ -251,29 +359,437 @@ function extToMime(ext) {
   }
 }
 
+// ─── v1.10 LIB2: output trash (images + videos) and video posters ─────────────────────────────────────────
+// Trash = output/.trash/<stamp>/<the recorded relative path> + output/.trash/index.json [{id, from, to, at, kind}]. A move, never a
+// hard delete; the only delete is "Empty trash", and it only ever removes inside output/.trash/. Posters = output/.thumbs/<sha1>.jpg.
+// Every path decision is lexical AND by realpath (a junction / symlink can never carry a move or a delete out of its root).
+// Test seam: PHOENIX_TRASH_NAME / PHOENIX_THUMBS_NAME rename the two folders under output/ (suites never touch the real ones).
+const OUTPUT_DIR = path.join(workingDir, 'output');
+const DEFAULT_TRASH_DIR = path.join(OUTPUT_DIR, '.trash');
+// the seam must be ONE plain path part - anything else ("../x", "a/b", "C:x") falls back to the default
+const safeDirName = (v, def) => (typeof v === 'string' && /^[A-Za-z0-9._-]+$/.test(v) && v !== '.' && v !== '..') ? v : def;
+const TRASH_DIR  = path.join(OUTPUT_DIR, safeDirName(process.env.PHOENIX_TRASH_NAME, '.trash'));
+const TRASH_INDEX = path.join(TRASH_DIR, 'index.json');
+const THUMBS_DIR = path.join(OUTPUT_DIR, safeDirName(process.env.PHOENIX_THUMBS_NAME, '.thumbs'));
+const FS_CI = process.platform === 'win32';   // NTFS / Windows paths are case-insensitive
+const pcmp = (p) => FS_CI ? String(p).toLowerCase() : String(p);
+const sameP = (a, b) => pcmp(a) === pcmp(b);
+const relPosix = (abs) => path.relative(workingDir, abs).split(path.sep).join('/');
+const inside = (root, abs) => { const r = pcmp(root), x = pcmp(abs); return x !== r && x.startsWith(r + path.sep); };
+const insideOrSame = (root, abs) => sameP(root, abs) || inside(root, abs);
+const hasDrive = (s) => /^[a-zA-Z]:/.test(s) || s.startsWith('\\\\') || s.startsWith('//') || s.includes('\0');   // C:output/x (drive-relative), UNC
+const TRASH_KINDS_OK = ['image', 'i2i', 'video', 'upload'];
+const fsp = fs.promises;
+
+function trashValid(x) {
+  return !!x && typeof x === 'object' && typeof x.id === 'string' && !!x.id && typeof x.from === 'string' && typeof x.to === 'string'
+    && typeof x.at === 'string' && TRASH_KINDS_OK.includes(x.kind);
+}
+// strict = true: only a genuinely ABSENT index is []; unreadable / corrupt / any malformed entry THROWS (a trash that cannot be read
+// completely is never written over). strict = false (listing): valid entries only.
+function trashRead(strict) {
+  let raw;
+  try { raw = fs.readFileSync(TRASH_INDEX, 'utf8'); }
+  catch (e) { if (e && e.code === 'ENOENT') return []; if (strict) throw e; return []; }
+  let o;
+  try { o = JSON.parse(raw); } catch (e) { if (strict) throw e; return []; }
+  if (!Array.isArray(o)) { if (strict) throw new Error('the trash index is not a list'); return []; }
+  const good = o.filter(trashValid);
+  if (strict) {
+    if (good.length !== o.length) throw new Error('the trash index has ' + (o.length - good.length) + ' malformed entr' + (o.length - good.length === 1 ? 'y' : 'ies'));
+    if (new Set(good.map(x => x.id)).size !== good.length) throw new Error('the trash index has duplicate ids');
+  }
+  return good;
+}
+function trashWrite(list) {
+  fs.mkdirSync(TRASH_DIR, { recursive: true });
+  const tmp = TRASH_INDEX + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
+  fs.renameSync(tmp, TRASH_INDEX);
+}
+// LC2d: a local clip is two files side by side (<name>_local.<ext> silent, <name>_local.sound.<ext> original); -> { orig: is this the original, twin: the other one's path | null }
+function clipTwin(rel) {
+  const m = /^(.*)_local(\.sound)?(\.[A-Za-z0-9]+)$/.exec(String(rel || ''));
+  if (!m) return { orig: false, twin: null };
+  return m[2] ? { orig: true, twin: m[1] + '_local' + m[3] } : { orig: false, twin: m[1] + '_local.sound' + m[3] };
+}
+// LC2f (D3): where does a video workflow run? With TWO ComfyUI endpoints (comfyui + comfyui_bild) every one is asked what it can measure: are the entry's models and nodes
+// there (/object_info) and which PyTorch is it (/system_stats). Read-only GETs, 8 s / 4 s. With ONE endpoint -> null and not a single request. Never throws.
+// entryLike = { deps:{custom_nodes, models} } (a saved entry, or the deps of a dialog that is not saved yet); override = 'main' | 'bild' | undefined.
+async function measureVideoCandidates(cfg, entryLike) {
+  const eps = (cfg && cfg.endpoints) || {};
+  const main = String(eps.comfyui || 'http://localhost:8188').replace(/\/+$/, '');
+  const second = eps.comfyui_bild ? String(eps.comfyui_bild).replace(/\/+$/, '') : '';
+  if (!second || second.toLowerCase() === main.toLowerCase()) return null;
+  const one = async (key, base) => {
+    const c = { key, base, reachable: false, missing: [], torch: null };
+    try {
+      const r = await fetch(base + '/object_info', { signal: AbortSignal.timeout(8000) });
+      if (r.ok) {
+        const dep = workflows.checkDeps(entryLike || {}, await r.json());
+        c.reachable = true; c.missing = dep.missing_models.concat(dep.missing_nodes);
+      }
+    } catch (_) { /* not answering: reachable stays false */ }
+    if (c.reachable) {
+      try {
+        const r = await fetch(base + '/system_stats', { signal: AbortSignal.timeout(4000) });
+        if (r.ok) { const j = await r.json(); c.torch = (j && j.system && typeof j.system.pytorch_version === 'string') ? j.system.pytorch_version : null; }
+      } catch (_) { /* the PyTorch version stays unknown: no "modern" claim */ }
+    }
+    return c;
+  };
+  return Promise.all([one('main', main), one('bild', second)]);
+}
+async function measureVideoInstances(cfg, entryLike, override) {
+  const cands = await measureVideoCandidates(cfg, entryLike);
+  if (!cands) return null;
+  const pick = workflows.pickVideoInstance(cands, override);
+  return pick ? Object.assign(pick, { candidates: cands }) : null;
+}
+// the Advanced choice of the dialog: 'auto' | 'main' | 'second' -> the override the pick takes
+const instanceOverride = (mode) => mode === 'main' ? 'main' : (mode === 'second' ? 'bild' : undefined);
+// after a video entry was written: pick (or take the user's choice) and store it. -> { instance, pinned, line, candidates } | null (one ComfyUI: nothing measured, nothing stored)
+async function applyVideoInstance(cfg, id, mode) {
+  const entry = (workflows.loadRegistry().workflows || {})[id];
+  if (!entry || entry.stage !== 'video') return null;
+  const m = (mode === 'auto' || mode === 'main' || mode === 'second') ? mode : (entry.instance_pinned ? (entry.instance === 'bild' ? 'second' : 'main') : 'auto');
+  const pick = await measureVideoInstances(cfg, entry, instanceOverride(m));
+  if (!pick) return null;
+  workflows.setVideoInstance(id, pick.instance, m !== 'auto');
+  return { instance: pick.instance || null, pinned: m !== 'auto', line: pick.line, candidates: pick.candidates };
+}
+// LC2d (T8-3): the tombstone list - paths whose file was REALLY deleted by Empty trash, with the time it happened. The records log is never edited, so without this a
+// record whose trash entry was emptied is listed again as a "missing" tile. A record is hidden when it is not newer than the tombstone of its path (a NEW record at
+// the same path shows again). One file in the trash folder, atomic tmp + rename; bounded.
+const TOMB_FILE = path.join(TRASH_DIR, 'deleted.json');
+const TOMB_SOFT = 2000;   // above this many tombstones the list is compacted: only tombstones whose path has NO record any more are dropped (never one whose record still exists)
+function tombRead() {   // -> Map path -> at (ms); unreadable = nothing hidden
+  const m = new Map();
+  try {
+    const o = JSON.parse(fs.readFileSync(TOMB_FILE, 'utf8'));
+    if (Array.isArray(o)) for (const t of o) { const ms = t && typeof t.path === 'string' ? Date.parse(t.at) : NaN; if (isFinite(ms) && ms >= (m.get(t.path) || 0)) m.set(t.path, ms); }
+  } catch (_) { /* none yet */ }
+  return m;
+}
+function tombWrite(m) {   // throws when the file cannot be written
+  if (m.size > TOMB_SOFT) {
+    let live = null;
+    try { live = new Set(records.readRecords({ kinds: TRASH_KINDS_OK }).map(r => r.path)); } catch (_) { live = null; }
+    if (live) for (const k of [...m.keys()]) if (!live.has(k)) m.delete(k);
+  }
+  const list = [...m.entries()].map(([p, ms]) => ({ path: p, at: new Date(ms).toISOString() }));
+  fs.mkdirSync(TRASH_DIR, { recursive: true });
+  const tmp = TOMB_FILE + '.tmp-' + process.pid;
+  fs.writeFileSync(tmp, JSON.stringify(list), 'utf8');
+  fs.renameSync(tmp, TOMB_FILE);
+}
+function tombAdd(paths) { const m = tombRead(), now = Date.now(); for (const p of paths) m.set(p, now); tombWrite(m); }
+function tombRevert(paths, prev) {   // put the earlier state of these paths back (a delete that did not happen)
+  const m = tombRead();
+  for (const p of paths) { if (prev.has(p)) m.set(p, prev.get(p)); else m.delete(p); }
+  tombWrite(m);
+}
+const isLinkSync = (p) => { try { return fs.lstatSync(p).isSymbolicLink(); } catch (_) { return false; } };
+const realOf = (p) => { try { return fs.realpathSync(p); } catch (_) { return null; } };
+function nearestRealDir(p) { let d = p; for (let i = 0; i < 64; i++) { const r = realOf(d); if (r) return r; const up = path.dirname(d); if (up === d) return null; d = up; } return null; }
+// '' when the trash root may be used: not a link, its real path inside the real output/ (it need not exist yet)
+function trashRootError() {
+  if (isLinkSync(TRASH_DIR)) return 'the trash folder is a link - refused';
+  const ro = realOf(OUTPUT_DIR);
+  if (!ro) return 'output/ is missing';
+  const rt = realOf(TRASH_DIR);
+  if (rt && !inside(ro, rt)) return 'the trash folder resolves outside output/ - refused';
+  return '';
+}
+const inAnyTrash = (abs) => inside(TRASH_DIR, abs) || sameP(abs, TRASH_DIR) || inside(DEFAULT_TRASH_DIR, abs) || sameP(abs, DEFAULT_TRASH_DIR);
+// '' when rel is a servable, existing, non-link file inside output/ (and not inside the trash itself) - else the plain reason.
+function trashSourceError(rel) {
+  if (typeof rel !== 'string' || !rel || rel.includes('..') || path.isAbsolute(rel) || hasDrive(rel)) return 'not a recorded output file';
+  const abs = path.resolve(workingDir, rel);
+  if (!inside(OUTPUT_DIR, abs) || inAnyTrash(abs)) return 'only files inside output/ can be trashed';
+  let st;
+  try { st = fs.lstatSync(abs); } catch (_) { return 'file is gone'; }
+  if (st.isSymbolicLink() || !st.isFile()) return 'not a regular file';
+  const real = realOf(abs), realOut = realOf(OUTPUT_DIR), realTrash = realOf(TRASH_DIR);
+  if (!real || !realOut) return 'file is gone';
+  if (!inside(realOut, real) || (realTrash && insideOrSame(realTrash, real))) return 'only files inside output/ can be trashed';
+  return '';
+}
+function trashStamp() { return new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').replace('Z', ''); }   // 20261014-123456.789
+function pruneEmptyUp(dir) {   // remove empty folders from dir up to (excluding) the trash root
+  let d = dir;
+  while (inside(TRASH_DIR, d)) {
+    try { if (fs.readdirSync(d).length) return; fs.rmdirSync(d); } catch (_) { return; }
+    d = path.dirname(d);
+  }
+}
+async function pruneEmptyUpAsync(dir) {
+  let d = dir;
+  while (inside(TRASH_DIR, d)) {
+    try { if ((await fsp.readdir(d)).length) return; await fsp.rmdir(d); } catch (_) { return; }
+    d = path.dirname(d);
+  }
+}
+// the three mutating routes run one at a time (Empty trash is async; the index is read-modify-write)
+let trashChain = Promise.resolve();
+function withTrashLock(fn) { const p = trashChain.then(fn, fn); trashChain = p.catch(() => {}); return p; }
+
+// → [status, body]
+function trashDo(p) {
+  const rec = (!p || typeof p !== 'string' || p.includes('..')) ? null : records.readRecords({ kinds: TRASH_KINDS_OK }).find(r => r.path === p);
+  if (!rec) return [400, { error: 'not a recorded image or video' }];
+  const why = trashSourceError(p);
+  if (why === 'file is gone') return [404, { error: why }];
+  if (why) return [400, { error: why }];
+  const rootErr = trashRootError();
+  if (rootErr) return [400, { error: rootErr }];
+  let list;
+  try { list = trashRead(true); }
+  catch (e) { return [500, { error: 'The trash index could not be read - nothing was moved. ' + e.message }]; }
+  if (list.some(x => x.from === p)) return [409, { error: 'already in the trash' }];
+  const abs = path.resolve(workingDir, p);
+  const stamp = trashStamp();
+  let dest = path.join(TRASH_DIR, stamp, p);
+  for (let n = 2; fs.existsSync(dest); n++) dest = path.join(TRASH_DIR, stamp + '-' + n, p);
+  const entry = { id: require('crypto').randomBytes(6).toString('hex'), from: p, to: relPosix(dest), at: new Date().toISOString(), kind: rec.kind };
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const rt = realOf(TRASH_DIR), rd = realOf(path.dirname(dest));
+    if (!rt || !rd || !insideOrSame(rt, rd)) { pruneEmptyUp(path.dirname(dest)); return [400, { error: 'the trash folder resolves outside output/ - refused' }]; }
+    fs.renameSync(abs, dest);
+  } catch (e) { pruneEmptyUp(path.dirname(dest)); return [500, { error: 'Could not move the file to the trash: ' + e.message }]; }
+  try { trashWrite(list.concat([entry])); }
+  catch (e) {
+    let back = true;
+    try { fs.renameSync(dest, abs); } catch (_) { back = false; }   // the index is the undo record: no index entry, no move
+    if (back) pruneEmptyUp(path.dirname(dest));
+    return [500, { error: 'Could not write the trash index - ' + (back ? 'the file was put back. ' : 'the file could NOT be put back, it is at ' + entry.to + '. ') + e.message }];
+  }
+  try { trashTwin(p, entry); } catch (_) { /* the twin stays where it is; the clip itself is in the trash */ }
+  return [200, { ok: true, id: entry.id, item: entry }];
+}
+// LC2d (O3): a local clip's other file moves into the same trash folder as a linked entry (twin_of); it has no record of its own
+function trashTwin(p, main) {
+  const t = clipTwin(p);
+  if (!t.twin || trashSourceError(t.twin)) return;
+  const list = trashRead(true);
+  if (list.some(x => x.from === t.twin)) return;
+  const top = path.relative(TRASH_DIR, path.resolve(workingDir, main.to)).split(path.sep)[0];
+  const dest = path.join(TRASH_DIR, top, t.twin);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.renameSync(path.resolve(workingDir, t.twin), dest);
+  try { trashWrite(list.concat([{ id: require('crypto').randomBytes(6).toString('hex'), from: t.twin, to: relPosix(dest), at: main.at, kind: main.kind, twin_of: main.id }])); }
+  catch (e) { try { fs.renameSync(dest, path.resolve(workingDir, t.twin)); } catch (_) {} }
+}
+
+// → {} on success, { err, created } on failure. created = this call made the file at dst (so it, and only it, is removed again on failure).
+async function exclusiveCopy(src, dst) {
+  let fh;
+  try { fh = await fsp.open(dst, 'wx'); }   // EEXIST -> not ours, nothing touched
+  catch (err) { return { err, created: false }; }
+  try {
+    await require('stream/promises').pipeline(fs.createReadStream(src), fh.createWriteStream());
+    return {};
+  } catch (err) {
+    try { await fh.close(); } catch (_) {}
+    try { await fsp.unlink(dst); } catch (_) {}   // we created it exclusively: the partial copy is ours
+    return { err, created: true };
+  }
+}
+async function restoreDo(id) {
+  let list;
+  try { list = trashRead(true); }
+  catch (e) { return [500, { error: 'The trash index could not be read - nothing was moved. ' + e.message }]; }
+  const entry = id ? list.find(x => x.id === id) : null;
+  if (!entry) return [404, { error: 'not in the trash' }];
+  const bad = (s) => [400, { error: s }];
+  if ([entry.from, entry.to].some(s => s.includes('..') || path.isAbsolute(s) || hasDrive(s))) return bad('the trash entry points outside output/');
+  const from = path.resolve(workingDir, entry.from), to = path.resolve(workingDir, entry.to);
+  if (!inside(OUTPUT_DIR, from) || inAnyTrash(from) || !inside(TRASH_DIR, to)) return bad('the trash entry points outside output/');
+  const rootErr = trashRootError();
+  if (rootErr) return bad(rootErr);
+  let tst = null;
+  try { tst = fs.lstatSync(to); } catch (_) {}
+  if (!tst || tst.isSymbolicLink() || !tst.isFile()) return [404, { error: 'the trashed file is gone' }];
+  const rt = realOf(TRASH_DIR), ro = realOf(OUTPUT_DIR), rdTo = realOf(path.dirname(to));
+  if (!rt || !ro || !rdTo || !insideOrSame(rt, rdTo)) return bad('the trashed file resolves outside output/');
+  const nearFrom = nearestRealDir(path.dirname(from));
+  if (!nearFrom || !insideOrSame(ro, nearFrom) || insideOrSame(rt, nearFrom)) return bad('the original folder resolves outside output/');
+  try {
+    fs.mkdirSync(path.dirname(from), { recursive: true });
+    const rdFrom = realOf(path.dirname(from));
+    if (!rdFrom || !insideOrSame(ro, rdFrom) || insideOrSame(rt, rdFrom)) return bad('the original folder resolves outside output/');
+    // exclusive: a file that appears at the original path meanwhile is never replaced (EEXIST -> 409)
+    try { fs.linkSync(to, from); }
+    catch (e1) {
+      if (e1 && e1.code === 'EEXIST') return [409, { error: 'a file already exists at the original path - nothing was restored' }];
+      // No hard links here: copy. The destination is RESERVED by exclusive creation ('wx') first, then streamed into (async: a big video must not freeze
+      // the server). Only a file this attempt created is ever removed; a file somebody else put at `from` is never touched.
+      const c = await exclusiveCopy(to, from);
+      if (c.err) {
+        if (!c.created && c.err.code === 'EEXIST') return [409, { error: 'a file already exists at the original path - nothing was restored' }];
+        return [500, { error: 'Could not copy the file back - it stays in the trash. ' + ((c.err && c.err.message) || c.err) }];
+      }
+    }
+    try { fs.unlinkSync(to); }
+    catch (e3) { try { fs.unlinkSync(from); } catch (_) {} return [500, { error: 'Could not take the file out of the trash: ' + e3.message }]; }
+  } catch (e) { return [500, { error: 'Could not restore the file: ' + e.message }]; }
+  try { trashWrite(list.filter(x => x.id !== id)); }
+  catch (e) {
+    let back = true;
+    try { fs.renameSync(from, to); } catch (_) { back = false; }
+    return [500, { error: 'Could not write the trash index - ' + (back ? 'the file stays in the trash. ' : 'the file is restored at ' + entry.from + ' but its trash entry could not be updated. ') + e.message }];
+  }
+  pruneEmptyUp(path.dirname(to));
+  const warns = [];   // LC2d (O3, round 3): a twin that cannot be restored is reported, and stays in the trash as an item of its own (visible, retryable) - never hidden behind its clip
+  for (const lk of list.filter(x => x.twin_of === id)) {
+    let tr;
+    try { tr = await restoreDo(lk.id); } catch (e) { tr = [500, { error: String((e && e.message) || e) }]; }
+    if (tr[0] !== 200) {
+      warns.push((tr[1] && tr[1].error) || 'unknown error');
+      try { trashWrite(trashRead(true).map(x => { if (x.id !== lk.id) return x; const c2 = Object.assign({}, x); delete c2.twin_of; return c2; })); } catch (_) { /* the entry stays linked; the next Restore of the clip is gone, but Empty only deletes it on purpose */ }
+    }
+  }
+  return [200, Object.assign({ ok: true, path: entry.from, url: '/file?p=' + encodeURIComponent(entry.from) }, warns.length ? { warning: 'The clip is back, but its sound file could not be restored (' + warns[0] + ') - it stays in the trash; restore it from there.' } : {})];
+}
+
+// Empty trash (T6-6): the only delete. Async fs, bounded concurrency; entries whose delete failed STAY (and are reported).
+async function emptyDo(kinds) {
+  const want = Array.isArray(kinds) ? kinds.filter(k => TRASH_KINDS_OK.includes(k)) : [];
+  let list;
+  try { list = trashRead(true); }
+  catch (e) { return [500, { error: 'The trash index could not be read - nothing was deleted. ' + e.message }]; }
+  const rootErr = trashRootError();
+  if (rootErr) return [400, { error: rootErr }];
+  const rt = realOf(TRASH_DIR);
+  const gone = want.length ? list.filter(x => want.includes(x.kind)) : list;
+  const cand = gone.filter(x => typeof x.to === 'string' && !x.to.includes('..') && !path.isAbsolute(x.to) && !hasDrive(x.to) && inside(TRASH_DIR, path.resolve(workingDir, x.to))).map(x => x.from);
+  const prevTomb = tombRead();
+  if (cand.length) { try { tombAdd(cand); } catch (e) { return [500, { error: 'Nothing was deleted - the list of deleted files could not be written: ' + e.message }]; } }   // durable FIRST: the index is untouched on failure, a retry works
+  let removed = 0;
+  const failed = [];
+  const unlinked = [];   // LC2d (T8-3): the paths whose file is really gone now (their records must not come back as tiles)
+  const one = async (x) => {
+    const to = path.resolve(workingDir, x.to);
+    if (x.to.includes('..') || path.isAbsolute(x.to) || hasDrive(x.to) || !inside(TRASH_DIR, to)) return;   // an entry pointing outside the trash is dropped, never followed
+    let st;
+    try { st = await fsp.lstat(to); }
+    catch (e) { if (e && e.code === 'ENOENT') { unlinked.push(x.from); return; } failed.push({ id: x.id, from: x.from, error: e.message }); return; }
+    let rd = null;
+    try { rd = await fsp.realpath(path.dirname(to)); } catch (_) {}
+    if (st.isSymbolicLink() || !st.isFile() || !rt || !rd || !insideOrSame(rt, rd)) { failed.push({ id: x.id, from: x.from, error: 'not a regular file inside the trash - left alone' }); return; }
+    if (x.kind === 'video') { try { await fsp.unlink(path.join(THUMBS_DIR, thumbHash(x.from, st.mtimeMs) + '.jpg')); } catch (_) {} }   // its cached poster goes with it
+    try { await fsp.unlink(to); removed++; unlinked.push(x.from); }
+    catch (e) { if (e && e.code === 'ENOENT') { unlinked.push(x.from); return; } failed.push({ id: x.id, from: x.from, error: e.message }); return; }
+    await pruneEmptyUpAsync(path.dirname(to));
+  };
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(8, gone.length) }, async () => { while (next < gone.length) { const x = gone[next++]; await one(x); } }));
+  const failedIds = new Set(failed.map(f => f.id));
+  const keep = list.filter(x => !gone.includes(x) || failedIds.has(x.id));
+  if (!want.length && !failed.length) {   // everything: also sweep what the index does not know about - inside the trash folder only
+    const keepTop = new Set(keep.map(x => path.relative(TRASH_DIR, path.resolve(workingDir, x.to)).split(path.sep)[0]));
+    try {
+      for (const n of await fsp.readdir(TRASH_DIR)) {
+        if (n === 'index.json' || n.startsWith('index.json.tmp-') || n === 'deleted.json' || n.startsWith('deleted.json.tmp-') || keepTop.has(n)) continue;
+        try { await fsp.rm(path.join(TRASH_DIR, n), { recursive: true, force: true }); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  const notDone = cand.filter(p => !unlinked.includes(p));   // announced but not deleted (a failed unlink, an entry pointing outside the trash): not tombstoned after all
+  if (notDone.length) { try { tombRevert(notDone, prevTomb); } catch (_) { /* harmless: such a record is still hidden by its trash entry */ } }
+  try { trashWrite(keep); }
+  catch (e) { return [500, { error: 'Files were deleted but the trash index could not be written: ' + e.message }]; }
+  return [200, { ok: failed.length === 0, removed, left: keep.length, failed }];
+}
+
+// video poster (T6-23): one ffmpeg frame, cached by sha1(path + mtime). child_process is looked up at call time (test seam: cp.execFile).
+const thumbInFlight = new Map();
+const thumbFailed = new Map();   // hash -> time of the failure: a clip ffmpeg cannot read is not re-spawned for 5 minutes (bounded: noteThumbFailure)
+const THUMB_FAIL_TTL = 300000, THUMB_FAIL_MAX = 500;
+function noteThumbFailure(hash) {
+  const now = Date.now();
+  for (const [k, t] of thumbFailed) if (now - t >= THUMB_FAIL_TTL) thumbFailed.delete(k);   // expired
+  thumbFailed.delete(hash);
+  while (thumbFailed.size >= THUMB_FAIL_MAX) thumbFailed.delete(thumbFailed.keys().next().value);   // oldest first
+  thumbFailed.set(hash, now);
+}
+const thumbHash = (relKey, mtimeMs) => require('crypto').createHash('sha1').update(relKey + '|' + mtimeMs).digest('hex');
+function thumbMake(abs, mtimeMs, relKey) {
+  const hash = thumbHash(relKey, mtimeMs);
+  const out = path.join(THUMBS_DIR, hash + '.jpg');
+  try { if (fs.statSync(out).size > 0) return Promise.resolve(out); } catch (_) {}
+  if (thumbFailed.has(hash) && Date.now() - thumbFailed.get(hash) < THUMB_FAIL_TTL) return Promise.resolve(null);
+  if (thumbInFlight.has(hash)) return thumbInFlight.get(hash);
+  const run = (args, tmp) => new Promise((resolve) => {
+    try {
+      require('child_process').execFile(voice.ffmpegPath(), args, { timeout: 30000, windowsHide: true }, (err) => {
+        let ok = false;
+        try { ok = !err && fs.statSync(tmp).size > 0; } catch (_) {}
+        resolve(ok);
+      });
+    } catch (_) { resolve(false); }
+  });
+  const p = (async () => {
+    try { fs.mkdirSync(THUMBS_DIR, { recursive: true }); } catch (_) { return null; }
+    const tmp = path.join(THUMBS_DIR, hash + '.tmp-' + process.pid + '.jpg');
+    const mk = (ss) => ['-hide_banner', '-loglevel', 'error', '-y'].concat(ss ? ['-ss', '0.5'] : [], ['-i', abs, '-frames:v', '1', '-vf', 'scale=320:-1', tmp]);
+    let ok = await run(mk(true), tmp);
+    if (!ok) { try { fs.unlinkSync(tmp); } catch (_) {} ok = await run(mk(false), tmp); }   // a clip shorter than 0.5 s has no frame there
+    if (!ok) { try { fs.unlinkSync(tmp); } catch (_) {} noteThumbFailure(hash); return null; }
+    try { fs.renameSync(tmp, out); } catch (_) { try { fs.unlinkSync(tmp); } catch (_) {} return null; }
+    return out;
+  })().finally(() => { thumbInFlight.delete(hash); });
+  thumbInFlight.set(hash, p);
+  return p;
+}
+
 // ─── Busy flag (now managed by shared lock — see lock.js) ────────────────────
 
 // ─── Request handler ──────────────────────────────────────────────────────────
 
+// v1.10 ADV: GET/POST /palette answer - hint/style/builtin per category plus the params of the ACTIVE image + mesh workflows
+// ({ value, overridden, workflow } per key) and which workflow each stage's params come from.
+function paletteResponse() {
+  const cats = palette.loadPalette().categories;
+  const pv = wfp.paletteView(a.loadConfig());
+  const out = {};
+  for (const [k, c] of Object.entries(cats)) out[k] = { hint: c.hint, style: c.style, builtin: !!c.builtin, params: pv.params[k] || {} };
+  return { categories: out, paramSource: pv.paramSource, paramDefs: pv.defs };
+}
+
+// <r1-remote> B1 (structural): a REMOTE request is authorised again the moment its body has arrived. If its device was disconnected, Remote access switched off, or
+// the request was cut while the body was on the wire, remote.revoked()/abandon() answer 401 (when a socket is left), destroy the request, and the promise returned here
+// NEVER SETTLES - so no route's own "catch and carry on with defaults" can run its action. (Requests without the remote marker behave exactly as before.)
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    const isR = remote.isRemoteReq(req);
+    const pre = remote.bufferedBody(req);   // POST /config from a phone was already read once (quick-switch check)
+    if (pre) { if (remote.revoked(req)) return; return resolve(pre.toString('utf8')); }
     const chunks = [];
     req.on('data', chunk => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', () => { if (isR && remote.revoked(req)) return; resolve(Buffer.concat(chunks).toString('utf8')); });
+    req.on('error', (e) => { if (isR) { remote.abandon(req); return; } reject(e); });
   });
 }
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
+    const isR = remote.isRemoteReq(req);
     const chunks = [];
     req.on('data', c => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    req.on('end', () => { if (isR && remote.revoked(req)) return; resolve(Buffer.concat(chunks)); });
+    req.on('error', (e) => { if (isR) { remote.abandon(req); return; } reject(e); });
   });
 }
+// B2: after ANY wait between the body and the action (a lock queue, a probe), a remote request is checked once more. true = go on.
+const REMOTE_GONE = { error: 'Not paired - open the pairing link from Phoenix on the laptop.' };
+const REMOTE_NO_PAID = { error: 'Only on the laptop: paid jobs (Meshy, fal.ai).' };   // LC2i: v1.10 - a paired phone starts nothing that costs money (an opt-in switch is planned for 1.10.1)
+function remoteOk(req, res) { if (remote.authorised(req)) return true; sendJSON(res, 401, REMOTE_GONE); return false; }
+const ifStillAuthorized = (req, fn) => () => (remote.authorised(req) ? fn() : [401, REMOTE_GONE]);
 
 function sendJSON(res, statusCode, obj) {
+  if (res.writableEnded) return;   // <r1-remote> the response was already answered (a revoked remote request): never answer twice
   const body = JSON.stringify(obj);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
@@ -382,6 +898,7 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 // hostname and port (the page's own relative requests always match). No cross-alias exemption: another service on [::1]:7777 or localhost:9999 is not
 // Phoenix on 127.0.0.1:7777. No Origin = curl, phoenix-mcp.js, the Blender addon: unchanged (loopback Host only).
 function isLocalRequest(req) {
+  if (remote.isRemoteReq(req)) return true;   // <r1-remote> only the remote listener's own, already-checked requests carry the private marker; every other request falls through unchanged
   const h = req.headers || {};
   let hostName = null, hostPort = '80';
   if (h.host !== undefined) {
@@ -399,7 +916,8 @@ function isLocalRequest(req) {
 }
 
 // ─── MCP (v1.9 M6) ────────────────────────────────────────────────────────────
-// M6.1: EVERY Phoenix tool in assistant.js TOOLS except i2i_edit (UI-only decision) is reachable over POST /mcp/call, each in
+// M6.1: the Phoenix tools in assistant.js TOOLS except i2i_edit (UI-only decision) and the 1.10 tools generate_from_refs and
+// make_video (not wired yet) are reachable over POST /mcp/call, each in
 // exactly one class:  R read-only (no lock, runs during a background job) · H heavy GPU · S scene (Blender) · L library write
 // (reads the scene / writes files, no scene change) · U Unreal · O opt-in (off by default, see MCP_OPTIN).
 // Everything but R needs the lock and is refused while a background generation runs (same doors as /chat and /rewind).
@@ -437,12 +955,39 @@ const remeshView = (c) => {
     maxUploadMB: (typeof r.maxUploadMB === 'number' && r.maxUploadMB > 0) ? r.maxUploadMB : 60,
     keyPresent: !!providers.getKey('meshy') };   // D8: also true for a key found via the environment; never the value
 };
+// V3: the video (fal.ai) block for the Settings page - never the key, never the base URL. audio = the config default for generate_audio (on unless video.fal.audio is false).
+const videoView = (c) => {
+  const f = (c && c.video && c.video.fal && typeof c.video.fal === 'object') ? c.video.fal : {};
+  return { fal: { enabled: f.enabled === true, audio: f.audio !== false, keyPresent: !!providers.getKey('fal') } };
+};
 const mcpFlagsView = (c) => ({ allowBlenderRun: mcpAllows(c, 'allowBlenderRun'), allowUnrealRun: mcpAllows(c, 'allowUnrealRun'), allowDelete: mcpAllows(c, 'allowDelete') });
 // "Render check: PASS | FAIL — why | UNVERIFIED — why | NO VERDICT — why | not run" (the MCP client and the chat line say the same)
 function mcpVerdictLine(verdict, stopReason) {
   if (!verdict) return 'Render check: not run';
   const word = verdict === 'unverified' ? 'UNVERIFIED' : verdict === 'none' ? 'NO VERDICT' : String(verdict).toUpperCase();
   return 'Render check: ' + word + (verdict !== 'pass' && stopReason ? ' — ' + stopReason : '');
+}
+
+// <r1-remote> GET /remote/api/me (any paired phone: "am I remote, and who") + the laptop-only management routes. Returns true when answered.
+async function remoteApi(req, res, method, p) {
+  if (method === 'GET' && p === '/remote/api/me') {
+    const d = remote.deviceOf(req);
+    sendJSON(res, 200, d ? { remote: true, name: d.name } : { remote: false });
+    return true;
+  }
+  if (!['/remote/api/state', '/remote/api/pair', '/remote/api/approve', '/remote/api/reject', '/remote/api/disconnect'].includes(p)) return false;
+  if (remote.isRemoteReq(req)) { sendJSON(res, 403, { error: 'Only on the laptop: Remote access settings.' }); return true; }
+  if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return true; }
+  if (method === 'GET' && p === '/remote/api/state') { sendJSON(res, 200, remote.view()); return true; }
+  if (method !== 'POST') { sendJSON(res, 405, { error: 'POST only' }); return true; }
+  let body = {};
+  try { body = JSON.parse((await readBody(req)) || '{}') || {}; } catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return true; }
+  const answer = (r) => { sendJSON(res, r.ok ? 200 : (r.status || 400), r.ok ? r : { error: r.error }); return true; };
+  if (p === '/remote/api/pair') return answer(await remote.startPairing());
+  const id = typeof body.id === 'string' ? body.id : '';
+  if (p === '/remote/api/approve') return answer(remote.approve(id));
+  if (p === '/remote/api/reject') return answer(remote.reject(id));
+  return answer(remote.disconnect(id));
 }
 
 async function handler(req, res) {
@@ -457,6 +1002,8 @@ async function handler(req, res) {
     sendJSON(res, 403, { error: 'Cross-site request refused.' });
     return;
   }
+
+  if (urlPath.startsWith('/remote/api/') && await remoteApi(req, res, method, urlPath)) return;   // <r1-remote>
 
   // ── GET / ──────────────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/') {
@@ -540,6 +1087,36 @@ async function handler(req, res) {
     });
     return;
   }
+
+  // ── GET /examples/<file> ── <b2r-example>
+  // The per-workflow example image / mesh under web/examples/ (read only; a plain file name, no sub-folders). None ship yet:
+  // a missing file makes the UI say "No example yet".
+  if (method === 'GET' && urlPath.startsWith('/examples/')) {
+    let fileName = '';
+    try { fileName = decodeURIComponent(urlPath.slice('/examples/'.length)); } catch (_) { /* stays '' → 400 */ }
+    if (!fileName || fileName.includes('..') || fileName.includes('/') || fileName.includes('\\') || fileName.includes('\0')) {
+      res.writeHead(400);
+      res.end('400 Bad Request');
+      return;
+    }
+    const filePath = path.join(WEB_ROOT, 'examples', fileName);
+    try {   // fs.stat can throw synchronously on a name it rejects (ERR_INVALID_ARG_VALUE) → 400, never 500
+      fs.stat(filePath, (err, stat) => {
+        if (err || !stat.isFile()) {
+          res.writeHead(404);
+          res.end('404 Not Found');
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': extToMime(path.extname(fileName)), 'Content-Length': stat.size });
+        fs.createReadStream(filePath).pipe(res);
+      });
+    } catch (_) {
+      res.writeHead(400);
+      res.end('400 Bad Request');
+    }
+    return;
+  }
+  // </b2r-example>
 
   // ── GET /file?p=<relpath> ──────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/file') {
@@ -663,9 +1240,10 @@ async function handler(req, res) {
         // onArtifact: the chat path's route to the artifact tabs. inspect_render and the
         // render-vision gate produce a picture mid-turn; without this hook the render was
         // taken and judged but never shown (the /action route had it, the chat path did not).
-        const { text, messages, stopped, visionOff, mode: ranMode } = await a.runTurn(message, history, state, cfg, {
+        const turnResult = await a.runTurn(message, history, state, cfg, {
           blenderOnly: !!(body && body.noTool), background: true, holdsLock: true,
           mode: body && body.mode,   // undefined = runConfig falls back to cfg.gates.mode
+          remote: remote.isRemoteReq(req),   // LC2i: a chat turn from a paired phone starts no paid job (remesh_asset refuses)
           onArtifact: (art) => {
             try {
               if (!art || !art.rel) return;
@@ -688,16 +1266,17 @@ async function handler(req, res) {
           },
         });
 
+        const { text, stopped, visionOff, mode: ranMode } = turnResult;
+
         // Mirror CLI post-turn persistence exactly
-        history.push({ role: 'user', content: message, turn: turnNo });
-        const lastAssistant = messages.findLast(m => m.role === 'assistant');
-        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content, turn: turnNo });
-        a.saveHistory(history);
+        a.persistTurn(history, message, turnResult, turnNo);
+        a.saveHistory(history, 2 * ((cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3));
         a.saveState(state);
 
         // mode: what this turn ran as (the UI marks Auto replies); stopped / visionOff only when set.
         broadcast({ kind: 'reply', text, mode: ranMode || (body && body.mode) || 'ask',
-          ...(stopped ? { stopped } : {}), ...(visionOff ? { visionOff: true } : {}) });
+          ...(stopped ? { stopped } : {}), ...(visionOff ? { visionOff: true } : {}),
+          ...(turnResult.context ? { context: turnResult.context } : {}) });
       } catch (err) {
         broadcast({ kind: 'error', message: String(err.message || err) });
       } finally {
@@ -705,6 +1284,33 @@ async function handler(req, res) {
       }
     })();
 
+    return;
+  }
+
+  // ── POST /chat/reset (LC2d T8-14 "New chat") ────────────────────────────────
+  // Empties the in-memory history AND session/history.json (the same writer a turn uses), then tells every open page (laptop + paired phone) to clear its chat view.
+  // Refused while a turn, a deferred generation or a background job runs. Checkpoints, scene, storyboards are not touched. Same doors as /chat and /rewind.
+  if (method === 'POST' && urlPath === '/chat/reset') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    if (deferredInFlight || jobs.isRunning()) {
+      sendJSON(res, 409, { error: 'A background generation is running - New chat is blocked until it finishes.' });
+      return;
+    }
+    if (!lock.tryAcquire()) { sendJSON(res, 409, { error: 'Phoenix is busy with a turn - New chat is blocked until it finishes.' }); return; }
+    try {
+      // D2: the empty history goes to disk FIRST; memory changes (and the pages are told) only after that succeeded - a failure leaves memory, file and views as they were
+      const cfgR = a.loadConfig();
+      a.saveHistory([], 2 * ((cfgR.seats && cfgR.seats.orchestrator && cfgR.seats.orchestrator.historyMessages) || 3));
+      cfg = cfgR;
+      history = [];
+    } catch (e) {
+      lock.release();
+      sendJSON(res, 500, { error: 'Could not clear the saved chat: ' + String((e && e.message) || e) });
+      return;
+    }
+    lock.release();
+    broadcast({ kind: 'chatreset' });
+    sendJSON(res, 200, { ok: true });
     return;
   }
 
@@ -723,7 +1329,7 @@ async function handler(req, res) {
 
     const { action, input } = body || {};
 
-    const ALLOWED = ['generate_image', 'i2i_edit', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
+    const ALLOWED = ['generate_image', 'i2i_edit', 'generate_from_refs', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
       'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render',
       // Registering a tool in assistant.js is NOT enough — the UI posts through here, and this
       // list is a second, independent gate. Missing it produced "unknown action" 400s on every
@@ -734,6 +1340,18 @@ async function handler(req, res) {
     if (!ALLOWED.includes(action)) {
       sendJSON(res, 400, { error: 'unknown action' });
       return;
+    }
+    if (action === 'remesh_asset' && remote.isRemoteReq(req)) { sendJSON(res, 403, REMOTE_NO_PAID); return; }   // LC2i: Meshy costs credits
+
+    // v1.10 I1: generate_from_refs — every reference goes through the ONE path rule (servable.js, same texts as the storyboard route)
+    // BEFORE anything is accepted or locked: a bad path is a plain 400, not a BUSY/202 followed by an error event.
+    if (action === 'generate_from_refs') {
+      const refsIn = input && typeof input === 'object' ? input.refs : undefined;
+      if (!Array.isArray(refsIn)) { sendJSON(res, 400, { error: 'refs must be a list of image paths' }); return; }
+      for (const rel of refsIn) {
+        const refErr = (typeof rel === 'string' && rel !== '') ? servable.servableImageError(workingDir, rel) : 'image must be a path';
+        if (refErr) { sendJSON(res, 400, { error: refErr }); return; }
+      }
     }
 
     // M9: remesh_asset is a CLOUD job (Meshy) — light: no Blender lock, no GPU, so it is neither refused because a ComfyUI job runs
@@ -760,7 +1378,7 @@ async function handler(req, res) {
     // Blender lock for that wait — holding it would freeze Phoenix the whole time (hy_motion takes
     // the lock late for its Blender-apply; i2i never touches Blender at all). So they "defer" the
     // lock and instead guard a single-slot flag. (i2i joined this path 2026-08-06 — Q3.)
-    const defersLock = (action === 'hy_motion' || action === 'i2i_edit');
+    const defersLock = (action === 'hy_motion' || action === 'i2i_edit' || action === 'generate_from_refs');   // generate_from_refs (I1): ComfyUI-only, never touches Blender
     // The heavy LOCK-BASED generations. They call freeOtherInstances() before running, which would
     // evict a deferred edit's model mid-flight — so they and the deferred ops must be mutually
     // exclusive on the single GPU. Light Blender actions (rename, material, blender_run) are NOT
@@ -862,6 +1480,18 @@ async function handler(req, res) {
             replyText = (m[3] || '').trim() || ('i2i edit done (' + (meta.workflowId || 'edit') + ').');
           }
         }
+        // generate_from_refs returns a NEW image (REF_TILE <abs-path>	<meta-json>): it becomes the current image (Image tab +
+        // Library refresh happen on the 'image' artifact, like any new generation) and the marker is stripped from the chat reply.
+        if (action === 'generate_from_refs' && typeof result === 'string') {
+          const t = a.parseRefTile(result);
+          if (t) {
+            const rel = path.relative(workingDir, t.abs).split(path.sep).join('/');
+            a.applyRefTile(state, t);   // lastImage, lastImageCategory (from the request when given), description from the prompt
+            a.saveState(state);
+            broadcast({ kind: 'artifact', slot: 'image', url: '/file?p=' + encodeURIComponent(rel) + '&t=' + Date.now(), meta: t.meta });
+            replyText = t.tail || ('Reference image done (' + (t.meta.workflowId || 'image') + ').');
+          }
+        }
         // The action name travels with the reply so the UI can react to WHAT finished instead of
         // sniffing the reply text. Text sniffing misfires on chat turns that happen to echo the
         // same wording, and it silently rots the moment a message is reworded.
@@ -937,13 +1567,37 @@ async function handler(req, res) {
   // GET /voice-state — everything the tab needs to draw itself in one round trip.
   if (method === 'GET' && urlPath === '/voice-state') {
     const [h, v] = await Promise.all([voice.health(), voice.listVoices()]);
+    sbVoiceSeen.names = (v && Array.isArray(v.voices)) ? new Set(v.voices.map(x => x && x.name)) : null;   // <sb3> the storyboard view's cast availability
     sendJSON(res, 200, {
       health: h,
       voices: (v && v.voices) || [],
       voicesError: (v && v.error) || null,
       effects: voice.listEffects().map(e => ({ id: e.id, label: e.label })),
       takes: voice.listTakes(),
+      // VO1: local-dispatcher status line + the reference WAVs in sounds/refs/ (Chatterbox).
+      dispatcher: voice.dispatcherStatus(),
+      consent: voice.cfg().consentAck === true,   // VO1b: the one-time cloning consent (Settings -> Voice)
+      refs: voice.listRefs(),
     });
+    return;
+  }
+
+  // VO1 — the local voice dispatcher (voice.dispatcher = { local: true }). GET = status + last log lines;
+  // restart / stop are local-mode only (400 otherwise: in rig mode Phoenix owns no process).
+  if (method === 'GET' && urlPath === '/voice/dispatcher') {
+    sendJSON(res, 200, voice.dispatcherStatus());
+    return;
+  }
+  if (method === 'POST' && (urlPath === '/voice/dispatcher/restart' || urlPath === '/voice/dispatcher/stop')) {
+    const r = urlPath.endsWith('/restart') ? await voice.dispatcherRestart() : await voice.dispatcherStop();
+    if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
+    sendJSON(res, 200, r);
+    return;
+  }
+
+  // POST /voice-refs-open — show sounds/refs/ (the reference voices) in the OS file browser.
+  if (method === 'POST' && urlPath === '/voice-refs-open') {
+    sendJSON(res, 200, voice.openRefsFolder());
     return;
   }
 
@@ -958,7 +1612,7 @@ async function handler(req, res) {
       return;
     }
     const r = await voice.speak(body);
-    if (r.error && !r.ok) { sendJSON(res, 400, r); return; }
+    if (r.error && !r.ok) { sendJSON(res, r.consentRequired ? 409 : 400, r); return; }
     sendJSON(res, 200, r);
     return;
   }
@@ -1198,16 +1852,22 @@ async function handler(req, res) {
       const absPath   = path.join(uploadsDir, finalName);
       fs.writeFileSync(absPath, buf);
 
-      state.lastImage         = absPath;
-      state.lastImageCategory = (cat && typeof cat === 'string') ? cat : 'item';
-      state.lastImageDesc     = path.basename(finalName, ext);
-      a.saveState(state);
-
       const rel = 'output/uploads/' + finalName;
       const url = '/file?p=' + encodeURIComponent(rel);
 
-      broadcast({ kind: 'artifact', slot: 'image', url, source: 'upload' });
-      broadcast({ kind: 'reply', text: 'Loaded image: ' + finalName + ' — it is in the Image tab. Click "Make 3D" to convert it (set a face count first if you like).' });
+      // <l1-library> every successful upload is recorded, so the Library's Image tab lists it under "imported"
+      records.appendRecord({ kind: 'upload', path: rel, workflow: null, prompt: null, seed: null, parent: null, category: 'imported' });
+
+      // <l1-library> add=1 (Library "+ Add" / drop): store + record only - the current image, the artifact and the chat stay untouched
+      if (parsedUrl.searchParams.get('add') !== '1') {
+        state.lastImage         = absPath;
+        state.lastImageCategory = (cat && typeof cat === 'string') ? cat : 'item';
+        state.lastImageDesc     = path.basename(finalName, ext);
+        a.saveState(state);
+
+        broadcast({ kind: 'artifact', slot: 'image', url, source: 'upload' });
+        broadcast({ kind: 'reply', text: 'Loaded image: ' + finalName + ' — it is in the Image tab. Click "Make 3D" to convert it (set a face count first if you like).' });
+      }
 
       sendJSON(res, 200, { ok: true, url });
     } catch (e) {
@@ -1267,7 +1927,7 @@ async function handler(req, res) {
       r = await checkpoints.rewind(body && body.id, body && body.choice, {
         cfg, turn: state.turnSeq,
         loadHistory: () => history,
-        saveHistory: (h) => { history = h; a.saveHistory(h); },
+        saveHistory: (h) => { history = h; a.saveHistory(h, 2 * ((cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3)); },
       });
     } catch (e) {
       r = { ok: false, error: String((e && e.message) || e) };
@@ -1294,6 +1954,8 @@ async function handler(req, res) {
       checkpoints: checkpoints.settings(fresh),
       mcp: mcpFlagsView(fresh),
       remesh: remeshView(fresh),   // M9: never the key, never the base URL
+      video: videoView(fresh),     // V3: fal.ai video opt-in + "key present"; never the key
+      voice: voice.settingsView(fresh),   // VO1b: Settings -> Voice (local engines, install folder, free space, watermark, consent)
       mcpScript: path.join(workingDir, 'phoenix-mcp.js'),   // absolute path for the Settings setup lines
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
       seats: seatsView(fresh),
@@ -1332,6 +1994,566 @@ async function handler(req, res) {
     sendJSON(res, 200, { assets });
     return;
   }
+
+  // ── v1.10 LIB2 (T6-6): trash for images + videos ─────────────────────────────────────────────────────────
+  // GET /images also carries trash:[…] · POST /images/trash {path} · POST /images/restore {id} · POST /images/trash/empty {kinds?}
+  if (method === 'POST' && urlPath === '/images/trash') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const p = body && typeof body.path === 'string' ? body.path : '';
+    const [code, out] = await withTrashLock(ifStillAuthorized(req, () => trashDo(p)));   // <r1-remote> B2: re-checked when the queue turn comes
+    sendJSON(res, code, out);
+    return;
+  }
+  if (method === 'POST' && urlPath === '/images/restore') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const id = body && typeof body.id === 'string' ? body.id : '';
+    const [code, out] = await withTrashLock(ifStillAuthorized(req, () => restoreDo(id)));
+    sendJSON(res, code, out);
+    return;
+  }
+  if (method === 'POST' && urlPath === '/images/trash/empty') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const [code, out] = await withTrashLock(ifStillAuthorized(req, () => emptyDo(body && body.kinds)));
+    sendJSON(res, code, out);
+    return;
+  }
+
+  // ── GET /thumb?p=<video path> (v1.10 LIB2, T6-23): JPEG poster, extracted once with ffmpeg and cached in output/.thumbs/ ─────────
+  if (method === 'GET' && urlPath === '/thumb') {
+    const p = parsedUrl.searchParams.get('p');
+    const resolved = resolveFileParam(p);   // the /file path rule
+    if (!resolved || !resolved.allowed) { res.writeHead(403); res.end('403 Forbidden'); return; }
+    let st = null;
+    try { st = fs.statSync(resolved.abs); } catch (_) {}
+    if (!st || !st.isFile()) { res.writeHead(404); res.end('404 Not Found'); return; }
+    let jpg = null;
+    try { jpg = await thumbMake(resolved.abs, st.mtimeMs, p); } catch (_) { jpg = null; }
+    let buf = null;
+    try { if (jpg) buf = fs.readFileSync(jpg); } catch (_) {}
+    if (!buf || !buf.length) { res.writeHead(404); res.end('404 Not Found'); return; }   // ffmpeg missing / failed: the tile shows its placeholder
+    res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length });
+    res.end(buf);
+    return;
+  }
+
+  // ── GET /images?kind=image,i2i ───────────────────────────────────────────
+  // The output record, newest first (max 500). url only where /file would serve the path; exists = on disk now.
+  // A file deleted since is shown, never dropped from the record.
+  if (method === 'GET' && urlPath === '/images') {
+    const want = String(parsedUrl.searchParams.get('kind') || 'image,i2i,upload').split(',').map(s => s.trim()).filter(k => ['image', 'i2i', 'video', 'upload'].includes(k));   // <l1-library> uploads are listed by default
+    const kinds = want.length ? want : ['image', 'i2i', 'upload'];
+    const trashed = new Set(trashRead(false).map(x => x.from));   // v1.10 LIB2: a record whose file is in the trash is not listed
+    let usedClips = null;   // LC2d (B1): clip paths some shot uses (read once, only when a local clip is listed)
+    const tombs = tombRead();   // LC2d (T8-3): …nor one whose trash entry was emptied (unless the record is newer than that)
+    const items = records.readRecords({ kinds }).filter(r => !(typeof r.path === 'string' && trashed.has(r.path))).filter(r => { const t = typeof r.path === 'string' ? tombs.get(r.path) : undefined; if (t === undefined) return true; const ra = Date.parse(r.at); return isFinite(ra) && ra > t; }).slice(0, 500).map(r => {
+      const p = typeof r.path === 'string' ? r.path : '';
+      const abs = path.resolve(workingDir, p);
+      const f = p && !path.isAbsolute(p) ? resolveFileParam(p) : null;
+      let exists = false;
+      try { exists = !!p && fs.statSync(abs).isFile(); } catch (_) {}
+      const out = { ...r, url: (f && f.allowed) ? '/file?p=' + encodeURIComponent(p) : null, exists };
+      if (r.kind === 'video' && out.url) out.thumb = '/thumb?p=' + encodeURIComponent(p);
+      if (r.kind === 'video' && out.url) {   // LC2d (B1): the Library tile and its View button play the variant (sound / silent) a shot chose, not only the recorded file
+        const ct = clipTwin(p);
+        if (ct.twin) {
+          if (!usedClips) { usedClips = new Set(); /* a listing must not create the boards folder: */ try { if (fs.existsSync(storyboard.STORYBOARD_DIR)) for (const b of storyboard.listBoards()) { const bd = storyboard.load(b.id); if (!bd.error) for (const s of bd.shots) if (s.clip && s.clip.path) usedClips.add(s.clip.path); } } catch (_) {} }
+          if (!usedClips.has(p) && usedClips.has(ct.twin)) {
+            const f2 = resolveFileParam(ct.twin); let ex2 = false;
+            try { ex2 = fs.statSync(path.resolve(workingDir, ct.twin)).isFile(); } catch (_) {}
+            if (ex2 && f2 && f2.allowed) out.url = '/file?p=' + encodeURIComponent(ct.twin);
+          }
+        }
+      }   // v1.10 LIB2: the poster route (404 -> the tile shows a placeholder)
+      return out;
+    });
+    const out = { items };
+    const allTrash = trashRead(false), parentIds = new Set(allTrash.map(x => x.id));
+    const inTrash = allTrash.filter(x => kinds.includes(x.kind) && !(x.twin_of && parentIds.has(x.twin_of))).reverse();   // LC2d (O3, D1): a clip's twin travels with its clip - hidden ONLY while that clip's entry is still in the index; an orphaned twin (parent restored / emptied / index edited / half-way failure) is a normal, retryable item
+    if (inTrash.length) out.trash = inTrash;   // v1.10 LIB2: what is in the trash for these kinds (newest first); absent when empty
+    sendJSON(res, 200, out);
+    return;
+  }
+
+  // ── Storyboard (v1.10 V1): GET /storyboard · POST /storyboard/shot[/update|/remove|/move] ──
+  // Shots are timeline events; images are LINKED (relative path), never copied. Every route answers with the whole board.
+  // <v1-storyboard>
+  if (urlPath === '/storyboard' || urlPath.startsWith('/storyboard/') || urlPath === '/storyboards' || urlPath.startsWith('/storyboards/')) {
+    const sbExists = (rel) => {   // a recorded file under the /file roots (never stat outside them)
+      const f = rel && typeof rel === 'string' && !path.isAbsolute(rel) ? resolveFileParam(rel) : null;
+      let exists = false;
+      if (f && f.allowed) { try { exists = fs.statSync(path.resolve(workingDir, rel)).isFile(); } catch (_) {} }
+      return { exists, url: (f && f.allowed) ? '/file?p=' + encodeURIComponent(rel) : null };
+    };
+    // LC2f (T9-1): a new local clip is ONE file with the model's sound; the shot's clip.muted says whether the players mute it, and the switch only flips that flag.
+    // Old LC2d pairs (<name>_local.<ext> silent + <name>_local.sound.<ext> original) switch too: the first switch moves clip.path to the .sound file and sets muted;
+    // the silent file stays on disk untouched. A plain old clip without a twin (and a model without sound) cannot be switched and says why.
+    const sbClipTwin = (rel) => {
+      const m = /^(.*)_local(\.sound)?(\.[A-Za-z0-9]+)$/.exec(String(rel || ''));
+      if (!m) return { orig: false, twin: null };
+      return m[2] ? { orig: true, twin: m[1] + '_local' + m[3] } : { orig: false, twin: m[1] + '_local.sound' + m[3] };
+    };
+    const sbClipSound = (clip) => {
+      const t = sbClipTwin(clip && clip.path);
+      if (clip && typeof clip.muted === 'boolean') return { available: true, on: !clip.muted, reason: '' };   // a one-file clip (or an old pair already switched once)
+      if (t.orig) return { available: true, on: true, reason: '' };   // an old clip that IS the original (with its sound), no flag yet
+      if (t.twin && sbExists(t.twin).exists) return { available: true, on: false, reason: '' };   // an old pair, the shot is on the silent file
+      return { available: false, on: false, reason: 'This clip has no separate sound version (made before sound could be switched, or the model makes no sound).' };
+    };
+    // <v1b3> V1b-3 helpers: video backend state, the shot request, the cast lookup
+    const sbKey = (bid, sid) => bid + ':' + sid;
+    const sbAvail = (b, cfgIn) => { try { const r = b.available(cfgIn || a.loadConfig()); return (r && typeof r === 'object') ? { ok: !!r.ok, reason: String(r.reason || ''), pending: r.pending === true } : { ok: false, reason: 'the video backend gave no answer' }; } catch (e) { return { ok: false, reason: String((e && e.message) || e) }; } };
+    // <v2-choice> v1.10 V2: config video.backend 'auto' (default; also any old config without it) | '<backend id>'. auto = a LOCAL (gpu) backend first when it is available (it is free), else the others in registration order.
+    // An explicit id is honoured exactly: if that backend is not available the answer is ITS reason (no silent switch to a paid one). An id nobody registered behaves as auto.
+    const sbVideoChoice = (cfg) => { const v = cfg && cfg.video && cfg.video.backend; return (typeof v === 'string' && v && v !== 'auto') ? v : 'auto'; };
+    const sbVideoState = (cfgIn, forceChoice) => {   // the backend Make video would use
+      if (!videoBackends.length) return { available: false, reason: NO_VIDEO_BACKEND, backend: null };
+      const cfgV = cfgIn || a.loadConfig();
+      const choice = forceChoice || sbVideoChoice(cfgV);
+      if (choice !== 'auto') {
+        const one = videoBackends.find(x => x.id === choice);
+        if (one) { const r = sbAvail(one, cfgV); return r.ok ? { available: true, reason: '', backend: one } : { available: false, reason: r.reason || (one.label + ' is not available'), backend: null }; }
+      }
+      let firstReason = '';
+      for (const b of videoBackends.slice().sort((x, y) => (y.gpu === true ? 1 : 0) - (x.gpu === true ? 1 : 0))) { const r = sbAvail(b, cfgV); if (r.ok) return { available: true, reason: '', backend: b };
+        if (r.pending && !firstReason) return { available: false, reason: r.reason || 'Checking local video…', backend: null };   // the free local backend is still being checked: do not flash the paid one's cost line meanwhile
+        if (!firstReason) firstReason = r.reason || (b.label + ' is not available'); }
+      return { available: false, reason: firstReason, backend: null };
+    };
+    // </v2-choice>
+    // <sb3> cast member by NAME; a cast member = {name, engine ('crispasr' | 'chatterbox'), voice (pack), reference (.wav in sounds/refs/)}
+    const sbCastMember = (board, name) => (Array.isArray(board.cast) ? board.cast : []).find(c => c && c.name === name) || null;
+    const sbLocalVoice = () => { try { return workflows.dispatcherMode((a.loadConfig() || {}).voice) === 'local'; } catch (_) { return false; } };
+    // availability of one cast voice for the view. crispasr: the pack must be in the list /voice-state last saw (no list seen yet = unknown = available;
+    // the view never reaches the network). chatterbox: the dispatcher must be on and, when a reference is set (local mode: required), the file must exist.
+    const sbCastView = (board, vcfg) => {
+      const known = sbVoiceSeen.names;
+      const hasDisp = workflows.hasDispatcher(vcfg);
+      return (Array.isArray(board.cast) ? board.cast : []).map(c => {
+        let available = true, reason = '';
+        if (c.engine === 'crispasr') {
+          if (!c.voice) { available = false; reason = 'no voice pack chosen'; }
+          else if (known && !known.has(c.voice)) { available = false; reason = 'voice pack "' + c.voice + '" is not in the current list'; }
+        } else if (c.engine === 'chatterbox') {
+          if (!hasDisp) { available = false; reason = 'turn on "Run voice engines on this PC" in Settings → Voice'; }
+          else if (c.reference) { const rr = voice.resolveRef(c.reference); if (rr.error) { available = false; reason = rr.error; } }
+          else if (workflows.dispatcherMode((vcfg || {}).voice) === 'local') { available = false; reason = 'pick a reference voice'; }
+        } else { available = false; reason = 'unknown engine "' + c.engine + '"'; }
+        return { ...c, available, reason };
+      });
+    };
+    const sbShotRequest = (board, s) => {
+      const abs = (rel) => path.resolve(workingDir, rel);
+      const safe = (rel) => !!rel && typeof rel === 'string' && !sbImageError(rel);   // the ONE path rule (servable.js: realpath, inside the roots, a file) before anything reaches estimate()/start()
+      return {
+        boardId: board.id, shotId: s.id,   // so the BACKEND can set the finished clip with storyboard.updateShot(boardId, shotId, {clip})
+        startImage: safe(s.image) ? abs(s.image) : null,
+        prompt: storyboard.compilePrompt(s, 'video'),
+        duration_s: s.duration_s,
+        aspect: board.aspect,
+        refs: (Array.isArray(s.refs) ? s.refs : []).filter(r => r && safe(r.path)).map(r => ({ role: r.role, label: r.label || '', path: abs(r.path) })),   // an unsafe reference is skipped
+        lines: (Array.isArray(s.lines) ? s.lines : []).map(l => ({ speaker: l.speaker || '', line: l.line || '', take: l.take || null })),
+        ...(sbHasVoiceTake(s) ? { audio: false } : {}),   // <lc2a-fal-audio> a shot with a voice take defaults to NO generated sound (the clip's own voice would fight the take); otherwise the Settings default decides
+      };
+    };
+    // <lc2a-fal-audio> today dialogue.take; after SB3 any line with a take
+    const sbHasVoiceTake = (s) => !!(s && Array.isArray(s.lines) && s.lines.some(l => l && l.take));
+    const sbAudioDefault = (s, cfgAudio) => sbHasVoiceTake(s) ? { on: false, reason: 'off — this shot has a voice take' } : { on: cfgAudio !== undefined ? cfgAudio : videoView(a.loadConfig()).fal.audio, reason: '' };
+    // </v1b3>
+    const sbView = (board) => {
+      let clips = null;
+      // <lc2a-r2> M6 / r3 M1: config (and the key lookup behind videoView) is read ONCE per view build - availability, audio default and estimates all use it
+      const vcfg = a.loadConfig();
+      const vs = sbVideoState(vcfg);
+      const vList = videoBackends.map(b => ({ b, r: sbAvail(b, vcfg) }));   // <v2-choice> every registered backend with its availability (once per view build)
+      const cfgAudio = (vcfg && vcfg.video && vcfg.video.fal && typeof vcfg.video.fal === 'object') ? vcfg.video.fal.audio !== false : true;
+      // LC2d (T8-6): the length cap of every backend that has one (the local model's frame rule), once per view; ③ shows the note before the run when the shot is longer
+      const videoCaps = {};
+      for (const x of vList) { if (typeof x.b.capSeconds !== 'function') continue; try { const cs = Number(x.b.capSeconds(vcfg)); if (cs > 0) videoCaps[x.b.id] = cs; } catch (_) { /* no cap known */ } }
+      const shots = board.shots.map(s => {
+        const k = sbExists(s.image);
+        const out = { ...s, url: k.url, exists: k.exists };
+        // V1b-1 fields (a v1-shaped shot from a hand-built board is tolerated)
+        const refs = (Array.isArray(s.refs) ? s.refs : []).map(r => { const rk = sbExists(r && r.path); return { ...r, url: rk.url, exists: rk.exists }; });
+        const lines = (Array.isArray(s.lines) ? s.lines : []).map(l => {   // <sb3> per line: does its take file still exist
+          let takeExists = false, take_s = null;
+          if (l.take) { try { const st = fs.statSync(path.join(voice.OUT_DIR, path.basename(String(l.take)))); takeExists = st.isFile(); if (takeExists) take_s = Math.max(0, Math.round((st.size - 44) / 48000 * 100) / 100); } catch (_) {} }   // 24 kHz mono PCM16, the same figure voice.speak reports
+          return { ...l, takeExists, take_s };
+        });
+        const snd = s.sound || { text: '', clip: null };
+        let clipExists = false;
+        if (snd.clip) { if (!clips) clips = sfx.listClips().map(c => c.file); clipExists = clips.includes(snd.clip); }
+        const vid = s.clip ? sbExists(s.clip.path) : null;
+        out.refs = refs; out.lines = lines; out.sound = { ...snd, clipExists };
+        out.clip_url = vid ? vid.url : null;
+        out.clip_sound = (vid && vid.exists && s.clip.backend === 'comfy-i2v') ? sbClipSound(s.clip) : null;   // LC2f (T9-1): is the clip's sound on (clip.muted), and can it be switched
+        out.status = (vid && vid.exists) ? 'video' : (k.exists ? 'keyframe' : 'draft');   // derived, never stored
+        out.compiled = { keyframe: storyboard.compilePrompt(s, 'keyframe'), video: storyboard.compilePrompt(s, 'video') };
+        // V1b-3: progress / last failure of the long actions, and the cost line of a paid video backend
+        const sk = sbKey(board.id, s.id);
+        out.keyframe_busy = sbKeyframeBusy.has(sk); out.keyframe_error = sbKeyframeErr.get(sk) || '';
+        out.video_busy = sbVideoBusy.has(sk); out.video_error = sbVideoErr.get(sk) || '';
+        out.video_estimate = null;
+        { const ad = sbAudioDefault(s, cfgAudio); out.video_audio = { on: ad.on, reason: ad.reason }; }   // <lc2a-fal-audio> the confirm row's default for "with sound"
+        if (vs.available && s.image) { try { const rq = sbShotRequest(board, s); const e = rq.startImage ? vs.backend.estimate(rq, vcfg) : null; if (e && typeof e === 'object') out.video_estimate = { line: String(e.line || ''), usd: Number(e.usd) || 0 }; } catch (_) {} }
+        // <v2-choice> the price of THIS shot per available backend (the selector in ③ shows it; null = free) + the local run's progress / note / can-be-stopped
+        out.video_options = [];
+        if (s.image) { let rq2 = null; try { rq2 = sbShotRequest(board, s); } catch (_) {}
+          for (const x of vList) { if (!x.r.ok) continue; let est2 = null; try { const e2 = (rq2 && rq2.startImage) ? x.b.estimate(rq2, vcfg) : null; if (e2 && typeof e2 === 'object') est2 = { line: String(e2.line || ''), usd: Number(e2.usd) || 0 }; } catch (_) { continue; } out.video_options.push({ id: x.b.id, estimate: est2 }); } }
+        out.video_caps = videoCaps;
+        out.video_progress = sbVideoProgress.get(sk) || ''; out.video_note = sbVideoNote.get(sk) || ''; out.video_stoppable = sbVideoGpu.has(sk); out.video_job = sbVideoGpu.get(sk) || null;
+        // </v2-choice>
+        return out;
+      });
+      const total_s = board.shots.reduce((t, s) => t + s.duration_s, 0);
+      // <lc2b> which image workflow builds the keyframe (the keyframe route uses the ACTIVE one): the page shows it under the action row
+      let keyframe = { workflow: '', label: 'the active image workflow', mode: 'none', max_refs: 0 };
+      try {
+        const we = workflows.getActive('image', vcfg), R = we && we.reference;
+        keyframe = { workflow: (we && we.id) || '', label: (we && (we.label || we.id)) || 'the active image workflow', mode: !R ? 'none' : (R.mode === 'img2img' ? 'img2img' : (Number(R.maxRefs) >= 1 ? 'edit' : 'none')), max_refs: R ? (Number(R.maxRefs) || 0) : 0 };
+      } catch (_) { /* no workflow info: the page shows the generic line */ }
+      const out = { board, total_s, shots, cast: sbCastView(board, vcfg), keyframe, video: { available: vs.available, reason: vs.reason, backend: vs.backend ? { id: vs.backend.id, label: vs.backend.label } : null } };
+      if (vList.length) { const au = sbVideoState(vcfg, 'auto');   // <v2-choice> what the selector in ③ lists (absent while no backend is registered); video{} above is untouched
+        out.video_choice = { choice: sbVideoChoice(vcfg), auto: au.backend ? au.backend.id : null, backends: vList.map(x => ({ id: x.b.id, label: x.b.label, gpu: x.b.gpu === true, available: x.r.ok, reason: x.r.ok ? '' : x.r.reason, ...(x.b.status === 'unverified' ? { unverified: true } : {}) })) }; }
+      if (board.warning) out.warning = board.warning;
+      if (board.error) { out.error = board.error; out.board = { version: board.version, id: board.id, title: board.title, group: board.group, aspect: board.aspect, cast: board.cast, shots: board.shots }; }
+      return out;
+    };
+    // storyboard.js error -> HTTP status (unknown shot / board 404, unreadable 409, save failed 500, else 400)
+    const sbStatus = (err) => (err === 'unknown shot' || err === storyboard.UNKNOWN_BOARD) ? 404 : (err === storyboard.UNREADABLE ? 409 : ((err === storyboard.SAVE_FAILED || err === storyboard.BACKUP_FAILED) ? 500 : 400));
+    // '' when fine (or no image given), else the plain error for a 400.
+    const sbImageError = (img) => servable.servableImageError(workingDir, img);   // one path rule (servable.js), shared with generate_from_refs
+    if (method === 'GET' && urlPath === '/storyboard') {
+      const bid = parsedUrl.searchParams.get('board');
+      const board = storyboard.load(bid);
+      if (board.error === storyboard.UNKNOWN_BOARD) { sendJSON(res, 404, { error: board.error }); return; }
+      sendJSON(res, 200, sbView(board));
+      return;
+    }
+    if (method === 'GET' && urlPath === '/storyboards') {
+      const r = storyboard.boardsState();
+      if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      sendJSON(res, 200, { active: r.active, boards: r.boards, groups: r.groups });
+      return;
+    }
+    if (method === 'POST' && ['/storyboard/shot', '/storyboard/shot/update', '/storyboard/shot/remove', '/storyboard/shot/move'].includes(urlPath)) {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      const imgErr = urlPath === '/storyboard/shot' || urlPath === '/storyboard/shot/update' ? sbImageError(body.image) : '';
+      if (imgErr) { sendJSON(res, 400, { error: imgErr }); return; }
+      const bid = body.board == null || body.board === '' ? null : String(body.board);
+      let r;
+      if (urlPath === '/storyboard/shot') r = storyboard.addShot(bid, { image: body.image, prompt: body.prompt, duration_s: body.duration_s, index: body.index });
+      else if (urlPath === '/storyboard/shot/update') {
+        const patch = { prompt: body.prompt, duration_s: body.duration_s, image: body.image, title: body.title, refs: body.refs, camera: body.camera };
+        if (body.refs !== undefined) {   // every reference passes the same checks as the keyframe image (400, nothing written)
+          if (!Array.isArray(body.refs)) { sendJSON(res, 400, { error: 'bad references' }); return; }
+          for (const ref of body.refs) {
+            const rerr = (ref && typeof ref === 'object' && typeof ref.path === 'string' && ref.path) ? sbImageError(ref.path) : 'bad reference';
+            if (rerr) { sendJSON(res, 400, { error: rerr }); return; }
+          }
+        }
+        if (body.lines !== undefined) {   // <sb3> the whole list; a line's take is NOT client-settable (Speak sets it server-side; storyboard.js keeps it by lid)
+          if (!Array.isArray(body.lines)) { sendJSON(res, 400, { error: 'bad lines' }); return; }
+          patch.lines = body.lines.map(l => { if (!l || typeof l !== 'object' || Array.isArray(l)) return l; const { take: _ignored, takeExists: _ig2, ...rest } = l; return rest; });
+        }
+        if (body.sound !== undefined) {
+          if (!body.sound || typeof body.sound !== 'object' || Array.isArray(body.sound)) { sendJSON(res, 400, { error: 'bad sound' }); return; }
+          if (body.sound.clip != null && body.sound.clip !== '' && !sfx.listClips().some(c => c.file === body.sound.clip)) { sendJSON(res, 400, { error: 'sound clip is not in the SFX library' }); return; }
+          patch.sound = { ...body.sound };
+          if (body.sound.clip !== undefined) patch.sound.clip = body.sound.clip === '' ? null : body.sound.clip;   // '' clears
+        }
+        r = storyboard.updateShot(bid, body.id, patch);
+      }
+      else if (urlPath === '/storyboard/shot/remove') r = storyboard.removeShot(bid, body.id);
+      else r = storyboard.moveShot(bid, body.id, body.index);
+      if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      sendJSON(res, 200, sbView(r.board));
+      return;
+    }
+    // <v1b3-actions> V1b-3: Make keyframe (I1 generate_from_refs / plain text-to-image) - Speak line (voice.speak) - Make video (backend registry)
+    // <lc2d-clipsound>
+    // POST /storyboard/shot/clip-sound {board?, id, on} (LC2f T9-1): sets clip.muted = !on - nothing is made, no file changes (an old pair moves clip.path to its .sound file once)
+    if (method === 'POST' && urlPath === '/storyboard/shot/clip-sound') {
+      if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      if (typeof body.on !== 'boolean') { sendJSON(res, 400, { error: 'on must be true or false' }); return; }
+      const bid = body.board == null || body.board === '' ? null : String(body.board);
+      const board = storyboard.load(bid);
+      if (board.error) { sendJSON(res, sbStatus(board.error), { error: board.error }); return; }
+      const shot = board.shots.find(x => x.id === body.id);
+      if (!shot) { sendJSON(res, 404, { error: 'unknown shot' }); return; }
+      if (!shot.clip || shot.clip.backend !== 'comfy-i2v') { sendJSON(res, 400, { error: 'this shot has no local clip' }); return; }   // fal clips keep their own "with sound" choice (made before paying)
+      if (sbVideoBusy.has(sbKey(board.id, shot.id))) { sendJSON(res, 409, { error: 'a video for this shot is being made - wait for it' }); return; }
+      const cs = sbClipSound(shot.clip), t = sbClipTwin(shot.clip.path);
+      if (!cs.available) { sendJSON(res, 409, { error: cs.reason }); return; }
+      if (cs.on !== body.on) {
+        const movePath = (typeof shot.clip.muted !== 'boolean' && !t.orig && t.twin) ? t.twin : shot.clip.path;   // an old pair on the silent file: the sound lives in the .sound file
+        const u = storyboard.updateShot(board.id, shot.id, { clip: { path: movePath, backend: shot.clip.backend, made_at: shot.clip.made_at, muted: !body.on } });
+        if (!u.ok) { sendJSON(res, sbStatus(u.error), { error: u.error }); return; }
+        try { broadcast({ kind: 'storyboard', phase: 'clipsound', board: board.id, shot: shot.id, ok: true }); } catch (_) { /* no clients */ }   // LC2d (B1): an open Library / Video tab re-reads
+        sendJSON(res, 200, sbView(u.board));
+        return;
+      }
+      sendJSON(res, 200, sbView(storyboard.load(board.id)));
+      return;
+    }
+    // </lc2d-clipsound>
+    if (method === 'POST' && ['/storyboard/shot/keyframe', '/storyboard/shot/speak', '/storyboard/shot/clip'].includes(urlPath)) {
+      if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }   // these start a GPU job / a voice take / a (paid) clip
+      if (urlPath === '/storyboard/shot/clip' && !videoBackends.length) { sendJSON(res, 501, { error: NO_VIDEO_BACKEND }); return; }
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      const bid = body.board == null || body.board === '' ? null : String(body.board);
+      const board = storyboard.load(bid);
+      if (board.error) { sendJSON(res, sbStatus(board.error), { error: board.error }); return; }
+      const shot = board.shots.find(x => x.id === body.id);
+      if (!shot) { sendJSON(res, 404, { error: 'unknown shot' }); return; }
+      const k = sbKey(board.id, shot.id);
+      const view = () => sbView(storyboard.load(board.id));
+
+      if (urlPath === '/storyboard/shot/keyframe') {
+        // references in role order character -> set -> prop (the order inside a role is kept)
+        const rank = { character: 0, set: 1, prop: 2 };
+        const refs = (shot.refs || []).map((r, i) => ({ r, i })).sort((x, y) => (rank[x.r.role] - rank[y.r.role]) || (x.i - y.i)).map(x => x.r.path);
+        for (const rel of refs) { const e = sbImageError(rel); if (e) { sendJSON(res, 400, { error: e }); return; } }
+        const prompt = storyboard.compilePrompt(shot, 'keyframe');
+        if (!prompt.trim()) { sendJSON(res, 400, { error: 'a prompt is needed — write what happens in this shot first' }); return; }
+        if (refs.length) {   // refuse BEFORE any generation (user decision 13.10.: refuse and say so)
+          let entry;
+          try { entry = workflows.getActive('image', a.loadConfig()); } catch (e) { sendJSON(res, 400, { error: String((e && e.message) || e) }); return; }
+          const R = entry && entry.reference;
+          const label = (entry && (entry.label || entry.id)) || 'the active image workflow';
+          if (!R) { sendJSON(res, 400, { error: '"' + label + '" has no reference mode — use Flux Klein (up to 2 references) or Z-Image Turbo (1 reference).' }); return; }
+          if (refs.length > R.maxRefs) { sendJSON(res, 400, { error: 'The active image workflow takes ' + R.maxRefs + ' reference images — this shot has ' + refs.length + '. Remove some or switch the workflow.' }); return; }
+        }
+        if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' }); return; }
+        const dims = { '16:9': [1344, 768], '9:16': [768, 1344], '1:1': [1024, 1024] }[board.aspect] || [1344, 768];
+        const nr = board.shots.indexOf(shot) + 1;
+        const started = jobs.start({ kind: 'image', label: 'Keyframe shot ' + nr }, async () => {
+          let ok = false;
+          try {
+            let rel;
+            if (refs.length) {   // I1's entry point, exactly as its spec defines it
+              const out = await a.TOOLS.generate_from_refs({ refs, prompt, width: dims[0], height: dims[1], category: 'storyboard' }, state, a.loadConfig(), { background: true, ownsJobSlot: true });
+              const t = a.parseRefTile(out);
+              if (!t) throw new Error(String(out).replace(/^(ERROR|BUSY):\s*/, ''));
+              rel = path.relative(workingDir, t.abs).split(path.sep).join('/');
+            } else {   // no references: plain text-to-image with the compiled prompt (literal, no metaprompter)
+              const r = await pipeline.runImageStage({ desc: prompt, cat: 'storyboard', promptPos: prompt, width: dims[0], height: dims[1] });
+              if (!r || !r.ok) throw new Error((r && r.error) || 'image stage failed');
+              rel = path.relative(workingDir, path.resolve(workingDir, r.artifact)).split(path.sep).join('/');
+            }
+            const u = storyboard.updateShot(board.id, shot.id, { image: rel });
+            if (!u.ok) throw new Error(u.error);
+            sbKeyframeErr.delete(k); ok = true;
+            return 'Keyframe shot ' + nr + ' ready';
+          } catch (e) {
+            sbKeyframeErr.set(k, String((e && e.message) || e));
+            throw e;
+          } finally {
+            sbKeyframeBusy.delete(k);
+            broadcast({ kind: 'storyboard', phase: 'keyframe', board: board.id, shot: shot.id, ok });   // the open Storyboard tab reloads once
+          }
+        });
+        if (!started.started) { sendJSON(res, 409, { error: started.reason }); return; }
+        sbKeyframeErr.delete(k); sbKeyframeBusy.set(k, true);
+        sendJSON(res, 200, view());
+        return;
+      }
+
+      if (urlPath === '/storyboard/shot/speak') {
+        // <sb3> {id, lid} speaks ONE line; {id} speaks every line of the shot that has no take, in order (stops at the first error)
+        const lid = body.lid == null || body.lid === '' ? null : String(body.lid);
+        const targets = lid ? shot.lines.filter(l => l.lid === lid) : shot.lines.filter(l => !l.take && String(l.line || '').trim());
+        if (lid && !targets.length) { sendJSON(res, 404, { error: 'unknown line' }); return; }
+        if (!lid && !shot.lines.some(l => String(l.line || '').trim())) { sendJSON(res, 400, { error: 'pick a speaker and type a line first' }); return; }   // nothing to say at all; lines that all HAVE takes is not an error (nothing to do)
+        const busyKeys = [...sbSpeakBusy];
+        if (busyKeys.some(x => x === k || x.startsWith(k + ':'))) { sendJSON(res, 409, { error: 'this shot is already being spoken — give it a moment' }); return; }
+        const bkey = lid ? k + ':' + lid : k;
+        sbSpeakBusy.add(bkey);
+        try {
+          let lastBoard = null;
+          for (const l of targets) {
+            const name = (l.speaker || '').trim();
+            if (!name || !String(l.line || '').trim()) { const e = { error: 'pick a speaker and type a line first' }; if (lastBoard) { sendJSON(res, 400, { ...sbView(lastBoard), error: e.error }); return; } sendJSON(res, 400, e); return; }
+            const m = sbCastMember(board, name);
+            const noVoice = '"' + name + '" has no voice yet — set it in the cast';
+            let args, err = '';
+            if (!m) err = noVoice;
+            else if (m.engine === 'crispasr') { if (!m.voice) err = noVoice; else args = { voice: m.voice, text: l.line }; }
+            else if (m.engine === 'chatterbox') {
+              const local = sbLocalVoice();
+              if (local && !m.reference) err = noVoice;
+              else { args = { engine: 'chatterbox', text: l.line }; if (m.reference) args.reference = m.reference; if (!local) args.voice = 'chatterbox'; }   // rig mode: the rig's default voice when no reference
+            } else err = '"' + name + '" has an unknown voice engine — set it in the cast';
+            let r;
+            if (!err) {
+              try { r = await voice.speak(args); }   // the same function /voice-speak uses
+              catch (e) { err = String((e && e.message) || e); }
+              if (!err && (!r || r.error || !r.ok)) err = (r && r.error) || 'the voice gave no take';
+            }
+            if (err) {
+              const st = (r && r.consentRequired) ? 409 : 400;
+              if (lastBoard) sendJSON(res, st, { ...sbView(lastBoard), error: err }); else sendJSON(res, st, { error: err });
+              return;
+            }
+            const take = r.url || ('/vo/' + r.file);
+            const cur = storyboard.load(board.id);   // re-read: the list may have changed while the voice was working; the take goes to THIS line only
+            const cs = cur.error ? null : cur.shots.find(x => x.id === shot.id);
+            if (!cs || !cs.lines.some(x => x.lid === l.lid)) { sendJSON(res, 409, { error: 'that line was removed while it was being spoken' }); return; }
+            const u = storyboard.updateShot(board.id, shot.id, { lines: cs.lines.map(x => x.lid === l.lid ? { ...x, take } : x) });
+            if (!u.ok) { sendJSON(res, sbStatus(u.error), { error: u.error }); return; }
+            lastBoard = u.board;
+          }
+          sendJSON(res, 200, sbView(lastBoard || storyboard.load(board.id)));
+        } finally { sbSpeakBusy.delete(bkey); }
+        return;
+      }
+
+      // POST /storyboard/shot/clip {board?, id, backend?, confirmed?}
+      {
+        const vs = sbVideoState(undefined, body.backend === 'auto' ? 'auto' : undefined);   // <v2-choice> {backend:'auto'} = the automatic pick whatever the config says
+        let be = vs.backend;
+        if (body.backend != null && body.backend !== '' && body.backend !== 'auto') {
+          be = videoBackends.find(x => x.id === body.backend);
+          if (!be) { sendJSON(res, 400, { error: 'unknown video backend "' + String(body.backend) + '"' }); return; }
+          const av = sbAvail(be);
+          if (!av.ok) { sendJSON(res, 409, { error: av.reason || (be.label + ' is not available') }); return; }
+        }
+        if (!be) { sendJSON(res, 409, { error: vs.reason }); return; }
+        if (!shot.image) { sendJSON(res, 400, { error: 'make a keyframe first — the video starts from it' }); return; }
+        { const ie = sbImageError(shot.image); if (ie) { sendJSON(res, 400, { error: ie }); return; } }   // the start image goes through the same realpath/file check
+        if (sbVideoBusy.has(k)) { sendJSON(res, 409, { error: 'a video for this shot is already being made' }); return; }
+        const sreq = sbShotRequest(board, shot);
+        if (Object.prototype.hasOwnProperty.call(body, 'audio')) {   // <lc2a-fal-audio> the per-video choice (the estimate and the request are priced with it); r2 M3: PRESENCE, so {audio:null} is a 400 too
+          if (typeof body.audio !== 'boolean') { sendJSON(res, 400, { error: 'audio must be true or false' }); return; }
+          sreq.audio = body.audio;
+        }
+        let est = null;
+        try { est = be.estimate(sreq); } catch (e) { sendJSON(res, 400, { error: String((e && e.message) || e) }); return; }
+        if (remote.isRemoteReq(req) && ((est && typeof est === 'object') || body.confirmed === true)) { sendJSON(res, 403, REMOTE_NO_PAID); return; }   // LC2i: a paid backend (or a confirmed cost) is never started from the phone; a local clip is
+        // <lc2a-r2> M1: estimate_only is a price question and nothing else - it answers BEFORE anything can start (paid or free backend)
+        if (Object.prototype.hasOwnProperty.call(body, 'estimate_only')) {
+          if (body.estimate_only !== true && body.estimate_only !== false) { sendJSON(res, 400, { error: 'estimate_only must be true or false' }); return; }
+          if (body.estimate_only === true) {
+            if (est && typeof est === 'object') { const e3 = { line: String(est.line || ''), usd: Number(est.usd) || 0 }; sendJSON(res, 409, { error: 'This costs money — confirm first: ' + e3.line, needs_confirm: true, estimate_only: true, estimate: e3 }); }
+            else sendJSON(res, 200, { estimate_only: true, estimate: null });
+            return;
+          }
+        }
+        const confirmed = body.confirmed === true;   // exactly true - a truthy string is not a confirmation
+        if (est && typeof est === 'object') {   // a paid backend never starts unconfirmed, and only for the price the user saw
+          const e2 = { line: String(est.line || ''), usd: Number(est.usd) || 0 };
+          if (!confirmed) { sendJSON(res, 409, { error: 'This costs money — confirm first: ' + e2.line, needs_confirm: true, estimate: e2 }); return; }
+          const seen = body.estimate;
+          if (!seen || typeof seen !== 'object' || seen.line !== e2.line || Number(seen.usd) !== e2.usd) {
+            sendJSON(res, 409, { error: 'The price changed — please confirm again: ' + e2.line, estimate_changed: true, estimate: e2 });
+            return;
+          }
+        }
+        const nr = board.shots.indexOf(shot) + 1;
+        const failOf = (v) => (v && typeof v === 'object' && (v.ok === false || (v.error && !v.ok))) ? String(v.error || 'the video backend failed') : null;
+        let lastV = null;
+        const settle = (p) => {   // the end of start(): a rejection or a {ok:false,error} result is a failure (video_error + SSE ok:false)
+          sbVideoBusy.set(k, true);
+          return Promise.resolve(p).then(v => { lastV = v; return failOf(v); }, e => String((e && e.message) || e)).then(f => {
+            if (f) sbVideoErr.set(k, f); else sbVideoErr.delete(k);
+            if (!f && lastV && typeof lastV === 'object' && lastV.note) sbVideoNote.set(k, String(lastV.note)); else sbVideoNote.delete(k);   // <v2-choice> e.g. "the clip keeps its sound"
+            sbVideoProgress.delete(k); sbVideoGpu.delete(k);
+            sbVideoBusy.delete(k);
+            broadcast({ kind: 'storyboard', phase: 'video', board: board.id, shot: shot.id, ok: !f });
+            return f;
+          });
+        };
+        sbVideoErr.delete(k);
+        if (be.gpu === true) {   // a local GPU backend: ONE heavy GPU job at a time, in the shared jobs slot (blocks keyframes, is blocked by them)
+          if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' }); return; }
+          const started = jobs.start({ kind: 'video', label: 'Video shot ' + nr }, async (jid, signal) => {   // <v2-choice> the slot's AbortSignal = the stop path (POST /stop -> jobs.cancel)
+            let ret;
+            const onProgress = (t) => { sbVideoProgress.set(k, String(t)); broadcast({ kind: 'storyboard', phase: 'progress', board: board.id, shot: shot.id, text: String(t), ok: true }); };   // the page patches ONLY the progress text for this phase
+            try { ret = be.start(sreq, { confirmed, signal, onProgress }); } catch (e) { ret = Promise.reject(e); }
+            const f = await settle(ret);
+            if (f && lastV && typeof lastV === 'object' && lastV.stopped === true) { sbStops.set(jid, lastV.cancel || null); for (const old of [...sbStops.keys()].slice(0, -20)) sbStops.delete(old); }
+            if (f && lastV && typeof lastV === 'object' && lastV.stopped === true) return 'Video shot ' + nr + ' stopped';   // a stop is not a failure
+            if (f) throw new Error(f);
+            return 'Video shot ' + nr + ' ready';
+          });
+          if (!started.started) { sendJSON(res, 409, { error: started.reason }); return; }
+          sbVideoBusy.set(k, true); sbVideoGpu.set(k, started.id); sbVideoNote.delete(k); sbVideoProgress.delete(k);
+          sendJSON(res, 200, view());
+          return;
+        }
+        let ret;
+        try { ret = be.start(sreq, { confirmed }); }
+        catch (e) { sendJSON(res, 400, { error: String((e && e.message) || e) }); return; }
+        if (ret && typeof ret.then === 'function') settle(ret);
+        else { const f = failOf(ret); if (f) { sendJSON(res, 400, { error: f }); return; } }
+        sendJSON(res, 200, view());
+        return;
+      }
+    }
+    // </v1b3-actions>
+    if (method === 'POST' && ['/storyboards/create', '/storyboards/update', '/storyboards/activate', '/storyboards/trash', '/storyboards/restore'].includes(urlPath)) {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      const id = typeof body.id === 'string' ? body.id : '';
+      let r;
+      if (urlPath === '/storyboards/create') r = storyboard.createBoard({ title: body.title, group: body.group });
+      else if (urlPath === '/storyboards/update') r = storyboard.updateBoard(id, { title: body.title, group: body.group, aspect: body.aspect, cast: body.cast });
+      else if (urlPath === '/storyboards/activate') r = storyboard.setActive(id);
+      else if (urlPath === '/storyboards/trash') r = storyboard.trashBoard(id);
+      else r = storyboard.restoreBoard(id);
+      if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      const groups = storyboard.boardsState().groups || [];
+      sendJSON(res, 200, { ok: true, active: r.active, boards: r.boards, groups, ...(r.created ? { created: r.created } : {}), ...(r.trashed ? { trashed: r.trashed } : {}) });
+      return;
+    }
+  }
+  // </v1-storyboard>
+
+  // ── GET /library/sounds · GET /library/sfx (<l1-library>) ─────────────────
+  // The Library's Sound (= voice takes) and SFX tabs: the existing listings, one source each, no new records.
+  if (method === 'GET' && urlPath === '/library/sounds') {
+    sendJSON(res, 200, { items: voice.listTakes() });
+    return;
+  }
+  if (method === 'GET' && urlPath === '/library/sfx') {
+    sendJSON(res, 200, { items: sfx.listClips() });
+    return;
+  }
+
+  // ── POST /images/use { path } ─────────────────────────────────────────────
+  // Make a recorded image the current one - the same state /upload sets, nothing copied or moved.
+  if (method === 'POST' && urlPath === '/images/use') {
+    let body = {};
+    try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
+    const p = body && typeof body.path === 'string' ? body.path : '';
+    const rec = (!p || p.includes('..')) ? null : records.readRecords({ kinds: ['image', 'i2i', 'upload'] }).find(r => r.path === p);   // <l1-library> imported images can be used too
+    if (!rec) { sendJSON(res, 400, { error: 'not a recorded image' }); return; }
+    const abs = path.resolve(workingDir, p);
+    let isFile = false;
+    try { isFile = fs.statSync(abs).isFile(); } catch (_) {}
+    if (!isFile) { sendJSON(res, 404, { error: 'file is gone' }); return; }
+    const f = path.isAbsolute(p) ? null : resolveFileParam(p);
+    if (!f || !f.allowed) { sendJSON(res, 400, { error: 'image is outside the servable roots' }); return; }
+    state.lastImage         = abs;
+    state.lastImageCategory = (rec.kind !== 'upload' && typeof rec.category === 'string' && rec.category) ? rec.category : 'item';   // <l1-library> 'imported' is a gallery group, not a seat category
+    state.lastImageDesc     = path.basename(abs, path.extname(abs));
+    a.saveState(state);
+    const url = '/file?p=' + encodeURIComponent(p);
+    broadcast({ kind: 'artifact', slot: 'image', url, source: 'library' });
+    sendJSON(res, 200, { ok: true, url });
+    return;
+  }
+
 
   // ── GET /brushes ──────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/brushes') {
@@ -1381,7 +2603,9 @@ async function handler(req, res) {
     // could only ever fail. Without an endpoint configured, "Copy bug report" is the whole feature.
     let canSend = false;
     try { canSend = !!(a.loadConfig().feedback || {}).endpointUrl; } catch (_) {}
-    sendJSON(res, 200, { report, canSend });
+    let mailTo = 'info@laconova.com';
+    try { const m = String((a.loadConfig().feedback || {}).mailTo || '').trim(); if (/^[^\s\x00-\x1f@<>"?&%=#\/\\:]+@[^\s\x00-\x1f@<>"?&%=#\/\\:]+\.[^\s\x00-\x1f@<>"?&%=#\/\\:]+$/.test(m)) mailTo = m; } catch (_) {}
+    sendJSON(res, 200, { report, canSend, mailTo });
     return;
   }
 
@@ -1469,6 +2693,7 @@ async function handler(req, res) {
         'above is expected in that situation and does NOT mean Blender is unreachable.'
       : '';
 
+    if (!remoteOk(req, res)) return;   // <r1-remote> B2: the preflight wait (up to 20 s) sits between the body and the turn
     try {
       cfg = a.loadConfig();
       const result = await a.runTroubleshootTurn(messages, cfg, preflightOutput + busyNote);
@@ -1516,9 +2741,16 @@ async function handler(req, res) {
     const hasCp    = body && typeof body.checkpoints === 'object' && body.checkpoints !== null && !Array.isArray(body.checkpoints);
     const hasMcp   = body && typeof body.mcp === 'object' && body.mcp !== null && !Array.isArray(body.mcp);
     const hasRemesh = body && typeof body.remesh === 'object' && body.remesh !== null && !Array.isArray(body.remesh);
+    const hasVideo = body && typeof body.video === 'object' && body.video !== null && !Array.isArray(body.video);
+    const hasVoice = body && typeof body.voice === 'object' && body.voice !== null && !Array.isArray(body.voice);
+    const hasRemote = body && typeof body.remote === 'object' && body.remote !== null && !Array.isArray(body.remote);   // <r1-remote>
 
-    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb && !hasUnreal && !hasSeats && !hasCp && !hasMcp && !hasRemesh) {
+    if (!hasGates && !hasOrch && !hasMeta && !hasEps && !hasApps && !hasFb && !hasUnreal && !hasSeats && !hasCp && !hasMcp && !hasRemesh && !hasVideo && !hasVoice && !hasRemote) {
       sendJSON(res, 400, { error: 'No settings provided.' });
+      return;
+    }
+    if (hasRemote && (typeof body.remote.enabled !== 'boolean' || Object.keys(body.remote).some(k => k !== 'enabled'))) {   // <r1-remote> the section carries the one switch, nothing else
+      sendJSON(res, 400, { error: 'remote.enabled must be true or false.', field: 'remote' });
       return;
     }
 
@@ -1603,6 +2835,33 @@ async function handler(req, res) {
         if (typeof rm.maxUploadMB !== 'number' || !Number.isFinite(rm.maxUploadMB) || rm.maxUploadMB < 1 || rm.maxUploadMB > 500) { sendJSON(res, 400, { error: 'Remesh upload limit must be a number between 1 and 500 MB.', field: 'maxUploadMB' }); return; }
         stagedRemesh.maxUploadMB = rm.maxUploadMB;
       }
+    }
+
+    // Video (v1.10 V3): { fal: { enabled: bool, audio: bool } } - the ONLY fields taken from the body (audio since LC2a). baseUrl / model / pricePerSecond / timeouts are config-file only
+    // (like meshyBase). A bad field saves nothing from this request.
+    const stagedVideoFal = {};
+    if (hasVideo) {
+      const vf = body.video.fal;
+      if (vf !== undefined) {
+        if (!vf || typeof vf !== 'object' || Array.isArray(vf)) { sendJSON(res, 400, { error: 'Video settings must be an object.', field: 'fal' }); return; }
+        if ('enabled' in vf) {
+          if (typeof vf.enabled !== 'boolean') { sendJSON(res, 400, { error: 'Allow video must be true or false.', field: 'enabled' }); return; }
+          stagedVideoFal.enabled = vf.enabled;
+        }
+        if ('audio' in vf) {   // <lc2a-fal-audio> the default for "generate sound with the video"
+          if (typeof vf.audio !== 'boolean') { sendJSON(res, 400, { error: 'Generate sound must be true or false.', field: 'audio' }); return; }
+          stagedVideoFal.audio = vf.audio;
+        }
+      }
+    }
+
+    // Voice (v1.10 VO1b): { dispatcherLocal, installRoot, port, watermark, consentAck } - exactly these keys, validated in voice.js.
+    // A bad field saves nothing from this request.
+    let stagedVoice = null;
+    if (hasVoice) {
+      const vv = voice.validateSettings(body.voice);
+      if (vv.error) { sendJSON(res, 400, { error: vv.error, field: vv.field }); return; }
+      stagedVoice = vv.staged;
     }
 
     // Validate historyMessages (cheap, synchronous)
@@ -1898,11 +3157,31 @@ async function handler(req, res) {
       if (!fresh.remesh || typeof fresh.remesh !== 'object') fresh.remesh = {};
       Object.assign(fresh.remesh, stagedRemesh);
     }
+    if (hasVideo) {
+      if (!fresh.video || typeof fresh.video !== 'object') fresh.video = {};
+      if (!fresh.video.fal || typeof fresh.video.fal !== 'object') fresh.video.fal = {};
+      Object.assign(fresh.video.fal, stagedVideoFal);
+    }
+
+    let voiceApplied = {};
+    if (hasVoice) {
+      voiceApplied = voice.applySettings(fresh, stagedVoice);
+      if (voiceApplied.error) { sendJSON(res, 400, { error: voiceApplied.error, field: voiceApplied.field }); return; }
+    }
 
     a.saveConfig(fresh);
+    try { voice.dispatcherSync(); } catch (_) { /* VO1: start/stop the local voice dispatcher to match the saved config */ }
     for (const sd of forcedSeats) capabilities.markForced(sd);   // the troubleshooter was forced past a failed test
     cfg = fresh;
+    let remoteOut = null;
+    if (hasRemote) {   // <r1-remote> the switch is saved AFTER the attempt: a failed switch-on leaves it off, with the reason in the state line
+      const rv = await remote.setEnabled(body.remote.enabled);
+      const on = body.remote.enabled === true && rv.state === 'on';
+      const c2 = a.loadConfig(); c2.remote = Object.assign({}, c2.remote, { enabled: on }); a.saveConfig(c2); cfg = c2;
+      remoteOut = { enabled: on, state: rv.state, origin: rv.origin, error: rv.error };
+    }
     sendJSON(res, 200, {
+      ...(remoteOut ? { remote: remoteOut } : {}),
       unreal: {
         brushTarget:  fresh.unreal.brushTarget  || 'blender',
         visionMode:   fresh.unreal.visionMode   || 'camera',
@@ -1916,6 +3195,8 @@ async function handler(req, res) {
       checkpoints: checkpoints.settings(fresh),
       mcp: mcpFlagsView(fresh),
       remesh: remeshView(fresh),
+      video: videoView(fresh),
+      voice: Object.assign(voice.settingsView(fresh), voiceApplied.rootChanged ? { rootChanged: voiceApplied.rootChanged } : {}),
       endpoints: { local: fresh.endpoints.local, comfyui: fresh.endpoints.comfyui },
       seats: seatsView(fresh),
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
@@ -1949,7 +3230,7 @@ async function handler(req, res) {
 
   // ── GET /palette ─────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/palette') {
-    sendJSON(res, 200, { categories: palette.loadPalette().categories });
+    sendJSON(res, 200, paletteResponse());
     return;
   }
 
@@ -2013,21 +3294,49 @@ async function handler(req, res) {
       }
     }
 
-    // Build sanitized categories — recompute builtin from server side, drop unknown fields
+    // v1.10 ADV: per-category param directives - { <key>: { override:true, value } | { override:false } }, either as the category's own
+    // fields or under cat.params - go to the workflow that declares the key (active image workflow first, then the active mesh workflow).
+    // Anything else for a param (a plain number from an old client) is ignored. Validated BEFORE anything is written.
+    const advCfg = a.loadConfig();
+    const ownerOf = (k) => { for (const st of ['image', 'mesh']) { try { const w = workflows.getActive(st, advCfg); if (wfp.declared(w.id).some(d => d.key === k)) return w.id; } catch (_) {} } return null; };
+    const directives = [];
+    for (const [key, cat] of Object.entries(body.categories)) {
+      const src = {};
+      if (cat && cat.params && typeof cat.params === 'object' && !Array.isArray(cat.params)) Object.assign(src, cat.params);
+      for (const k of Object.keys(cat)) if (cat[k] && typeof cat[k] === 'object' && !Array.isArray(cat[k]) && 'override' in cat[k]) src[k] = cat[k];
+      for (const [k, d] of Object.entries(src)) {
+        if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
+        const owner = ownerOf(k);
+        if (!owner) continue;
+        if (d.override === true) {
+          const v = wfp.validate(owner, k, d.value);
+          if (v.error) { sendJSON(res, 400, { error: v.error, field: key }); return; }
+          const badS = await advSamplerCheck(owner, k, d.value);   // same sampler rule as the Advanced section
+          if (badS) { sendJSON(res, 400, { error: badS.error, field: key }); return; }
+          directives.push({ owner, key, k, set: true, value: v.value });
+        } else if (d.override === false) directives.push({ owner, key, k, set: false });
+      }
+    }
+
+    if (!remoteOk(req, res)) return;   // <r1-remote> B2: the sampler probes above are awaits between the body and the write
+
+    // Build sanitized categories — recompute builtin from server side, drop unknown fields. cfg / steps / target_face_num are workflow
+    // params now: palette.json keeps whatever it already carried for a category (rollback-safe) but never takes new values for them.
+    const prevCats = palette.loadPalette().categories;
     const sanitized = {};
     for (const [key, cat] of Object.entries(body.categories)) {
-      sanitized[key] = {
-        hint:            String(cat.hint),
-        style:           String(cat.style),
-        target_face_num: Math.round(Number(cat.target_face_num)),
-        cfg:             Number(cat.cfg),
-        steps:           Math.round(Number(cat.steps)),
-        builtin:         builtinKeys.includes(key),
-      };
+      sanitized[key] = { hint: String(cat.hint), style: String(cat.style) };
+      const prev = prevCats[key];
+      if (prev) for (const f of wfp.PALETTE_KEYS) if (typeof prev[f] === 'number') sanitized[key][f] = prev[f];
+      sanitized[key].builtin = builtinKeys.includes(key);
     }
 
     palette.savePalette({ version: 1, categories: sanitized });
-    sendJSON(res, 200, { categories: sanitized });
+    for (const d of directives) {
+      const r = d.set ? wfp.setOverride(d.owner, d.key, d.k, d.value) : wfp.clearOverride(d.owner, d.key, d.k);
+      if (r.error) { sendJSON(res, 400, { error: r.error, field: d.key }); return; }
+    }
+    sendJSON(res, 200, paletteResponse());
     return;
   }
 
@@ -2086,9 +3395,106 @@ async function handler(req, res) {
     const pal = palette.loadPalette();
     pal.categories[body.key] = JSON.parse(JSON.stringify(palette.DEFAULT_PALETTE.categories[body.key]));
     palette.savePalette(pal);
-    sendJSON(res, 200, { categories: pal.categories });
+    // v1.10 ADV: this category's palette-derived overrides follow what contract 3's seeding gives from DEFAULT_PALETTE (workflow-params.js)
+    {
+      let rr;
+      try {
+        const rc = a.loadConfig();
+        rr = wfp.resetCategory(body.key, palette.DEFAULT_PALETTE.categories[body.key], ['image', 'mesh'].map(st => workflows.getActive(st, rc).id));
+      } catch (e) { rr = { error: String(e && e.message || e), field: 'file' }; }
+      if (rr && rr.error) { sendJSON(res, 500, { error: 'The category\'s style was reset, but its parameters could not be: ' + rr.error, field: rr.field || 'file' }); return; }
+    }
+    sendJSON(res, 200, paletteResponse());
     return;
   }
+
+  // <adv-routes>
+  // ── v1.10 ADV · per-workflow parameters (one store: workflow-params.json; the palette editor is the second view) ──
+  async function advBody() { try { const b = JSON.parse(await readBody(req)); return (b && typeof b === 'object' && !Array.isArray(b)) ? b : null; } catch (_) { return null; } }
+  const advErr = (r) => sendJSON(res, r.notFound ? 404 : 400, { error: r.error, field: r.field });
+  // The sampler list of the workflow's own ComfyUI (one GET, 4 s). { reachable:false } = unknown; a list only when ComfyUI really answered.
+  async function advSamplers(entry) {
+    try {
+      const base = String(i2iEngine.baseForInstance(a.loadConfig(), entry && entry.instance)).replace(/\/+$/, '');
+      const r = await fetch(base + '/object_info/KSamplerSelect', { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return { reachable: false, samplers: null };
+      const j = await r.json();
+      const req0 = j && j.KSamplerSelect && j.KSamplerSelect.input && j.KSamplerSelect.input.required;
+      const opts0 = req0 ? workflows.comboOptions(req0.sampler_name) : null;
+      const list = opts0 ? opts0.filter(x => typeof x === 'string') : null;
+      return list && list.length ? { reachable: true, samplers: list } : { reachable: false, samplers: null };
+    } catch (_) { return { reachable: false, samplers: null }; }
+  }
+  function advEntry(id) { try { const r = workflows.loadRegistry(); return (r.workflows && r.workflows[id]) || null; } catch (_) { return null; } }
+  // a sampler value is refused only when the live list was obtainable and does not contain it
+  async function advSamplerCheck(id, key, value) {
+    const d = wfp.declaredAll(id).find(x => x.key === key);
+    if (!d || d.type !== 'enum' || Array.isArray(d.options) || typeof value !== 'string') return null;
+    const s = await advSamplers(advEntry(id));
+    return (s.samplers && !s.samplers.includes(value)) ? { error: 'sampler "' + value + '" is not offered by ComfyUI', field: key } : null;
+  }
+
+  if (method === 'GET' && urlPath === '/workflows/samplers') {
+    const id = parsedUrl.searchParams.get('id') || '';
+    const entry = advEntry(id);
+    if (!entry) { sendJSON(res, 404, { error: 'unknown workflow', field: 'id' }); return; }
+    sendJSON(res, 200, await advSamplers(entry));
+    return;
+  }
+  if (method === 'GET' && urlPath === '/workflows/params') {
+    const id = parsedUrl.searchParams.get('id') || '';
+    const v = wfp.view(id);
+    if (!v) { sendJSON(res, 404, { error: 'unknown workflow', field: 'id' }); return; }
+    sendJSON(res, 200, v);
+    return;
+  }
+  if (method === 'POST' && urlPath === '/workflows/params') {
+    const b = await advBody();
+    if (!b || typeof b.id !== 'string' || typeof b.key !== 'string') { sendJSON(res, 400, { error: 'id and key required', field: 'id' }); return; }
+    if (!advEntry(b.id)) { sendJSON(res, 404, { error: 'unknown workflow', field: 'id' }); return; }
+    const bad = await advSamplerCheck(b.id, b.key, b.value);
+    if (bad) { sendJSON(res, 400, bad); return; }
+    const r = wfp.setValue(b.id, b.key, b.value);
+    if (r.error) { advErr(r); return; }
+    sendJSON(res, 200, Object.assign({ ok: true, value: r.value }, wfp.view(b.id)));
+    return;
+  }
+  if (method === 'POST' && urlPath === '/workflows/params/override') {
+    const b = await advBody();
+    if (!b || typeof b.id !== 'string' || typeof b.key !== 'string') { sendJSON(res, 400, { error: 'id and key required', field: 'id' }); return; }
+    if (!advEntry(b.id)) { sendJSON(res, 404, { error: 'unknown workflow', field: 'id' }); return; }
+    const bad = await advSamplerCheck(b.id, b.key, b.value);
+    if (bad) { sendJSON(res, 400, bad); return; }
+    const r = wfp.setOverride(b.id, b.category, b.key, b.value);
+    if (r.error) { advErr(r); return; }
+    sendJSON(res, 200, Object.assign({ ok: true, value: r.value }, wfp.view(b.id)));
+    return;
+  }
+  if (method === 'POST' && urlPath === '/workflows/params/override/remove') {
+    const b = await advBody();
+    if (!b || typeof b.id !== 'string' || typeof b.key !== 'string') { sendJSON(res, 400, { error: 'id and key required', field: 'id' }); return; }
+    const r = wfp.clearOverride(b.id, b.category, b.key);
+    if (r.error) { advErr(r); return; }
+    sendJSON(res, 200, Object.assign({ ok: true }, wfp.view(b.id)));
+    return;
+  }
+  if (method === 'POST' && urlPath === '/workflows/params/reset') {
+    const b = await advBody();
+    if (!b || typeof b.id !== 'string') { sendJSON(res, 400, { error: 'id required', field: 'id' }); return; }
+    const r = wfp.reset(b.id);
+    if (r.error) { advErr(r); return; }
+    sendJSON(res, 200, Object.assign({ ok: true }, wfp.view(b.id)));
+    return;
+  }
+  if (method === 'POST' && urlPath === '/workflows/params/seed') {
+    const b = await advBody();
+    if (!b || typeof b.id !== 'string') { sendJSON(res, 400, { error: 'id required', field: 'id' }); return; }
+    const r = wfp.setSeed(b.id, b.locked, b.value);
+    if (r.error) { advErr(r); return; }
+    sendJSON(res, 200, Object.assign({ ok: true }, wfp.view(b.id)));
+    return;
+  }
+  // </adv-routes>
 
   // ── GET /workflows ───────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/workflows') {
@@ -2102,11 +3508,12 @@ async function handler(req, res) {
       // mirroring image/mesh/i2i exactly — read by the SFX picker + Voice-tab Speak on page load.
       voice: (cfg2.workflows && cfg2.workflows.voice) || workflows.DEFAULT_ACTIVE.voice,
     };
+    if (cfg2.workflows && cfg2.workflows.video) active.video = cfg2.workflows.video;   // v1.10 V2: only once a video model was chosen explicitly (a plain config keeps the four-key shape; the page treats "none chosen" as the default entry)
     // Config-capability gate for voice engines: availability depends on THIS install's voice.dispatcher
     // capability (a rig-only /speak dispatcher, not shipped), which the raw registry entry can't know.
     // Overlay the EFFECTIVE blocked/blockedReason (English) that the picker + library row already honor,
     // so a dispatcher-gated engine greys out on a plain customer config with no client-side change.
-    const hasDispatcher = !!(cfg2.voice && cfg2.voice.dispatcher);
+    const hasDispatcher = workflows.hasDispatcher(cfg2);   // VO1: both dispatcher shapes (true | { local: true })
     const outWorkflows = {};
     for (const [id, entry] of Object.entries(reg.workflows || {})) {
       if (entry && entry.stage === 'voice') {
@@ -2120,6 +3527,30 @@ async function handler(req, res) {
         outWorkflows[id] = entry;
       }
     }
+    // v1.10 B1: every entry (all stages, after the voice overlay) also carries the derived display
+    // facts the stage pickers show — total disk and the public FAQ link. description/faq are already
+    // on the entry itself. Read-only: nothing here touches workflows.json.
+    for (const id of Object.keys(outWorkflows)) {
+      const e = outWorkflows[id];
+      if (!e || typeof e !== 'object') continue;
+      const m = workflows.workflowMeta(e);
+      outWorkflows[id] = Object.assign({}, e, { disk_gb: m.disk_gb, faq_url: m.faq_url });
+      // v1.10 ADV: the img2img denoise lives in workflow-params (Advanced) - the Image-tab slider starts at that value
+      if (e.reference && Array.isArray(e.referenceParams)) {
+        try {
+          const dn = wfp.resolve(id, null).denoise;
+          if (dn) outWorkflows[id].reference = Object.assign({}, e.reference, { denoiseDefault: dn.value });
+        } catch (_) { /* keep the shipped default */ }
+      }
+    }
+    // <b2r-fields> v1.10 B2r: the detail window's "Tested with" profile (per instance; voice → null) and the example ("example" in the
+    // registry is {kind,file}; the response carries {kind,url} or null when there is none / the file is not on disk).
+    for (const id of Object.keys(outWorkflows)) {
+      const e = outWorkflows[id];
+      if (!e || typeof e !== 'object') continue;
+      outWorkflows[id] = Object.assign({}, e, { tested: workflows.testedProfileFor(e), example: workflows.exampleFor(e, path.join(WEB_ROOT, 'examples')) });
+    }
+    // </b2r-fields>
     sendJSON(res, 200, { workflows: outWorkflows, active });
     return;
   }
@@ -2154,6 +3585,7 @@ async function handler(req, res) {
     cfg2.workflows = cfg2.workflows || {};
     cfg2.workflows[stage] = id;
     a.saveConfig(cfg2);
+    try { localVideoBackend.invalidate(); } catch (_) { /* the next view re-probes the local video models */ }
     sendJSON(res, 200, { active: cfg2.workflows });
     return;
   }
@@ -2219,6 +3651,115 @@ async function handler(req, res) {
     return;
   }
 
+  // ── GET /workflows/acquire-log?id=<id> ───────────────────────────────────
+  // v1.10 B3: the (already redacted) in-memory acquire log of the last run for this workflow id.
+  if (method === 'GET' && urlPath === '/workflows/acquire-log') {
+    const id = parsedUrl.searchParams.get('id') || '';
+    sendJSON(res, 200, { id, lines: (acquireLogs.get(id) || []).slice() });
+    return;
+  }
+
+  // <b2r-env>
+  // ── GET /workflows/env?instance=<name> ───────────────────────────────────
+  // v1.10 B2r: what the user's own ComfyUI reports (shown next to "Tested with"). Read only: one GET /system_stats, 4 s timeout, never a POST.
+  // An unreachable ComfyUI is a normal 200 { reachable:false, base }; an instance neither Phoenix nor the config knows is a 400.
+  if (method === 'GET' && urlPath === '/workflows/env') {
+    const instance = parsedUrl.searchParams.get('instance') || 'trellis';
+    const envCfg = a.loadConfig();
+    const known = new Set(Object.keys(workflows.TESTED_PROFILES).concat(Object.keys((envCfg && envCfg.comfyInstall) || {})));
+    if (!known.has(instance)) { sendJSON(res, 400, { error: 'unknown instance "' + instance + '"' }); return; }
+    const base = String(i2iEngine.baseForInstance(envCfg, instance)).replace(/\/+$/, '');
+    try {
+      const r = await fetch(base + '/system_stats', { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) { sendJSON(res, 200, { reachable: false, base }); return; }
+      sendJSON(res, 200, workflows.envFromSystemStats(base, await r.json()));
+    } catch (_) {
+      sendJSON(res, 200, { reachable: false, base });
+    }
+    return;
+  }
+  // </b2r-env>
+
+  // <b2r-uninstall>
+  // The uninstall plan / run share one context: the registry (who else uses a file), the active workflow per stage and whether an acquire runs.
+  // The awaited status checks come FIRST; config, active workflows and the running-acquire state are read AFTER them, so a workflow
+  // activated / an acquire started meanwhile is seen. Callers plan and move synchronously from the returned ctx (ctx.cfg is the fresh config).
+  const INSTALL_CHANGED = 'The install folder changed while Phoenix was checking — try again.';
+  async function uninstallContext(id, entry, _cfgU0, reg) {
+    // Which OTHER workflows on the SAME install target are really installed (status 'ready') - only those keep a shared file.
+    // A workflow whose own instance differs lives in another root and never counts.
+    const inst = (entry && entry.instance) || 'trellis';
+    const probe = async (cfgP) => {
+      const set = new Set();
+      for (const [oid, o] of Object.entries((reg && reg.workflows) || {})) {
+        if (oid === id || !o || typeof o !== 'object') continue;
+        if ((o.instance || 'trellis') !== inst) continue;
+        try { if (await downloader.status(cfgP, { id: oid, ...o }) === 'ready') set.add(oid); } catch (_) {}
+      }
+      return set;
+    };
+    const targetOf = (c) => JSON.stringify([c.comfyInstall, c.endpoints]);
+    // installed state and plan must come from the same config: read it, probe, read it again; if the install target changed meanwhile, probe once more
+    let cfgU = a.loadConfig();
+    let installed = await probe(cfgU);
+    const cfgAfter = a.loadConfig();
+    let changed = false;
+    if (targetOf(cfgAfter) !== targetOf(cfgU)) {
+      cfgU = cfgAfter; installed = await probe(cfgU);
+      const cfgThird = a.loadConfig();
+      if (targetOf(cfgThird) !== targetOf(cfgU)) changed = true;   // moved AGAIN: no installed set fits any target - refuse, move nothing
+      cfgU = cfgThird;
+    } else cfgU = cfgAfter;   // fresh state (active workflows) AFTER the awaits
+    const active = {};
+    for (const st of ['image', 'mesh', 'i2i', 'voice', 'video']) active[st] = (cfgU.workflows && cfgU.workflows[st]) || workflows.defaultActive(st);
+    const job = jobs.info();
+    const running = acquireRunning.has(id) || !!(job && job.kind === 'acquire' && job.label === (entry.label || id));
+    return { registry: reg, active, running, installed, cfg: cfgU, changed };
+  }
+
+  // ── GET /workflows/uninstall-plan?id= ────────────────────────────────────
+  // Read only: what an uninstall would move (remove), what stays because something else uses it (keep), and what Phoenix cannot do (manual).
+  if (method === 'GET' && urlPath === '/workflows/uninstall-plan') {
+    const id = parsedUrl.searchParams.get('id');
+    if (!id) { sendJSON(res, 400, { error: 'id required' }); return; }
+    const reg = workflows.loadRegistry();
+    const entry = reg.workflows && reg.workflows[id];
+    if (!entry) { sendJSON(res, 404, { error: 'no workflow "' + id + '"' }); return; }
+    const cfgU = a.loadConfig();
+    const ctxU = await uninstallContext(id, entry, cfgU, reg);
+    if (ctxU.changed) { sendJSON(res, 409, { error: INSTALL_CHANGED, moved: [] }); return; }
+    sendJSON(res, 200, downloader.uninstallPlan(ctxU.cfg, { id, ...entry }, ctxU));
+    return;
+  }
+
+  // ── POST /workflows/uninstall { id, confirm:true } ───────────────────────
+  // Local requests only (like /config). The plan is recomputed here — the client's view is never trusted — and the removable items are
+  // MOVED to <comfyInstall root>/.phoenix-trash/<time>/. Nothing is deleted.
+  if (method === 'POST' && urlPath === '/workflows/uninstall') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const id = body && body.id;
+    if (!id || typeof id !== 'string') { sendJSON(res, 400, { error: 'id required', field: 'id' }); return; }
+    if (body.confirm !== true) { sendJSON(res, 400, { error: 'confirm:true required — nothing was moved' }); return; }
+    const reg = workflows.loadRegistry();
+    const entry = reg.workflows && reg.workflows[id];
+    if (!entry) { sendJSON(res, 404, { error: 'no workflow "' + id + '"' }); return; }
+    const cfgU = a.loadConfig();
+    const full = { id, ...entry };
+    const ctxU = await uninstallContext(id, entry, cfgU, reg);
+    if (ctxU.changed) { sendJSON(res, 409, { error: INSTALL_CHANGED, moved: [] }); return; }
+    // from here on everything is synchronous: plan and move see the same fresh state
+    const planU = downloader.uninstallPlan(ctxU.cfg, full, ctxU);
+    if (!planU.ok) { sendJSON(res, 409, { error: planU.reason, moved: [] }); return; }
+    if (planU.unsafe) { sendJSON(res, 400, { error: 'refused: unsafe path in the manifest — nothing was moved', moved: [] }); return; }
+    const r = downloader.uninstallMove(ctxU.cfg, full, planU);
+    if (!r.ok) { sendJSON(res, 400, { error: r.error, moved: r.moved || [], trash: r.trash }); return; }
+    sendJSON(res, 200, { ok: true, moved: r.moved, trash: r.trash });
+    return;
+  }
+  // </b2r-uninstall>
+
   // ── POST /workflows/acquire ──────────────────────────────────────────────
   // Runs downloader.acquire() as a background job on the existing single-slot job/broadcast
   // machinery (jobs.js) — same shape as generate_image/image_to_3d: 202 accepted, progress +
@@ -2245,7 +3786,7 @@ async function handler(req, res) {
     // hidden control is not a gate: refuse the acquire server-side too, so no venv is ever built for an
     // engine this install cannot use (the same engineAvailability rule GET /workflows + voice.js honor).
     if (entry.stage === 'voice') {
-      const hasDispatcher = !!(localCfg.voice && localCfg.voice.dispatcher);
+      const hasDispatcher = workflows.hasDispatcher(localCfg);
       const av = workflows.engineAvailability({ id, ...entry }, hasDispatcher);
       if (!av.available) {
         sendJSON(res, 403, { error: 'voice engine "' + id + '" is not available (' + av.reason + ') — refusing to build a venv for an unusable engine' });
@@ -2258,22 +3799,37 @@ async function handler(req, res) {
     // (cp.spawn, not spawnSync) so it no longer freezes chat/voice/library while a multi-minute clone/
     // pip/weights fetch runs; progress + terminal state broadcast over SSE as `acquire-progress`.
     const result = jobs.start({ kind: 'acquire', label: entry.label || id }, async (_jobId, signal) => {
+      // v1.10 B3: a new acquire for this id starts a fresh log; each event is redacted, then stored + broadcast.
+      const redact = makeAcquireRedactor(localCfg);
+      acquireLogs.set(id, []);
+      acquireRunning.add(id);
       try {
         const r = await downloader.acquire(localCfg, { id, ...entry }, {
           signal,
-          onProgress: (p) => broadcast({ kind: 'acquire-progress', id, ...p }),
+          onProgress: (p0) => {
+            const p = deepRedact(p0, redact);
+            try { acquireLogPush(id, redact(acquireLogText(p))); } catch (_) {}
+            broadcast({ kind: 'acquire-progress', id, ...p });
+          },
         });
         const cancelled = !!(r.failed && r.failed.some(f => f.cancelled));
         const hardFailed = !cancelled && r.failed && r.failed.length > 0;
-        broadcast({ kind: 'acquire-progress', id, phase: cancelled ? 'cancelled' : (hardFailed ? 'failed' : 'complete'),
-                    summary: { done: r.done, skipped: r.skipped, failed: r.failed, warnings: r.warnings || [] } });
-        if (hardFailed) throw new Error('acquire failed: ' + r.failed.map(f => f.name + ' (' + f.error + ')').join('; '));
+        const failedText = hardFailed ? redact(r.failed.map(f => f.name + ' (' + f.error + ')').join('; ')) : '';
+        if (!cancelled && !hardFailed) { try { localVideoBackend.invalidate(); } catch (_) { /* re-probe the local video models now that files arrived */ } }
+        broadcast(Object.assign({ kind: 'acquire-progress', id, phase: cancelled ? 'cancelled' : (hardFailed ? 'failed' : 'complete'),
+                    summary: deepRedact({ done: r.done, skipped: r.skipped, failed: r.failed, warnings: r.warnings || [] }, redact) },
+                    hardFailed ? Object.assign({ label: entry.label || id, error: failedText }, acquireFaqFields(failedText)) : {}));
+        if (hardFailed) throw new Error('acquire failed: ' + failedText);
         return cancelled
           ? 'acquire cancelled — ' + (entry.label || id)
           : 'acquired ' + (entry.label || id) + ' — done:' + r.done.length + ' skipped:' + r.skipped.length + ((r.warnings && r.warnings.length) ? ' warnings:' + r.warnings.length : '');
       } catch (e) {
-        broadcast({ kind: 'acquire-progress', id, phase: 'failed', error: String((e && e.message) || e) });
-        throw e;
+        const errText = redact(String((e && e.message) || e));
+        broadcast(Object.assign({ kind: 'acquire-progress', id, phase: 'failed', label: entry.label || id, error: errText }, acquireFaqFields(errText)));
+        throw new Error(errText);   // never the raw error: jobs.js would put its message on SSE + the debug log
+      } finally {
+        acquireRunning.delete(id);
+        try { voice.invalidateFreeSpace(); } catch (_) {}   // R3-M1: the disk figure in Settings -> Voice is stale after an install
       }
     });
 
@@ -2331,6 +3887,25 @@ async function handler(req, res) {
     return;
   }
 
+  // ── GET /seat-caps?seat=&provider=&model=&endpoint=&local= (LC2d T8-11) ───────────────────────────────
+  // Read-only: the PERSISTED tool-test verdict (capabilities.json) of a candidate seat - the same lookup GET /config does for the saved seats. Never probes, never writes.
+  // → { tools:'pass'|'fail'|'none', probedAt?, forced? }. The page decides what is fresh enough (14 days).
+  if (method === 'GET' && urlPath === '/seat-caps') {
+    const sp = parsedUrl.searchParams, seatName = sp.get('seat');
+    if (seatName !== 'orchestrator' && seatName !== 'troubleshooter') { sendJSON(res, 200, { tools: 'none' }); return; }
+    try {
+      const cfg0 = withCandidateEndpoints(a.loadConfig(), sp.get('local') ? { local: sp.get('local') } : undefined);
+      const cur = (cfg0.seats && cfg0.seats[seatName] && typeof cfg0.seats[seatName] === 'object') ? cfg0.seats[seatName] : {};
+      const cand = {};
+      for (const k of ['provider', 'endpoint']) if (sp.get(k)) cand[k] = sp.get(k);
+      if (sp.has('model')) cand.model = sp.get('model');   // C1: '' is a real choice (the Codex default model) - it must not fall back to the saved seat's model
+      const seat = providers.resolveSeat(seatName, { ...cfg0, seats: { ...(cfg0.seats || {}), [seatName]: { ...cur, ...cand } } }, {});
+      const c = capabilities.getCaps(seat);
+      sendJSON(res, 200, c ? { tools: c.tools, probedAt: c.probedAt || null, forced: !!c.forced } : { tools: 'none' });
+    } catch (_) { sendJSON(res, 200, { tools: 'none' }); }
+    return;
+  }
+
   // ── POST /seat-bench ─────────────────────────────────────────────────────
   // Body: { seat:'orchestrator', provider, model, endpoint } → the 5-task competence benchmark of a CANDIDATE seat
   // in a throw-away headless Blender (its own IPC dir — the user's open Blender is never touched). Only after the
@@ -2382,6 +3957,52 @@ async function handler(req, res) {
     sendJSON(res, 200, { running: !!_benchRunning, ...(_benchProgress || {}) });
     return;
   }
+
+  // ── Video (v1.10 V3): POST /video/estimate · POST /video/make · POST /video/cancel · GET /video/status ──
+  // fal.ai Kling 3 Pro, paid + opt-in. job = { shots:[{keyframe, prompt, duration_s, refs:[{kind,image,name?}]}], audio?, endKeyframe? } (see providers/fal-video.js).
+  // Every path in a job must resolve inside output/. /video/make needs confirmed:true (the page showed the cost line); progress arrives as SSE 'video-progress'.
+  // <v3-video>
+  if (urlPath === '/video/estimate' || urlPath === '/video/make' || urlPath === '/video/cancel' || urlPath === '/video/status') {
+    if (urlPath === '/video/status') {
+      if (method !== 'GET') { sendJSON(res, 405, { error: 'GET only' }); return; }
+      sendJSON(res, 200, a.videoStatus());
+      return;
+    }
+    if (method !== 'POST') { sendJSON(res, 405, { error: 'POST only' }); return; }
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    if (urlPath === '/video/make' && remote.isRemoteReq(req)) { sendJSON(res, 403, REMOTE_NO_PAID); return; }   // LC2i: fal.ai costs money; /video/cancel and /video/estimate stay open to the phone
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+    if (urlPath === '/video/cancel') {
+      const c = a.videoCancel();
+      if (!c.ok) { sendJSON(res, 409, { error: c.error }); return; }
+      sendJSON(res, 200, { ok: true, cancelling: true });   // the job answers over SSE once fal confirmed (or did not confirm) the cancel
+      return;
+    }
+    try {
+    const fal = require('./providers/fal-video');
+    const vcfg = a.loadConfig();
+    const pathErr = fal.checkPaths(body.job, { outputDir: path.join(workingDir, 'output'), cwd: workingDir });
+    if (pathErr) { sendJSON(res, 400, { error: a.scrubFalKey(pathErr) }); return; }
+    const est = fal.estimate(body.job, vcfg);   // normalises audio (job.audio ?? config ?? true) - the same function the request is built from
+    if (!est.ok) { sendJSON(res, 400, { error: a.scrubFalKey(est.error) }); return; }
+    if (urlPath === '/video/estimate') { sendJSON(res, 200, { line: est.line, usd: est.usd, seconds: est.seconds, audio: est.audio }); return; }
+    if (body.confirmed !== true) { sendJSON(res, 400, { error: 'This costs money — confirm first: ' + est.line, needs_confirm: true, line: est.line, usd: est.usd }); return; }
+    const denied = a.videoGate(vcfg, { uiButton: true });
+    if (denied) { sendJSON(res, /^BUSY/.test(denied) ? 409 : 403, { error: denied }); return; }
+    // the confirmation is bound to the price: the POST carries the { line, usd } the user saw; a different or missing one is answered with the current price
+    const seen = body.estimate;
+    if (!seen || typeof seen !== 'object' || seen.line !== est.line || seen.usd !== est.usd) { sendJSON(res, 409, { error: 'The price changed or was not confirmed - confirm again: ' + est.line, estimate_changed: true, estimate: { line: est.line, usd: est.usd } }); return; }
+    const p = a.makeVideo(body.job, vcfg, { uiButton: true, confirmed: true });
+    const jobId = a.videoStatus().id || null;
+    const early = await Promise.race([p.then(r => ({ r })), new Promise(resolve => setImmediate(() => resolve(null)))]);   // a refusal before any request answers in this HTTP reply
+    if (early && !early.r.ok) { sendJSON(res, 400, { error: a.scrubFalKey(early.r.error) }); return; }
+    sendJSON(res, 200, early ? { ok: true, jobId, result: early.r } : { ok: true, jobId });
+    return;
+    } catch (e) { sendJSON(res, 500, { error: a.scrubFalKey((e && e.message) || e) }); return; }   // an unexpected exception is scrubbed like every other outgoing text
+  }
+  // </v3-video>
 
   // ── GET /remesh-balance (v1.9 M9) ──────────────────────────────────────────
   // The Settings section's live "Meshy balance". The server calls Meshy with the stored key; the page only ever gets the number
@@ -2460,7 +4081,7 @@ async function handler(req, res) {
 
   // ── POST /workflows/infer ────────────────────────────────────────────────
   // Infers a Phoenix node-map from a ComfyUI API-format workflow JSON.
-  // Body: { stage: 'image'|'mesh', json: <workflow as string or object> }
+  // Body: { stage: 'image'|'mesh'|'i2i'|'video', json: <workflow as string or object> }   (video: the answer also carries { video, from } - AW1)
   if (method === 'POST' && urlPath === '/workflows/infer') {
     let body;
     try {
@@ -2472,8 +4093,8 @@ async function handler(req, res) {
     }
 
     const { stage } = body || {};
-    if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i') {
-      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
+    if (stage !== 'image' && stage !== 'mesh' && stage !== 'i2i' && stage !== 'video') {
+      sendJSON(res, 400, { error: 'stage must be "image", "mesh", "i2i" or "video"', field: 'stage' });
       return;
     }
 
@@ -2499,7 +4120,7 @@ async function handler(req, res) {
 
   // ── POST /workflows/custom ───────────────────────────────────────────────
   // Saves a user-provided custom workflow entry.
-  // Body: { id, label, stage, nodes, deps, json }
+  // Body: { id, label, stage, nodes, deps, json[, video] }   (video: required for stage 'video' - AW1)
   if (method === 'POST' && urlPath === '/workflows/custom') {
     let body;
     try {
@@ -2511,8 +4132,8 @@ async function handler(req, res) {
     }
 
     const { stage: custStage, id: custId } = body || {};
-    if (custStage !== 'image' && custStage !== 'mesh' && custStage !== 'i2i') {
-      sendJSON(res, 400, { error: 'stage must be "image", "mesh" or "i2i"', field: 'stage' });
+    if (custStage !== 'image' && custStage !== 'mesh' && custStage !== 'i2i' && custStage !== 'video') {
+      sendJSON(res, 400, { error: 'stage must be "image", "mesh", "i2i" or "video"', field: 'stage' });
       return;
     }
     if (!custId || typeof custId !== 'string') {
@@ -2528,14 +4149,55 @@ async function handler(req, res) {
 
     try {
       const entry = workflows.addCustomWorkflow(
-        { id: body.id, label: body.label, stage: custStage, nodes: body.nodes || {}, deps: body.deps || {} },
+        { id: body.id, label: body.label, stage: custStage, nodes: body.nodes || {}, deps: body.deps || {}, video: body.video },
         jsonText
       );
+      // LC2f: a new video entry -> measure where it runs (D3, two ComfyUIs only) and re-probe the local video backend
+      let instInfo = null;
+      if (custStage === 'video') {
+        try { instInfo = await applyVideoInstance(a.loadConfig(), custId, body.instance_mode); } catch (_) { /* never fails the save */ }
+        try { localVideoBackend.invalidate(); } catch (_) { /* the next view re-probes */ }
+      }
       const reg = workflows.loadRegistry();
-      sendJSON(res, 200, { entry, workflows: reg.workflows });
+      sendJSON(res, 200, Object.assign({ entry: instInfo ? (reg.workflows[custId] || entry) : entry, workflows: reg.workflows }, instInfo ? { instance_info: instInfo } : {}));
     } catch (e) {
-      sendJSON(res, 400, { error: String(e.message || e) });
+      sendJSON(res, 400, e && e.field ? { error: String(e.message || e), field: e.field } : { error: String(e.message || e) });
     }
+    return;
+  }
+
+  // ── POST /workflows/instance-probe {id} | {deps:{custom_nodes,models}} (LC2f, D3) ──────────────────────────────────────────────
+  // Read-only measurement: which ComfyUI would run this video workflow, and why. { two:false } with one endpoint (nothing is fetched).
+  if ((method === 'POST' || method === 'GET') && urlPath === '/workflows/instance-probe') {
+    if (method === 'POST' && !isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    if (method === 'GET') body = { id: parsedUrl.searchParams.get('id') || '' };   // the workflow window asks with a GET
+    else try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+    let entryLike = null, override;
+    if (typeof body.id === 'string' && body.id) {
+      const e = (workflows.loadRegistry().workflows || {})[body.id];
+      if (!e) { sendJSON(res, 404, { error: 'unknown workflow', field: 'id' }); return; }
+      entryLike = e;
+      if (method === 'POST' && body.deps && typeof body.deps === 'object' && !Array.isArray(body.deps)) entryLike = Object.assign({}, e, { deps: body.deps });   // the dialog probes with what is in its fields NOW (what Save will store)
+      if (e.instance_pinned) override = e.instance === 'bild' ? 'bild' : 'main';
+      else if (e.builtin === true) override = e.instance === 'bild' ? 'bild' : 'main';   // a shipped entry keeps the instance it ships with: the line only says what it is
+    } else entryLike = { deps: (body.deps && typeof body.deps === 'object') ? body.deps : {} };
+    if (body.instance_mode === 'main' || body.instance_mode === 'second' || body.instance_mode === 'auto') override = instanceOverride(body.instance_mode);
+    if (method === 'GET' && entryLike && typeof body.id === 'string' && body.id) {
+      // LC2f r2: the workflow window states the STORED target (what really runs) - never a fresh pick; a different fresh pick is a second, separate line. Nothing is written here.
+      const cands = await measureVideoCandidates(a.loadConfig(), entryLike);
+      if (!cands) { sendJSON(res, 200, { two: false }); return; }
+      const storedKey = entryLike.instance === 'bild' ? 'bild' : 'main';
+      const stored = workflows.pickVideoInstance(cands, storedKey, { quiet: true });
+      const fresh = entryLike.instance_pinned || entryLike.builtin === true ? null : workflows.pickVideoInstance(cands, undefined);
+      const out = { two: true, instance: stored.instance || null, line: stored.line, reason: stored.reason, ready: stored.ready, candidates: cands };
+      if (fresh && fresh.key !== stored.key) out.suggest = { instance: fresh.instance || null, line: 'Phoenix would now pick ' + fresh.target + ' (' + fresh.reason + ') \u2014 save to switch' };
+      sendJSON(res, 200, out);
+      return;
+    }
+    const pick = await measureVideoInstances(a.loadConfig(), entryLike, override);
+    sendJSON(res, 200, pick ? { two: true, instance: pick.instance || null, line: pick.line, reason: pick.reason, ready: pick.ready, override: pick.override, candidates: pick.candidates } : { two: false });
     return;
   }
 
@@ -2573,8 +4235,10 @@ async function handler(req, res) {
     if (stage0) {
       const c = a.loadConfig();
       if (c.workflows && c.workflows[stage0] === delId) {
-        c.workflows[stage0] = workflows.DEFAULT_ACTIVE[stage0];
+        if (workflows.DEFAULT_ACTIVE[stage0]) c.workflows[stage0] = workflows.DEFAULT_ACTIVE[stage0];
+        else delete c.workflows[stage0];   // AW1: video's default lives in EXTRA_ACTIVE (DEFAULT_ACTIVE has none): drop the key, getActive falls back to it
         a.saveConfig(c);
+        if (stage0 === 'video') { try { localVideoBackend.invalidate(); } catch (_) {} }   // the next available() re-probes the fallback workflow
       }
     }
 
@@ -2636,11 +4300,17 @@ async function handler(req, res) {
       return;
     }
     try {
-      const entry = workflows.updateCustomWorkflow(body.id, { label: body.label, nodes: body.nodes, deps: body.deps });
+      const entry = workflows.updateCustomWorkflow(body.id, { label: body.label, nodes: body.nodes, deps: body.deps, video: body.video });
+      // LC2f: the video backend caches its readiness probe per entry; an edit (frames, models, nodes) must be seen at once. Also (re-)measure where it runs (D3).
+      let instInfo = null;
+      if (entry && entry.stage === 'video') {
+        try { instInfo = await applyVideoInstance(a.loadConfig(), body.id, body.instance_mode); } catch (_) { /* never fails the save */ }
+        try { localVideoBackend.invalidate(); } catch (_) { /* the next view re-probes */ }
+      }
       const reg = workflows.loadRegistry();
-      sendJSON(res, 200, { entry, workflows: reg.workflows });
+      sendJSON(res, 200, Object.assign({ entry: instInfo ? (reg.workflows[body.id] || entry) : entry, workflows: reg.workflows }, instInfo ? { instance_info: instInfo } : {}));
     } catch (e) {
-      sendJSON(res, 400, { error: String(e.message || e) });
+      sendJSON(res, 400, e && e.field ? { error: String(e.message || e), field: e.field } : { error: String(e.message || e) });
     }
     return;
   }
@@ -2798,16 +4468,42 @@ async function handler(req, res) {
     // killCurrent stops BOTH ends now (local child + ComfyUI interrupt) — the remote
     // half used to live here, which meant only /stop cleaned up and the timeout path
     // did not.
-    const local = await pipeline.killCurrent('user pressed /stop');
+    // v1.10 V2: the ③ Stop button sends { kind:'video', job:<id> }: it only ever stops THAT video run (a stale click never kills the next stage); the chat /stop sends nothing
+    let sbody = null;
+    try { sbody = JSON.parse(await readBody(req)); } catch (_) { sbody = null; }
+    const videoOnly = !!(sbody && typeof sbody === 'object' && sbody.kind === 'video');
+    // LC2f: a video Stop that names no run (a fal shot has no local job id) cancels NOTHING - it must never hit another shot's local run that happens to hold the slot
+    if (videoOnly && sbody.job == null) {
+      sendJSON(res, 200, { stopped: false, reason: 'no local video run named', stage: null, comfyui: 'not attempted', job: job ? { id: job.id, kind: job.kind, label: job.label, runningMs: Date.now() - job.startedAt } : null });
+      return;
+    }
+    const local = videoOnly ? { stopped: false, stage: null, comfyui: 'not attempted' } : await pipeline.killCurrent('user pressed /stop');
 
-    const remote = local.comfyui;
+    let remote = local.comfyui;
+    // a local video run lives in the jobs slot with no stage child - its AbortSignal makes the backend dequeue/interrupt its ComfyUI prompt
+    let videoStopped = false;
+    if (!local.stopped && job && job.kind === 'video' && (!videoOnly || Number(sbody.job) === job.id)) {
+      const c = jobs.cancel(job.id);
+      if (c.ok) {
+        videoStopped = true;
+        const waitMs = Number((((a.loadConfig() || {}).video || {}).local || {}).stopWaitMs) > 0 ? Number(a.loadConfig().video.local.stopWaitMs) : 8000;
+        for (let i = 0; i < Math.ceil(waitMs / 25) && jobs.info() && jobs.info().id === job.id; i++) await new Promise(r => setTimeout(r, 25));   // the backend answers with what it really did at ComfyUI
+        const ci = sbStops.get(job.id);
+        const still = !!(jobs.info() && jobs.info().id === job.id);
+        remote = still ? 'Stop requested — ComfyUI is not answering yet; the run ends as soon as it does'
+          : !ci ? 'nothing had been sent to ComfyUI yet'
+          : (ci.interrupted ? 'interrupted' : (!ci.reached ? 'ComfyUI could not be reached — nothing was interrupted' : (ci.dequeued && !ci.running ? 'removed from the queue (it had not started)' : 'nothing to interrupt (it was not running)')));
+      }
+    }
 
     if (local.stopped) {
       broadcast({ kind: 'notice', text: `⛔ Stopped the ${stage || 'running'} stage (ComfyUI: ${remote}).` });
+    } else if (videoStopped) {
+      broadcast({ kind: 'notice', text: '⛔ Stopped the local video (ComfyUI: ' + remote + ').' });
     }
     sendJSON(res, 200, {
-      stopped:  local.stopped,
-      stage:    stage || null,
+      stopped:  local.stopped || videoStopped,
+      stage:    stage || (videoStopped ? 'video' : null),
       comfyui:  remote,
       // Reported even when nothing was killed, so the UI can say WHY it could not stop.
       job:      job ? { id: job.id, kind: job.kind, label: job.label,
@@ -2830,7 +4526,68 @@ a.remeshEvents.on('progress', (e) => { try { broadcast({ kind: 'notice', text: '
 a.remeshEvents.on('done', (asset) => { try { broadcast({ kind: 'notice', text: 'remesh done', progress: 'remesh', asset, done: true }); } catch (_) { /* no clients */ } });
 a.remeshEvents.on('maybe-charged', (text) => { try { broadcast({ kind: 'notice', level: 'error', text: String(text) }); } catch (_) { /* no clients */ } });
 
-module.exports = { feedPipelineLine, _resetPipelineState, _resetCpProbeQuiet: () => { lastCpProbeFailAt = 0; }, handler, _setProviderDeps, _setMcpRenderPath };
+// V3: video progress / end to the page (kind 'video-progress'); a possible duplicate charge is shown as a notice, like remesh
+a.videoEvents.on('progress', (e) => { try { broadcast({ kind: 'video-progress', id: e.id, pct: e.pct, status: e.status, queuePosition: e.queuePosition }); } catch (_) { /* no clients */ } });
+a.videoEvents.on('done', (e) => { try { broadcast(Object.assign({ kind: 'video-progress', status: e.ok ? 'DONE' : 'FAILED', pct: e.ok ? 100 : null, queuePosition: null }, e)); } catch (_) { /* no clients */ } });
+a.videoEvents.on('maybe-charged', (text) => { try { broadcast({ kind: 'notice', level: 'error', text: a.scrubFalKey(text) }); } catch (_) { /* no clients */ } });
+
+// <v3-backend> V3: the 'fal' video backend of the V1b-3 registry. One shot per call (user 13.10.); estimate() is the SAME cost line as POST /video/estimate and never
+// answers null (null would read as "free" and start without a confirm) - it throws when it has no number. start() refuses without confirmed:true and sets the shot's clip itself.
+function falJobOf(req, cfg) {
+  const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
+  const job = { shots: [{ keyframe: req.startImage, prompt: req.prompt, duration_s: req.duration_s,
+    refs: (Array.isArray(req.refs) ? req.refs : []).map(r => ({ kind: r.role, image: r.path, name: r.label || '' })) }] };   // audio: decided once by fal.normalizeJob (job -> config -> on)
+  if (typeof req.audio === 'boolean') job.audio = req.audio;   // <lc2a-fal-audio> the per-video choice wins over the config default
+  return job;
+}
+const falVideoBackend = {
+  id: 'fal',
+  label: 'fal.ai · Kling 3 Pro',
+  gpu: false,   // cloud: must not take the GPU slot (V1b-3 amendment)
+  available(cfg) {
+    const denied = a.videoGate(cfg, { uiButton: true, ignoreBusy: true });
+    return denied ? { ok: false, reason: denied.replace(/^(REJECTED|BUSY): /, '') } : { ok: true, reason: '' };
+  },
+  estimate(req, cfgIn) {
+    const c = cfgIn || a.loadConfig();   // <lc2a-r2> M6: sbView hands in the config it already read
+    const e = require('./providers/fal-video').estimate(falJobOf(req, c), c);
+    if (!e.ok) throw new Error(a.scrubFalKey(e.error));
+    return { line: e.line, usd: e.usd };
+  },
+  start(req, o) {
+    // failures are RESOLVED as { ok:false, error } (V1b-3 amendment), never thrown
+    const bad = (m) => Promise.resolve({ ok: false, error: a.scrubFalKey(m) });
+    if (!o || o.confirmed !== true) return bad('fal.ai video costs money — it only starts after the cost line was confirmed. Nothing was sent.');
+    const cfg = a.loadConfig();
+    const denied = a.videoGate(cfg, { uiButton: true });
+    if (denied) return bad(denied.replace(/^(REJECTED|BUSY): /, ''));
+    const job = falJobOf(req, cfg);
+    const pathErr = require('./providers/fal-video').checkPaths(job, { outputDir: path.join(workingDir, 'output'), cwd: workingDir });
+    if (pathErr) return bad(pathErr);
+    return a.makeVideo(job, cfg, { uiButton: true, confirmed: true }).then((r) => {
+      if (!r.ok) return { ok: false, error: a.scrubFalKey(r.error.replace(/^(ERROR|REJECTED|BUSY): /, '')) };
+      if (req.boardId && req.shotId) {   // the final V1b-3 seam: the ids ride in the shotRequest
+        const u = storyboard.updateShot(req.boardId, req.shotId, { clip: { path: r.path, backend: 'fal', made_at: new Date().toISOString() } });
+        if (!u.ok) return { ok: false, error: a.scrubFalKey('the clip was made (' + r.path + ') but could not be linked to the shot: ' + u.error) };
+      }
+      return r;
+    });
+  },
+};
+function registerFalVideo() { return registerVideoBackend(falVideoBackend); }
+// </v3-backend>
+
+// <v2-backend> v1.10 V2: the free LOCAL image-to-video backend 'comfy-i2v' (providers/comfy-i2v.js): workflow-driven (the active stage:'video' entry), gpu:true -> the shared jobs slot.
+// The readiness probe runs in the background; when its answer changes, the open storyboard re-reads the board once.
+const localVideoBackend = require('./providers/comfy-i2v').create({
+  loadConfig: () => a.loadConfig(), workingDir,
+  measureVideoInstances, measureVideoCandidates,   // LC2g (T11-1): the Save-time measurement, reused at the first run of a never-measured entry and for the OOM hint
+  onChange: () => { try { broadcast({ kind: 'storyboard', phase: 'backends', ok: true }); } catch (_) { /* no clients */ } },
+});
+function registerLocalVideo() { return registerVideoBackend(localVideoBackend); }
+// </v2-backend>
+
+module.exports = { remote, _safeDirName: safeDirName, _thumbFailedSize: () => thumbFailed.size, registerFalVideo, falVideoBackend, registerLocalVideo, localVideoBackend, registerVideoBackend, unregisterVideoBackend, videoBackends, NO_VIDEO_BACKEND, feedPipelineLine, _resetPipelineState, _resetCpProbeQuiet: () => { lastCpProbeFailAt = 0; }, handler, _setProviderDeps, _setMcpRenderPath };
 
 // ─── Start server (only when run directly, not when required for tests) ────────
 
@@ -2873,7 +4630,15 @@ if (require.main === module) {
     process.exit(1);
   });
 
+  registerFalVideo();   // V3: Make video can use fal.ai once it is enabled + keyed in Settings
+  registerLocalVideo(); // V2: ...and the free local preview once ComfyUI has the video models
   server.listen(7777, '127.0.0.1', () => {
     console.log('Phoenix UI → http://127.0.0.1:7777');
+    try { voice.dispatcherSync(); } catch (_) { /* VO1: local voice dispatcher on if configured */ }
+    try { remote.start(!!((a.loadConfig().remote || {}).enabled)).catch(() => {}); } catch (_) { /* <r1-remote> re-point the private route when switched on; withdraw a stale one when not */ }
   });
+  // VO1: the dispatcher child must not outlive Phoenix (a hard kill is covered by its stdin pipe closing).
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => { Promise.resolve().then(() => voice.dispatcherShutdown()).catch(() => {}).then(() => remote.shutdown()).catch(() => {}).then(() => process.exit(0)); });
+  }
 }

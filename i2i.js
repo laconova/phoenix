@@ -20,6 +20,9 @@
 const fs   = require('fs');
 const path = require('path');
 const wfLib = require('./workflows.js');
+const crypto = require('crypto');
+const records = require('./records');   // append-only output record (v1.10 C1)
+const wfp = require('./workflow-params');   // v1.10 ADV: cfg / steps / sampler / denoise per workflow
 
 // ── instance → base URL ──────────────────────────────────────────────────────
 // Running SEVERAL ComfyUI instances is a legitimate, first-class setup — different node sets need
@@ -82,6 +85,8 @@ async function freeOtherInstances(config, keepBase) {
 // Best-effort: ask a ComfyUI to unload its models + free VRAM. Uses ComfyUI's own /free endpoint —
 // PORTABLE (no supervisor, no SSH), so it works on a single machine as well as the dev rig. Never
 // throws: a free that fails (instance down / unreachable) must not block the run.
+const freedAt = new Map();   // v1.10 V2 r3: normalised base -> when something last asked that ComfyUI to unload its models (a loaded model is gone then: the next run is a cold one)
+const lastFreed = (base) => freedAt.get(normBase(base)) || 0;
 async function freeInstance(base) {
   try {
     await fetch(`${base}/free`, {
@@ -89,48 +94,115 @@ async function freeInstance(base) {
       body: JSON.stringify({ unload_models: true, free_memory: true }),
       signal: AbortSignal.timeout(8000),
     });
+    freedAt.set(normBase(base), Date.now());
     return true;
   } catch { return false; }
 }
 
 // ── minimal comfy helpers, parametrised by base ──────────────────────────────
-async function uploadImage(base, imagePath) {
+// v1.10 V2 r2: the optional `signal` (the job's AbortSignal) is combined with a deadline on every request of the local video path, also while the body is read,
+// so a stalled connection ends in seconds and a Stop ends it at once. Without a signal every function behaves exactly as before.
+const guard = (signal, ms) => (signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : undefined);
+async function uploadImage(base, imagePath, uploadName, signal) {
   const data = fs.readFileSync(imagePath);
-  const name = path.basename(imagePath);
+  const name = uploadName || path.basename(imagePath);
   const form = new FormData();
   form.append('image', new Blob([data], { type: 'image/png' }), name);
   form.append('type', 'input');
   form.append('overwrite', 'true');
-  const res = await fetch(`${base}/upload/image`, { method: 'POST', body: form });
+  const res = await fetch(`${base}/upload/image`, signal ? { method: 'POST', body: form, signal: guard(signal, 30000) } : { method: 'POST', body: form });
   if (!res.ok) throw new Error(`i2i upload failed ${res.status}: ${await res.text()}`);
   return (await res.json()).name;
 }
 
-async function queue(base, workflow) {
+// <lc2a-r2> B1: the in-process reference path has no phoenix.js stage in front of it, so it needs the same
+// "ComfyUI is gone" handling + wording as phoenix.js ensureComfyUp (Contract 5: one text everywhere).
+// Returns null when ComfyUI answers (the original error then stands), else the Contract-5 sentence.
+// v1.10 V2 r3: the optional `signal` (the job's AbortSignal) ends the whole recovery at once: the ssh child is killed, the restart wait stops, the error is flagged .aborted.
+async function comfyGoneMessage(config, base, signal) {
+  const stopped = () => Object.assign(new Error('Stopped'), { aborted: true });
+  const answers = async () => { try { const r = await fetch(`${base}/queue`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000) }); return r.ok; } catch (_) { return false; } };
+  if (signal && signal.aborted) throw stopped();
+  if (await answers()) return null;
+  if (signal && signal.aborted) throw stopped();
+  const e = (config && config.endpoints) || {};
+  const rig = e.rigSsh || null, sup = e.comfySupervisor || null;
+  if (!rig || !sup) return `ComfyUI is not answering at ${base}. Start it (or fix endpoints.comfyui). If it runs on another machine that may stop it to free VRAM, set endpoints.rigSsh + endpoints.comfySupervisor so Phoenix restarts it by itself.`;
+  const inst = /:8000(\D|$)/.test(base) ? 'trellis' : (/:8188(\D|$)/.test(base) ? 'bild' : null);
+  if (!inst) return `ComfyUI is not answering at ${base} and Phoenix cannot restart it: endpoints.rigSsh (${rig}) is set, but this port maps to no supervisor instance (8000 = trellis, 8188 = bild). Start ComfyUI yourself or fix endpoints.comfyui.`;
+  let fail = null;
+  // <lc2a-r3> B1: ASYNC ssh - this runs inside the server process; spawnSync froze SSE/chat/Library for up to the 120 s timeout
+  try {
+    const r = await new Promise((resolve) => {
+      try {
+        require('child_process').execFile('ssh', ['-o', 'ConnectTimeout=10', rig, `node ${sup} up ${inst}`], { encoding: 'utf8', timeout: 120000, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
+          resolve({ err, stdout: stdout || '', stderr: stderr || '' });
+        });
+      } catch (err) { resolve({ err, stdout: '', stderr: '' }); }
+    });
+    if (signal && signal.aborted) throw stopped();
+    const line = (r.stdout + r.stderr).trim();
+    const er = r.err;
+    if (er) {
+      const spawnFail = er.code !== undefined && typeof er.code !== 'number';   // ENOENT etc.: ssh could not even start
+      const exitCode = typeof er.code === 'number' ? er.code : null;
+      fail = (spawnFail && er.message) || (line && line.split('\n').pop()) || (er.signal ? 'killed by ' + er.signal : (exitCode !== null ? 'exit code ' + exitCode : er.message));
+    }
+  } catch (err) { if (err && err.aborted) throw err; fail = err.message; }
+  if (fail) return `ComfyUI is not answering at ${base} and the restart over ${rig} failed: ${String(fail).replace(/\s+/g, ' ').slice(0, 160)}.`;
+  for (let i = 0; i < 20; i++) {
+    if (await answers()) return null;
+    if (signal && signal.aborted) throw stopped();
+    await new Promise((res) => { const t = setTimeout(res, 1500); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); res(); }, { once: true }); });
+    if (signal && signal.aborted) throw stopped();
+  }
+  return `ComfyUI is not answering at ${base} and the restart over ${rig} failed: ${inst} still not reachable after the restart (check the connection).`;
+}
+
+// <lc2a-r3> upload with the Contract-5 treatment: a CONNECTION failure (no HTTP answer) on the first contact is explained by comfyGoneMessage;
+// ComfyUI answering again (restart / blip) -> one retry. Used by runReference (first reference) and runI2I.
+async function uploadOrExplain(config, base, imagePath, upName, signal) {
+  try { return await uploadImage(base, imagePath, upName, signal); }
+  catch (err) {
+    if (/^i2i upload failed/.test(String(err && err.message))) throw err;
+    if (signal && signal.aborted) throw err;
+    const gone = await comfyGoneMessage(config, base, signal);
+    if (gone) throw new Error(gone);
+    return uploadImage(base, imagePath, upName, signal);
+  }
+}
+
+// v1.10 V2 r3: promptId (optional) is sent as `prompt_id` - ComfyUI keeps a client-supplied id, so an aborted/timed-out submission can still be cancelled by that id; the id in the answer wins if it differs.
+async function queue(base, workflow, signal, promptId, deadlineMs) {
   const res = await fetch(`${base}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow }),
+    body: JSON.stringify(promptId ? { prompt: workflow, prompt_id: promptId } : { prompt: workflow }),
+    ...(signal ? { signal: guard(signal, deadlineMs || 30000) } : {}),
   });
   if (!res.ok) throw new Error(`i2i queue failed ${res.status}: ${await res.text()}`);
   const d = await res.json();
   if (d.error) throw new Error(`ComfyUI rejected i2i workflow: ${d.error.message || JSON.stringify(d.error)}`);
-  return d.prompt_id;
+  return d.prompt_id || promptId;
 }
 
 // Poll history until the prompt completes or fails. Reads ComfyUI's own error status so a failed
 // job (bad node, OOM) throws immediately instead of polling to the timeout — same lesson as the
 // mesh poller. No global /interrupt here: i2i is single-shot and the instance may be shared, so we
 // never blind-cancel a foreign job.
-async function poll(base, promptId, { timeoutMs = 600000, onTick } = {}) {
+// v1.10 V2: intervalMs (default 3000) and signal (an AbortSignal: a stop ends the wait at once with an error flagged .aborted) are optional; every other caller is unchanged.
+async function poll(base, promptId, { timeoutMs = 600000, onTick, intervalMs = 3000, signal, requestMs = 15000 } = {}) {
+  const stopped = () => Object.assign(new Error('Stopped'), { aborted: true });
   const deadline = Date.now() + timeoutMs;
   const t0 = Date.now();
   let consecFails = 0;
   const MAX_CONSEC_FAILS = 5;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 3000));
+    if (signal && signal.aborted) throw stopped();
+    await new Promise(r => { const t = setTimeout(r, intervalMs); if (signal) signal.addEventListener('abort', () => { clearTimeout(t); r(); }, { once: true }); });
+    if (signal && signal.aborted) throw stopped();
     try {
-      const res = await fetch(`${base}/history/${promptId}`);
+      const res = await fetch(`${base}/history/${promptId}`, signal ? { signal: guard(signal, requestMs) } : undefined);
       // A non-ok status (500 from a crashed worker behind a proxy) is a FAILURE, not a "keep
       // waiting" — count it toward the strike limit instead of polling silently to the timeout.
       if (!res.ok) throw new Error(`history HTTP ${res.status}`);
@@ -155,6 +227,7 @@ async function poll(base, promptId, { timeoutMs = 600000, onTick } = {}) {
       const done = (st.completed) || (entry.outputs && Object.keys(entry.outputs).length > 0);
       if (done) return entry.outputs || {};
     } catch (e) {
+      if (signal && signal.aborted) throw stopped();   // a Stop that landed inside the request (not a blip, not a strike)
       if (e && e.message && e.message.startsWith('i2i job failed')) throw e; // real failure, not a blip
       consecFails++;
       if (consecFails >= MAX_CONSEC_FAILS) {
@@ -165,11 +238,35 @@ async function poll(base, promptId, { timeoutMs = 600000, onTick } = {}) {
   throw new Error(`i2i edit timed out after ${Math.round(timeoutMs / 60000)} min at ${base}. Qwen-Image-Edit needs ~3–4 min on a 10 GB card; if it never returns, that instance may be swapping against another VRAM holder.`);
 }
 
-async function download(base, filename, subfolder = '', type = 'output') {
+// v1.10 V2 r2: with { signal, stallMs } the download ends on a Stop (error flagged .aborted) or when no byte arrived for stallMs (default 30 s; error flagged .stalled), also mid-body.
+async function download(base, filename, subfolder = '', type = 'output', opts) {
   const url = `${base}/view?filename=${encodeURIComponent(filename)}&subfolder=${encodeURIComponent(subfolder)}&type=${encodeURIComponent(type)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`i2i download failed ${res.status}`);
-  return Buffer.from(await res.arrayBuffer());
+  const signal = opts && opts.signal;
+  if (!signal) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`i2i download failed ${res.status}`);
+    return Buffer.from(await res.arrayBuffer());
+  }
+  const stallMs = (opts && opts.stallMs) || 30000;
+  const ctl = new AbortController();
+  let timer = null, stalled = false;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { stalled = true; ctl.abort(); }, stallMs); };
+  const sig = AbortSignal.any([signal, ctl.signal]);
+  try {
+    arm();
+    const res = await fetch(url, { signal: sig });
+    if (!res.ok) throw new Error(`i2i download failed ${res.status}`);
+    const chunks = [];
+    if (res.body && typeof res.body.getReader === 'function') {
+      const rd = res.body.getReader();
+      for (;;) { const r = await rd.read(); if (r.done) break; chunks.push(Buffer.from(r.value)); arm(); }
+    } else chunks.push(Buffer.from(await res.arrayBuffer()));
+    return Buffer.concat(chunks);
+  } catch (e) {
+    if (signal.aborted) throw Object.assign(new Error('Stopped'), { aborted: true });
+    if (stalled) throw Object.assign(new Error(`i2i download stalled: no data from ${base} for ${Math.round(stallMs / 1000)} s`), { stalled: true, stallMs });
+    throw e;
+  } finally { clearTimeout(timer); }
 }
 
 // ── entry resolution ─────────────────────────────────────────────────────────
@@ -228,12 +325,17 @@ async function runI2I(config, opts = {}) {
     }
   }
 
-  const uploadedName = await uploadImage(base, inputImagePath);
-  const usedSeed = (seed != null && Number.isFinite(Number(seed))) ? Number(seed) : Math.floor(Math.random() * 2147483647);
+  const uploadedName = await uploadOrExplain(config, base, inputImagePath);
+  // a seed the caller passes wins; otherwise a seed locked in the workflow window (Advanced), else a fresh random one
+  const lockedSeed = (n.seed != null) ? wfp.lockedSeed(entry.id) : null;
+  const usedSeed = (seed != null && Number.isFinite(Number(seed))) ? Number(seed) : (lockedSeed != null ? lockedSeed : Math.floor(Math.random() * 2147483647));
 
   set('input_image', uploadedName);
   if (prompt != null) set('prompt', String(prompt));
-  if (cfg != null && n.cfg != null) set('cfg', Number(cfg));
+  // v1.10 ADV: the entry's declared params (cfg, steps, sampler ...) come from the store; a per-call cfg is a one-off that wins for this call only
+  // (never stored) and is clamped to the declaration's range. Entries without a cfg param (SAM3) get nothing.
+  const adv = wfp.run(entry.id, null, (cfg != null && Number.isFinite(Number(cfg))) ? { cfg: Number(cfg) } : null);
+  wfp.applyToGraph(entry, wf, adv.values);
   if (n.seed != null) set('seed', usedSeed);
 
   // Give the SaveImage node a unique prefix so concurrent/rapid edits never collide on one filename.
@@ -259,6 +361,7 @@ async function runI2I(config, opts = {}) {
   fs.mkdirSync(destDir, { recursive: true });
   const outPath = path.join(destDir, `${uniquePrefix}.png`);
   fs.writeFileSync(outPath, imgData);
+  try { records.appendRecord({ kind: 'i2i', path: outPath, workflow: entry.id, prompt: prompt != null ? String(prompt) : null, seed: usedSeed, parent: inputImagePath, category: null }); } catch (_) {}
 
   return {
     outPath,
@@ -270,6 +373,131 @@ async function runI2I(config, opts = {}) {
   };
 }
 
+// ── reference-image generation (v1.10 I1) ─────────────────────────────────────
+// Flux Klein: up to 2 reference images conditioned via ReferenceLatent (official Klein image-edit template).
+// Z-Image Turbo: 1 reference as img2img (denoise slider). Driven by the `reference` block of the ACTIVE IMAGE
+// workflow entry (workflows.js) — no new workflow stage. The prompt is sent literally (no metaprompter).
+function resolveImageEntry(config, workflowId) {
+  if (workflowId) {
+    const reg = wfLib.loadRegistry();
+    const e = reg.workflows && reg.workflows[workflowId];
+    if (!e) throw new Error(`No workflow "${workflowId}".`);
+    if (e.stage !== 'image') throw new Error(`Workflow "${workflowId}" is not an image workflow (stage=${e.stage}).`);
+    return { id: workflowId, ...e };
+  }
+  return wfLib.getActive('image', config);
+}
+
+const stampNow = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+
+async function runReference(config, opts = {}) {
+  const { refs, prompt, width, height, denoise, seed, workflowId, category, outDir, timeoutMs, onTick } = opts;
+  const entry = resolveImageEntry(config, workflowId);
+  const label = entry.label || entry.id;
+  const R = entry.reference;
+  if (!R) throw new Error(`"${label}" has no reference mode — use Flux Klein (up to 2 references) or Z-Image Turbo (1 reference).`);
+
+  if (category != null && (typeof category !== 'string' || !/^[a-z0-9_-]{1,40}$/i.test(category))) throw new Error('category must be 1-40 letters, digits, "_" or "-"');
+  const list = Array.isArray(refs) ? refs : [];
+  if (list.length < 1) throw new Error('at least one reference image is needed');
+  if (list.length > R.maxRefs) throw new Error(`${label} takes at most ${R.maxRefs} reference image(s)`);
+  for (const r of list) {
+    if (typeof r !== 'string' || !r || !fs.existsSync(r)) throw new Error(`reference image not found: ${typeof r === 'string' ? path.basename(r) : String(r)}`);
+  }
+  if (typeof prompt !== 'string' || !prompt.trim()) throw new Error('a prompt is needed');
+
+  const flux = R.mode !== 'img2img';
+  // LC2h: the reference templates keep their own defaults (Flux ref: cfg 5 / euler); only what the user SET in Advanced (workflow value or
+  // category override, never a 'default' source) is applied on top, so an untouched workflow runs the template exactly as before.
+  const wrun = wfp.run(entry.id, category || null, null);
+  const userSet = (key) => wrun.values[key] !== undefined && wrun.sources[key] !== 'default';
+  let w = null, h = null, usedDenoise = null;
+  if (flux) {
+    const okSize = (v) => Number.isInteger(v) && v % 16 === 0 && v >= 512 && v <= 2048;
+    const ss = userSet('size') ? wrun.values.size : null;   // a stored size the reference path cannot use falls back to sizeDefault (never throws)
+    const useSs = !!ss && okSize(ss.w) && okSize(ss.h);
+    w = width == null ? (useSs ? ss.w : R.sizeDefault[0]) : width;
+    h = height == null ? (useSs ? ss.h : R.sizeDefault[1]) : height;
+    if (!okSize(w) || !okSize(h)) throw new Error('width and height must be multiples of 16 between 512 and 2048');
+  } else {
+    // the workflow's denoise (Advanced, same store; its default is read from the img2img JSON) unless the call passes one
+    const rs = wfp.resolve(entry.id, category || null).denoise;
+    usedDenoise = denoise == null ? (rs ? rs.value : R.denoiseDefault) : denoise;
+    if (typeof usedDenoise !== 'number' || !Number.isFinite(usedDenoise) || usedDenoise < 0.05 || usedDenoise > 1.0) throw new Error('denoise must be between 0.05 and 1.0');
+  }
+
+  const n    = R.nodes || {};
+  const base = baseForInstance(config, entry.instance);
+  const file = path.resolve(__dirname, R.files[list.length]);
+  const wf   = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const setIn = (node, field, value) => {
+    if (!wf[node]) throw new Error(`reference workflow has no node ${node}`);
+    if (!wf[node].inputs) wf[node].inputs = {};
+    wf[node].inputs[field] = value;
+  };
+  const slot = (v, defField) => (v && typeof v === 'object') ? { node: String(v.node), field: v.field || defField } : { node: String(v), field: defField };
+
+  // Same VRAM rule as runI2I: free every OTHER configured ComfyUI instance first.
+  for (const other of allComfyBases(config)) {
+    if (normBase(other) !== normBase(base)) {
+      const ok = await freeInstance(other);
+      if (onTick && ok) { try { onTick(0); } catch (_) {} }
+    }
+  }
+
+  for (let i = 0; i < list.length; i++) {
+    // unique upload name per reference: uploads overwrite by name, so two refs called image.png would both become the second file
+    const upName = `phx_ref_${stampNow()}_${i}_${crypto.randomBytes(3).toString('hex')}${path.extname(list[i]).toLowerCase() || '.png'}`;
+    const uploaded = i === 0 ? await uploadOrExplain(config, base, list[i], upName) : await uploadImage(base, list[i], upName);   // only the first contact can be "ComfyUI is gone"
+    setIn(n.ref_images[i], 'image', uploaded);
+  }
+  // explicit seed wins, then a seed locked in the workflow window (Advanced), else a fresh random one (same precedence as runI2I)
+  const lockedSeed = wfp.lockedSeed(entry.id);
+  const usedSeed = (seed != null && Number.isFinite(Number(seed))) ? Number(seed) : (lockedSeed != null ? lockedSeed : Math.floor(Math.random() * 2147483647));
+  const setVals = {};
+  for (const k of Object.keys(wrun.values)) if (userSet(k) && k !== 'size' && k !== 'denoise') setVals[k] = wrun.values[k];
+  wfp.applyToGraph(entry, wf, setVals);
+  const sSeed = slot(n.seed, 'noise_seed');
+  setIn(sSeed.node, sSeed.field, usedSeed);
+  const sPos = slot(n.positive, 'text');
+  setIn(sPos.node, sPos.field, prompt);
+  if (flux) {
+    for (const node of n.size) { setIn(node, 'width', w); setIn(node, 'height', h); }
+  } else {
+    const sDen = slot(n.denoise, 'denoise');
+    setIn(sDen.node, sDen.field, usedDenoise);
+  }
+
+  const uniquePrefix = `phoenix_ref_${entry.id}_${stampNow()}_${usedSeed}_${crypto.randomBytes(2).toString('hex')}`;   // random tail: same workflow + seed within one second must not collide
+  const outNode = String(n.output);
+  if (wf[outNode] && wf[outNode].inputs && 'filename_prefix' in wf[outNode].inputs) wf[outNode].inputs.filename_prefix = uniquePrefix;
+
+  const t0 = Date.now();
+  const promptId = await queue(base, wf);
+  const outputs  = await poll(base, promptId, { timeoutMs: timeoutMs || 600000, onTick });
+  const saveNode = outputs[outNode];
+  if (!saveNode || !saveNode.images || !saveNode.images.length) {
+    throw new Error(`reference generation produced no image in output node ${outNode}. The engine ran but returned nothing — check the ComfyUI log on ${base}.`);
+  }
+  const img = saveNode.images[0];
+  const imgData = await download(base, img.filename, img.subfolder, img.type);
+
+  const outRoot = path.resolve(__dirname, 'output');
+  const destDir = outDir || path.join(outRoot, category || 'reference');
+  if (!outDir && !path.resolve(destDir).startsWith(outRoot + path.sep)) throw new Error('category must stay inside output/');
+  fs.mkdirSync(destDir, { recursive: true });
+  const outPath = path.join(destDir, `${uniquePrefix}.png`);
+  fs.writeFileSync(outPath, imgData, { flag: 'wx' });   // never overwrite an earlier result
+  try { records.appendRecord({ kind: 'image', mode: 'reference', path: outPath, workflow: entry.id, prompt, seed: usedSeed, parent: list[0], refs: list, category: category || null }); } catch (_) {}
+
+  return {
+    outPath, filename: path.basename(outPath), workflowId: entry.id, seed: usedSeed,
+    seconds: Math.round((Date.now() - t0) / 1000), refs: list.length,
+    width: flux ? w : null, height: flux ? h : null, denoise: flux ? null : usedDenoise,
+    sizeFrom: flux ? 'request' : 'reference',
+  };
+}
+
 // List the available i2i workflows (for the UI engine picker / dep checks).
 function listI2I() {
   const reg = wfLib.loadRegistry();
@@ -278,4 +506,4 @@ function listI2I() {
     .map(([id, e]) => ({ id, label: e.label || id, instance: e.instance || 'trellis', mode: e.mode || 'edit', builtin: !!e.builtin }));
 }
 
-module.exports = { runI2I, listI2I, baseForInstance, resolveEntry, freeOtherInstances };
+module.exports = { runI2I, runReference, listI2I, comfyGoneMessage, baseForInstance, resolveEntry, freeOtherInstances, freeInstance, uploadOrExplain, queue, poll, download, lastFreed };   // v1.10 V2: the local video backend reuses the same ComfyUI client

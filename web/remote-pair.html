@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Phoenix - pair this phone</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #737373; color: #2A2A2A; display: flex; justify-content: center; padding: 24px 16px; }
+  main { width: 100%; max-width: 420px; background: #B3B3B3; border: 1px solid #FF7A18; border-radius: 12px; padding: 20px; }
+  h1 { font-size: 20px; margin: 0 0 6px; color: #2A2A2A; }
+  p { line-height: 1.5; margin: 0 0 12px; font-size: 15px; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+  input { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #D8D8D8; border-radius: 8px; background: #fff; color: #2A2A2A; }
+  button { width: 100%; min-height: 44px; margin-top: 14px; padding: 10px; font-size: 16px; font-weight: 700; border: none; border-radius: 8px; background: #FF7A18; color: #1a1a1a; cursor: pointer; }
+  button[disabled] { opacity: 0.5; }
+  .code { font-size: 38px; font-weight: 800; letter-spacing: 0.08em; text-align: center; margin: 14px 0; font-variant-numeric: tabular-nums; }
+  .err { color: #7a1010; font-weight: 600; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pair this phone with Phoenix</h1>
+  <div id="step-claim">
+    <p>Phoenix on your laptop will ask you to confirm this phone. Give it a name you will recognise.</p>
+    <label for="name">Phone name</label>
+    <input id="name" type="text" maxlength="60" autocomplete="off">
+    <div id="code-row" hidden>
+      <label for="code">8-digit code from the laptop</label>
+      <input id="code" type="text" inputmode="numeric" autocomplete="off" maxlength="12">
+    </div>
+    <button id="go" type="button">Ask to connect</button>
+    <p id="err" class="err" role="alert"></p>
+  </div>
+  <div id="step-wait" hidden>
+    <p>Check that this code is the same on the laptop, then press <b>Connect</b> there:</p>
+    <div class="code" id="confirm"></div>
+    <p id="wait-note">Waiting for the laptop...</p>
+  </div>
+</main>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var token = '';
+  try { var m = /(?:^|[#&])pair=([A-Za-z0-9_-]+)/.exec(location.hash || ''); if (m) token = m[1]; } catch (e) {}
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}   // the token leaves the address bar at once
+  var ua = navigator.userAgent || '';
+  var guess = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone' : 'Phone';
+  $('name').value = guess;
+  if (!token) $('code-row').hidden = false;
+  function post(path, body) {
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, json: j }; }); });
+  }
+  function fail(t) { $('err').textContent = t; $('go').disabled = false; }
+  $('go').addEventListener('click', function () {
+    $('err').textContent = ''; $('go').disabled = true;
+    var body = { name: $('name').value };
+    if (token) body.token = token; else body.code = $('code').value;
+    post('/remote/api/claim', body).then(function (r) {
+      if (r.status !== 200) return fail((r.json && r.json.error) || 'That did not work.');
+      $('step-claim').hidden = true; $('step-wait').hidden = false;
+      $('confirm').textContent = r.json.confirm;
+      poll(r.json.id, r.json.claim);
+    }, function () { fail('Could not reach Phoenix. Is Tailscale on?'); });
+  });
+  function poll(id, claim) {
+    post('/remote/api/claim-status', { id: id, claim: claim }).then(function (r) {
+      var s = r.json && r.json.status;
+      if (s === 'approved') { $('wait-note').textContent = 'Connected.'; location.replace('/'); return; }
+      if (s === 'rejected') { $('wait-note').textContent = 'The laptop rejected this phone.'; return; }
+      if (r.status === 410 || s === 'expired') { $('wait-note').textContent = (r.json && r.json.error) || 'The request timed out - start again from the laptop.'; return; }
+      if (r.status === 429) { setTimeout(function () { poll(id, claim); }, 8000); return; }
+      if (r.status !== 200) { $('wait-note').textContent = (r.json && r.json.error) || 'Lost the request - start again from the laptop.'; return; }
+      setTimeout(function () { poll(id, claim); }, 2000);
+    }, function () { setTimeout(function () { poll(id, claim); }, 4000); });
+  }
+})();
+</script>
+</body>
+</html>

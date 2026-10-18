@@ -231,6 +231,7 @@ async function runImageStage(ctx) {
   if (ctx.cat)       args.push('--cat',    ctx.cat);
   if (ctx.promptPos) args.push('--prompt', ctx.promptPos);
   if (ctx.promptNeg) args.push('--neg',    ctx.promptNeg);
+  if (ctx.width && ctx.height) args.push('--width', String(ctx.width), '--height', String(ctx.height));   // v1.10 V1b-3: the storyboard keyframe honours the board aspect
 
   const res = await spawnPhoenixStage(args, 240000);
 

@@ -28,9 +28,11 @@ const pipeline = require('./pipeline');
 const jobs = require('./jobs');
 const lock = require('./lock');
 const palette = require('./palette');
+const wfParams = require('./workflow-params');   // v1.10 ADV: cfg/steps/faces/... live per workflow, not in the palette
 const wf = require('./workflows');
 const workflows = require('./workflows');
 const i2iEngine = require('./i2i');
+const servable = require('./servable');   // the one "image the user may point at" path rule (shared with the storyboard route)
 const { makeHuman, placeHuman } = require('./make_human');
 const { animateHuman, sequenceAnimations, saveAnimation } = require('./animate_human');
 const { generateMotion } = require('./hy_motion');
@@ -47,7 +49,7 @@ const CONFIG_FILE   = path.join(__dirname, 'phoenix-config.json');
 const CONFIG_EXAMPLE_FILE = path.join(__dirname, 'phoenix-config.example.json');
 const HISTORY_FILE  = path.join(__dirname, 'session', 'history.json');
 const STATE_FILE    = path.join(__dirname, 'session', 'state.json');
-const HISTORY_KEEP  = 10;
+const HISTORY_KEEP  = 10;   // default; saveHistory(history, keep) keeps more when the History length setting asks for it
 const MAX_TOOL_CALLS = 3;        // default tool budget in Ask (seats.orchestrator.maxToolCalls overrides)
 const MAX_TOOL_CALLS_AUTO = 8;   // default tool budget in Auto (seats.orchestrator.maxToolCallsAuto overrides)
 
@@ -127,6 +129,7 @@ Use \\n (escaped) for newlines inside JSON string values. Do NOT wrap in code fe
 
 TOOLS:
 - generate_image  runs the image generation stage; the system decides whether to continue automatically. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}  Optional: {"prompt":"<exact positive>","negative":"<exact negative>"} to bypass the metaprompter and use an exact prompt.
+- generate_from_refs  Generate an image from 1–2 reference images (who/where/what) plus an instruction (Flux Klein takes 2, Z-Image Turbo 1). INPUT: {"refs": ["output/item/a.png"], "prompt": "the instruction, sent literally"}  Optional: {"width": 1344, "height": 768, "denoise": 0.6 (Z-Image only), "seed": n, "category": "name"}. Refs are relative paths inside output/ or staging/.
 - image_to_3d     runs the 3D mesh stage from the last generated image (or a given one); the system decides whether to continue automatically. INPUT: {} or {"image": "path", "description": "..."}  Optional: {"target_face_num": <n>} to regenerate the mesh at a specific face count (e.g. 7500).
 - generate_prop   full pipeline image→3D in ONE shot, STAGES the result (GLB on disk). Does NOT import into the scene. REJECTED while any approval gate is enabled in Settings — use generate_image then. INPUT: {"description": "...", "category": "${CATEGORY_ENUM}"}
 - blender_run     runs Python in Blender. INPUT: {"code": "python as single string, \\n for newlines"}
@@ -247,9 +250,18 @@ function loadHistory() {
   try { return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { return []; }
 }
 
-function saveHistory(history) {
+function saveHistory(history, keep) {
   ensureSessionDir();   // fresh clone has no session/ dir yet — create before first write
-  fs.writeFileSync(HISTORY_FILE, JSON.stringify(history.slice(-HISTORY_KEEP), null, 2));
+  const n = (Number.isInteger(keep) && keep > 0) ? Math.max(HISTORY_KEEP, keep) : HISTORY_KEEP;
+  // atomic (round 5): a temp file in the same folder, then a rename over the target - a disk error mid-write can never leave history.json empty or half written
+  const tmp = HISTORY_FILE + '.tmp-' + process.pid;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(history.slice(-n), null, 2));
+    fs.renameSync(tmp, HISTORY_FILE);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) { /* never created */ }
+    throw e;
+  }
 }
 
 function loadState() {
@@ -421,8 +433,13 @@ async function toolReadState(_input, state, _cfg) {
 }
 
 async function toolReadPalette(_input, _state, _cfg) {
+  // v1.10 ADV: hint/style per category + the effective params of the ACTIVE image + mesh workflows (value, overridden) - the numbers the
+  // palette used to carry are workflow parameters now.
   const cats = palette.loadPalette().categories;
-  return JSON.stringify({ categories: cats });
+  const pv = wfParams.paletteView(_cfg || {});
+  const out = {};
+  for (const [k, c] of Object.entries(cats)) out[k] = { hint: c.hint, style: c.style, builtin: !!c.builtin, params: pv.params[k] || {} };
+  return JSON.stringify({ categories: out, paramSource: pv.paramSource });
 }
 
 async function toolUnrealRun(input, _state, cfg) {
@@ -1196,6 +1213,7 @@ function remeshStatus() { return remeshJob ? { running: true, asset: remeshJob.a
 const remeshTag = (n) => (n >= 1000 ? +(n / 1000).toFixed(1) : +(n / 1000).toFixed(3)) + 'k';
 async function toolRemeshAsset(input, _state, cfg, opts) {
   opts = opts || {};
+  if (opts.remote === true) return 'REJECTED: Only on the laptop: paid jobs (Meshy, fal.ai).';   // LC2i: a turn that came from a paired phone (POST /chat sets it) - Auto mode does not unlock a paid job for the phone
   const rc = (cfg && cfg.remesh && typeof cfg.remesh === 'object') ? cfg.remesh : {};
   if (rc.enabled !== true) return 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Connections';
   const secrets = require('./providers/secrets');
@@ -1345,6 +1363,196 @@ async function toolRemeshAsset(input, _state, cfg, opts) {
     // M10 D2: ANY end of a job (ok, error, chat / Auto / MCP / Library start) tells the page to drop the badge + the chat line
     if (doneAsset) { try { remeshEvents.emit('done', doneAsset); } catch (_) { /* a listener must never break the tool */ } }
   }
+}
+
+// ─── make_video (v1.10 V3) — fal.ai Kling 3 Pro image-to-video, paid cloud, opt-in ───────────────────────────────────────
+// Same safety shape as remesh_asset: opt-in (Settings → Connections), key, default-deny, ONE job at a time, the submission INTENT is on disk before
+// the request leaves (fail closed), the request id is recorded on submit and removed only after the mp4 is on disk, an unresolved intent holds 15 min,
+// an identical retry with a recorded request id polls that request instead of submitting again.
+const videoStore = require('./video-tasks');
+const videoEvents = new (require('events').EventEmitter)();
+let videoInFlight = false;
+let videoJob = null;   // { id, controller, pct, status, queuePosition } — never the key
+let videoSeq = 0;
+function videoBusy() { return videoInFlight; }
+function videoStatus() { return videoJob ? { running: true, id: videoJob.id, pct: videoJob.pct, status: videoJob.status, queuePosition: videoJob.queuePosition } : { running: false }; }
+function videoCancel() {
+  if (!videoJob) return { ok: false, error: 'no video is rendering' };
+  try { videoJob.controller.abort(); } catch (_) { /* gone */ }
+  return { ok: true, id: videoJob.id };
+}
+const VIDEO_CANCEL_OK = 'cancel requested — fal may still bill the seconds already rendered';
+const VIDEO_CANCEL_UNCONFIRMED = 'cancel not confirmed — the job may still be charged; Make video again with the same shot checks that job';
+const videoRel = (abs) => { const rel = path.relative(__dirname, abs); return (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) ? rel.split(path.sep).join('/') : abs; };
+
+// output/video/<slug of shot 1 prompt>_<stamp>_<rand4>_fal.mp4, flag 'wx' (never overwrites); a failed write leaves no partial file
+function writeVideoFile(buf, promptText) {
+  const dir = path.join(__dirname, 'output', 'video');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { return { ok: false, error: (e && e.message) || String(e) }; }
+  const slug = (String(promptText || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '')) || 'video';
+  const d = new Date(), z = (n) => String(n).padStart(2, '0');
+  const stamp = d.getFullYear() + z(d.getMonth() + 1) + z(d.getDate()) + '-' + z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
+  for (let n = 0; n < 50; n++) {
+    const abs = path.join(dir, slug + '_' + stamp + '_' + crypto.randomBytes(2).toString('hex') + '_fal.mp4');
+    try { fs.writeFileSync(abs, buf, { flag: 'wx' }); return { ok: true, abs }; }
+    catch (e) {
+      if (e && e.code === 'EEXIST') continue;
+      try { fs.unlinkSync(abs); } catch (_) { /* nothing partial to remove */ }
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  }
+  return { ok: false, error: 'no free file name in output/video' };
+}
+
+// Every outgoing text of the video path (tool results, SSE, route JSON) goes through this: the active fal key (and its URL-encoded form / either half of an
+// id:secret key) never leaves the server, not even inside an unexpected exception message.
+function scrubFalKey(text) {
+  let s = String(text == null ? '' : text);
+  let key = null;
+  try { key = require('./providers/secrets').getKey('fal'); } catch (_) { /* no key store */ }
+  return key ? require('./providers/fal-video').scrubSecret(s, key) : s;
+}
+
+// The gate: opt-in, key, the Storyboard button / its routes only (spec-owner decision: NO chat path - Ask, Auto or MCP - ever submits a paid video), one job at a time.
+// -> the REJECTED/BUSY text, or '' when the call may go on.
+function videoGate(cfg, opts) {
+  opts = opts || {};
+  const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
+  if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Connections';
+  if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Connections';
+  if (opts.uiButton !== true) return "REJECTED: video runs only from the Storyboard's Make video button (it spends fal credit and needs your confirmation of the cost).";
+  if (videoInFlight && opts.ignoreBusy !== true) return 'BUSY: a video is already rendering';
+  return '';
+}
+
+// -> { ok:true, path, abs, url, seconds, estUsd, requestId, line } | { ok:false, error }   (error = the text a tool result shows)
+async function makeVideo(job, cfg, opts) {
+  opts = opts || {};
+  const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
+  const no = (error) => ({ ok: false, error: scrubFalKey(error) });
+  const denied = videoGate(cfg, opts);
+  if (denied) return no(denied);
+  if (opts.confirmed !== true) return no('REJECTED: a paid video needs the cost confirmed first — click Make video on the shot. Nothing was sent.');
+  const key = require('./providers/secrets').getKey('fal');
+  videoInFlight = true;
+  const fal = require('./providers/fal-video');
+  try { job = fal.normalizeJob(job, cfg); } catch (_) { /* planJob refuses what it cannot read */ }   // audio = job.audio ?? config video.fal.audio ?? true, ONCE, before the estimate and the request
+  const myJob = { id: ++videoSeq, controller: new AbortController(), pct: 0, status: 'STARTING', queuePosition: null };
+  videoJob = myJob;
+  const emit = (ev, payload) => { try { videoEvents.emit(ev, payload); } catch (_) { /* a listener must never break the tool */ } };
+  let ended = null;
+  try {
+    // the mandatory cost line (contract 4): no finite estimate = nothing is sent
+    const est = fal.estimate(job, cfg);
+    if (!est.ok) return (ended = no('ERROR: ' + est.error));
+    const line = est.line;
+    if (!line) return (ended = no('ERROR: no cost estimate — nothing was sent'));
+    const built = fal.buildRequest(job, { outputDir: path.join(__dirname, 'output'), cwd: __dirname });
+    if (!built.ok) return (ended = no('ERROR: ' + built.error));
+    const input = built.input;
+    const recKey = crypto.createHash('sha256').update(JSON.stringify(input)).update('|' + (fc.model || fal.DEFAULT_MODEL)).digest('hex');   // the request body without the key
+    const resume = videoStore.getTask(recKey);
+    if (!resume && videoStore.health().unreadable) return (ended = no('ERROR: video-tasks.json (the record of paid fal.ai requests, in Phoenix\'s session folder) is unreadable — fix it, or delete it after checking your fal dashboard (Requests) for unfinished videos, then try again (it may also just be locked by another program for a moment). Nothing was sent.'));
+    let persistFailId = null, overrideNote = '', prevIntentAt = null;
+    const warn = () => (persistFailId ? ' — the paid-request record could not be saved (fal request ' + persistFailId + '): check your fal dashboard before retrying, and do not restart Phoenix before this video is finished' : '');
+    if (!resume) {
+      const intentAt = videoStore.getIntent(recKey);
+      if (intentAt !== null) {
+        const ageMin = (Date.now() - intentAt) / 60000, holdMin = videoStore.HOLD_MS / 60000;
+        if (opts.uiButton !== true) return (ended = no('REJECTED: the last video of this shot may have been created and charged — check your fal dashboard (Requests); retry from the Storyboard\'s Make video button.'));
+        if (ageMin < holdMin) return (ended = no('REJECTED: the last video of this shot may have been created and charged ' + Math.max(1, Math.round(ageMin)) + ' min ago — check your fal dashboard (Requests) first; Make video can retry after ' + holdMin + ' minutes.'));
+        overrideNote = ' ⚠ The earlier attempt for this shot was never confirmed and may have been charged — check your fal dashboard (Requests) for a duplicate.';
+        prevIntentAt = intentAt;
+        emit('maybe-charged', 'Retrying a video after an unconfirmed earlier attempt.' + overrideNote);
+      }
+    }
+    const fin = (text) => text + overrideNote;
+    const clearOwnIntent = () => { if (prevIntentAt !== null) videoStore.setIntent(recKey, prevIntentAt); else videoStore.delIntent(recKey); };
+    const key0 = { key, baseUrl: fc.baseUrl, model: fc.model, fetchImpl: opts.fetchImpl, requestTimeoutMs: fc.requestTimeoutMs };
+    const signal = myJob.controller.signal;
+    if (opts.signal) { if (opts.signal.aborted) myJob.controller.abort(); else opts.signal.addEventListener('abort', () => { try { myJob.controller.abort(); } catch (_) { /* gone */ } }, { once: true }); }
+    const onProgress = (p) => { myJob.pct = p.pct; myJob.status = p.status; myJob.queuePosition = p.queuePosition; emit('progress', { id: myJob.id, pct: p.pct, status: p.status, queuePosition: p.queuePosition }); if (typeof opts.onProgress === 'function') { try { opts.onProgress(p); } catch (_) { /* never break the run */ } } };
+    emit('progress', { id: myJob.id, pct: 0, status: 'STARTING', queuePosition: null });
+
+    // ── submit (never when a request id is recorded for this very body) ──
+    let task = resume ? { requestId: resume.requestId, statusUrl: resume.statusUrl, responseUrl: resume.responseUrl, cancelUrl: resume.cancelUrl } : null;
+    if (!task) {
+      const s = await fal.submit(input, Object.assign({}, key0, {
+        signal, createTimeoutMs: fc.createTimeoutMs, timeoutMs: fc.timeoutMs,
+        // persisted right before the POST leaves; FAIL CLOSED: if the intent did not reach the disk, NO request is made
+        beforeCreate: () => { let ok = false; try { ok = videoStore.setIntent(recKey, Date.now()) === true; } catch (_) { ok = false; } return ok; },
+        onCreated: (t) => { if (videoStore.taskReplacesIntent(recKey, Object.assign({}, t, { at: Date.now() })) === false) persistFailId = t.requestId; },
+      }));
+      if (!s.ok) {
+        if (s.code === 'refused') { clearOwnIntent(); return (ended = no(fin('ERROR: could not record the submission — nothing was sent. Phoenix\'s safety record (session/video-tasks.json) could not be written or is full; fix that (or wait a moment if another program holds the file) and try again.'))); }
+        if (s.code === 'create_timeout' || s.maybeCharged) {
+          // the intent written before the POST stays: it is the hold
+          emit('maybe-charged', s.error);
+          return (ended = no('ERROR: ' + s.error + warn() + overrideNote));
+        }
+        clearOwnIntent();   // a refusal / connect error proves nothing was sent
+        return (ended = no('ERROR: ' + s.error + overrideNote));
+      }
+      task = { requestId: s.requestId, statusUrl: s.statusUrl, responseUrl: s.responseUrl, cancelUrl: s.cancelUrl };
+    }
+
+    // ── poll -> result -> download ──
+    const waitOpts = (sig, extra) => Object.assign({ key, baseUrl: fc.baseUrl, fetchImpl: opts.fetchImpl, sleep: opts.sleep, now: opts.now, pollMs: fc.pollMs, timeoutMs: fc.timeoutMs, requestTimeoutMs: fc.requestTimeoutMs, maxDownloadBytes: fc.maxDownloadBytes, downloadStallMs: fc.downloadStallMs, downloadTimeoutMs: fc.downloadTimeoutMs, onProgress, signal: sig }, extra || {});
+    let r = await fal.waitAndFetch(task, waitOpts(signal));
+    // a cancel / timeout / unexplained failure with a live request: ask fal to cancel it; what fal does not CONFIRM is kept (an identical retry checks it)
+    if (!r.ok && !r.terminal && !r.downloadable) {
+      const why = r.code === 'timeout' ? r.error.replace(/^fal video /, 'The fal video ') + ' — ' : (r.code === 'cancelled' ? 'Video cancelled — ' : r.error + ' — ');
+      // a TIMEOUT sends no cancel (spec 5: same "not confirmed" handling): the request may still run - its id is kept and an identical retry checks it
+      // LC2i: the same for an answer Phoenix could not read (r.keep): no cancel, the record stays, and the message (already worded by the adapter) stays true
+      const c = (r.code === 'timeout' || r.keep === true) ? { confirmed: false, skipped: true } : await fal.cancel(task, key0);
+      if (c.alreadyCompleted) {
+        r = await fal.waitAndFetch(task, waitOpts(undefined, { timeoutMs: Math.max(60000, Number.isFinite(fc.timeoutMs) ? fc.timeoutMs : 0) }));   // it finished and is paid: fetch the clip
+      } else if (c.confirmed) {
+        videoStore.delTask(recKey);
+        return (ended = no('ERROR: ' + why + VIDEO_CANCEL_OK + '.' + overrideNote));
+      } else {
+        const msg = r.keep === true ? r.error + '.' + warn() : why + (c.skipped ? 'the request may still run and be charged; Make video again on the same shot checks that job' : VIDEO_CANCEL_UNCONFIRMED) + '.' + warn();
+        emit('maybe-charged', msg);
+        return (ended = no('ERROR: ' + msg + overrideNote));
+      }
+    }
+    if (!r.ok) {
+      if (r.terminal) { videoStore.delTask(recKey); return (ended = no('ERROR: ' + r.error + overrideNote)); }   // fal itself ended the request: nothing is pending
+      // finished and paid, only the result/download failed: the record stays, the next identical Make video downloads it again
+      return (ended = no('ERROR: ' + r.error + ' — the video itself finished and is already paid; press Make video again to download it again (no second charge).' + warn() + overrideNote));
+    }
+    const w = writeVideoFile(r.mp4, job.shots[0].prompt);
+    if (!w.ok) return (ended = no('ERROR: could not write the clip: ' + w.error + ' — the video itself finished and is already paid; fix this and press Make video again (no second charge).' + warn() + overrideNote));
+    videoStore.delTask(recKey);   // only now - the mp4 is on disk
+    const rel = videoRel(w.abs);
+    try {
+      require('./records').appendRecord({ kind: 'video', path: w.abs, workflow: 'fal_kling3_pro_i2v', prompt: built.prompts.join(' | '), seed: null, parent: path.resolve(__dirname, job.shots[0].keyframe), category: 'storyboard' });
+    } catch (_) { /* a failing record must never fail a generation */ }
+    const url = (rel === w.abs) ? null : '/file?p=' + encodeURIComponent(rel);
+    return (ended = { ok: true, path: rel, abs: w.abs, url, seconds: est.seconds, estUsd: est.usd, requestId: task.requestId, line, note: overrideNote.trim() });
+  } catch (e) {
+    return (ended = no('ERROR: ' + ((e && e.message) || e)));
+  } finally {
+    videoInFlight = false;
+    videoJob = null;
+    emit('done', Object.assign({ id: myJob.id }, ended ? (ended.ok ? { ok: true, path: ended.path, url: ended.url, seconds: ended.seconds, estUsd: ended.estUsd, requestId: ended.requestId } : { ok: false, error: ended.error }) : { ok: false, error: 'ended without a result' }));
+  }
+}
+// The chat tool NEVER submits (spec-owner decision, money): in any mode - Ask, Auto, MCP - it checks opt-in + key, prices the job and stops. Only the Storyboard's
+// Make video button (POST /storyboard/shot/clip with the confirmed price) or POST /video/make with confirmed:true + the bound estimate submits.
+async function toolMakeVideo(input, _state, cfg, _opts) {
+  const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
+  try {
+    if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Connections';
+    if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Connections';
+    const fal = require('./providers/fal-video');
+    const job = input && input.job;
+    const pe = fal.checkPaths(job, { outputDir: path.join(__dirname, 'output'), cwd: __dirname });
+    if (pe) return 'ERROR: ' + scrubFalKey(pe);
+    const est = fal.estimate(job, cfg);
+    if (!est.ok) return 'ERROR: ' + scrubFalKey(est.error);
+    return 'Nothing was sent — a paid video is only made from the Storyboard. Estimate: ' + est.line + ' Click "Make video" on the shot to confirm.';
+  } catch (e) { return 'ERROR: ' + scrubFalKey((e && e.message) || e); }
 }
 
 async function toolDeleteBrush(input) {
@@ -1596,9 +1804,67 @@ async function toolI2iEdit(input, state, cfg, opts = {}) {
   return `I2I_TILE ${r.outPath}\t${meta}\ni2i edit done in ${r.seconds}s (${r.workflowId}, seed ${r.seed}).`;
 }
 
+// ── generate_from_refs (v1.10 I1) ─────────────────────────────────────────────
+// Generate an image from 1–2 reference images (who / where / what) plus a literal instruction, through the
+// active image workflow's `reference` block (Flux Klein ≤ 2 refs · Z-Image Turbo 1 ref img2img). Returns a NEW image,
+// never touches the references. /action parses the REF_TILE marker (path + meta JSON) exactly like I2I_TILE.
+async function toolGenerateFromRefs(input, state, cfg, opts = {}) {
+  input = input || {};
+  if (!Array.isArray(input.refs)) return 'ERROR: refs must be a list of image paths';
+  const abs = [];
+  for (const rel of input.refs) {
+    if (typeof rel !== 'string' || rel === '') return 'ERROR: image must be a path';
+    const err = servable.servableImageError(__dirname, rel);
+    if (err) return 'ERROR: ' + err;
+    abs.push(path.resolve(__dirname, rel));
+  }
+  // unconditional, exactly like generate_prop: /chat runs runTurn with background:true, so an opts.background test would never fire there
+  if (jobs.isRunning() && !opts.ownsJobSlot) return 'BUSY: a generation is already running — one heavy GPU job at a time; give it a moment';   // ownsJobSlot: the storyboard keyframe runs INSIDE its own jobs.start slot (V1b-3)
+  // non-numeric values pass through so the engine's exact error fires (never silently replaced by a default)
+  const num = (v) => (v == null || v === '') ? undefined : (Number.isFinite(Number(v)) ? Number(v) : v);
+  const category = (input.category == null || input.category === '') ? undefined : input.category;
+  const prompt = (typeof input.prompt === 'string') ? input.prompt : '';
+  dbg.event('progress', { label: 'generate_from_refs', refs: abs.length, workflow: input.workflowId || 'active' });
+
+  const r = await i2iEngine.runReference(cfg, {
+    refs: abs, prompt,
+    width: num(input.width), height: num(input.height), denoise: num(input.denoise), seed: num(input.seed),
+    workflowId: input.workflowId || undefined, category,
+    onTick: (s) => { if (s % 15 === 0) dbg.event('progress', { label: 'generate_from_refs', seconds: s }); },
+  });
+  const tail = `Image from ${r.refs} reference${r.refs === 1 ? '' : 's'} done in ${r.seconds}s (${r.workflowId}, seed ${r.seed}).`;
+  const meta = JSON.stringify({ seed: r.seed, workflowId: r.workflowId, seconds: r.seconds, refs: r.refs, width: r.width, height: r.height, denoise: r.denoise, sizeFrom: r.sizeFrom, category: category || null, prompt });
+  return `REF_TILE ${r.outPath}\t${meta}\n${tail}`;
+}
+
+// Parse a REF_TILE result: { abs, meta, tail } or null. Shared by the chat path (here) and server.js /action (applyRefTile).
+function parseRefTile(result) {
+  const m = typeof result === 'string' && result.match(/^REF_TILE\s+(.+?)\t(.+?)(?:\n([\s\S]*))?$/);
+  if (!m) return null;
+  let meta = {};
+  try { meta = JSON.parse(m[2]); } catch (_) { /* meta is best-effort */ }
+  return { abs: m[1], meta, tail: (m[3] || '').trim() };
+}
+// The new picture becomes the current image (category from the request when given, description from the PROMPT, not the filename).
+function applyRefTile(state, t) {
+  state.lastImage = t.abs;
+  state.lastImageDesc = (typeof t.meta.prompt === 'string' && t.meta.prompt.trim()) ? t.meta.prompt.trim().slice(0, 200) : path.basename(t.abs, path.extname(t.abs));
+  if (typeof t.meta.category === 'string' && t.meta.category) state.lastImageCategory = t.meta.category;
+  else if (!state.lastImageCategory) state.lastImageCategory = 'item';
+}
+function consumeRefTile(result, state, toolOpts) {
+  const t = parseRefTile(result);
+  if (!t) return result;
+  applyRefTile(state, t);
+  const rel = path.relative(__dirname, t.abs).split(path.sep).join('/');
+  if (toolOpts && typeof toolOpts.onArtifact === 'function') { try { toolOpts.onArtifact({ slot: 'image', rel }); } catch (_) {} }
+  return (t.tail || 'Reference image done.') + ' Saved: ' + rel;
+}
+
 const TOOLS = {
   generate_image: toolGenerateImage,
   i2i_edit:       toolI2iEdit,
+  generate_from_refs: toolGenerateFromRefs,
   make_human:     toolMakeHuman,
   place_human:    toolPlaceHuman,
   animate_human:  toolAnimateHuman,
@@ -1635,6 +1901,7 @@ const TOOLS = {
   apply_material: toolApplyMaterial,
   rename_asset:   toolRenameAsset,
   remesh_asset:   toolRemeshAsset,
+  make_video:     toolMakeVideo,
   rename_brush:   toolRenameBrush,
   delete_asset:   toolDeleteAsset,
   delete_brush:   toolDeleteBrush,
@@ -2106,6 +2373,118 @@ async function runOneTool(name, input, { state, cfg, turnNo, history, userInput,
   return { result: toolResult, gateNote: g.gateNote, verdict, stopReason, rendered: g.rendered };
 }
 
+// ─── Tool-step lines (v1.10 A1): what a turn did, kept in history so the next turn knows ───
+function _cutStr(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
+function _sortCut(v) {
+  if (typeof v === 'string') return _cutStr(v, 60);
+  if (Array.isArray(v)) return v.map(_sortCut);
+  if (v && typeof v === 'object') { const o = {}; for (const k of Object.keys(v).sort()) o[k] = _sortCut(v[k]); return o; }
+  return v;
+}
+function toolStepLine(name, input, result) {
+  try {
+    let digest, cap = 160;
+    if (name === 'blender_run' && input && typeof input === 'object' && typeof input.code === 'string') {
+      // B1: the string literals (object/material names) first, then the first 2 code lines
+      const names = [];
+      for (const m of input.code.matchAll(/"([^"\r\n]*)"|'([^'\r\n]*)'/g)) {
+        const lit = m[1] !== undefined ? m[1] : m[2];
+        if (lit && !names.includes(lit)) names.push(lit);
+        if (names.length >= 8) break;
+      }
+      const codeLines = input.code.split(/\r?\n/).map(l => l.trim())
+        .filter(l => l && !/^(import\s|from\s+\S+\s+import\s)/.test(l)).slice(0, 2).join('; ');
+      digest = (names.length ? 'names: ' + names.map(n => _cutStr(n, 30)).join(', ') + (codeLines ? ' · ' : '') : '') + codeLines;
+      cap = 200;
+    } else if (input && typeof input === 'object') {
+      digest = JSON.stringify(_sortCut(input));
+    } else {
+      digest = String(input);
+    }
+    digest = _cutStr(String(digest).replace(/\r?\n/g, ' '), cap);
+    const res = (typeof result === 'string') ? result : String(result);
+    const lines = res.split(/\r?\n/);
+    let mark;
+    if (res.startsWith('ERROR') || res.startsWith('PYTHON_ERROR')) {
+      mark = '✗ ' + _cutStr(lines[0], 80);
+    } else {
+      const first = (lines.find(l => l.trim()) || '').trim();
+      mark = '✓' + (first && first !== 'ok' ? ' = ' + _cutStr(first, 80) : '');
+    }
+    return '→ ' + name + ': ' + digest + ' ' + mark;
+  } catch (e) {
+    return '→ ' + String(name) + ': (unreadable) ✓';
+  }
+}
+
+// Post-turn persistence (server + CLI share it): the stored assistant content is the last assistant message, as before;
+// the tool-step lines ride beside it in `steps` (the UI shows content only).
+function persistTurn(history, userText, result, turnNo) {
+  history.push({ role: 'user', content: userText, turn: turnNo });
+  const msgs = (result && result.messages) || [];
+  const lastAssistant = msgs.findLast(m => m.role === 'assistant');
+  if (lastAssistant) {
+    const entry = { role: 'assistant', content: lastAssistant._orig !== undefined ? lastAssistant._orig : lastAssistant.content, turn: turnNo };
+    if (result && Array.isArray(result.steps) && result.steps.length) entry.steps = result.steps;
+    history.push(entry);
+  }
+  return history;
+}
+
+// ─── A2: history window sized in tokens per seat ────────────────────────────────
+// estTokens: deliberately pessimistic (code/JSON tokenize worse than prose).
+function estTokens(text) { return Math.ceil(String(text == null ? '' : text).length / 3); }
+
+const _seatCtxCache = new Map();   // url + model -> { v, until } (until = Infinity for a hit)
+function _clearSeatContextCache() { _seatCtxCache.clear(); }
+
+// The context size of a seat as an integer, or null when unknown. Never throws.
+// seat = a seat name ('orchestrator') or an already resolved seat; deps = { fetch, now } seams (default: global fetch / Date.now).
+async function seatContext(seat, cfg, deps) {
+  try {
+    deps = deps || {};
+    const fetchFn = typeof deps.fetch === 'function' ? deps.fetch : (typeof fetch === 'function' ? fetch : null);
+    const now = typeof deps.now === 'function' ? deps.now : Date.now;
+    const name = (typeof seat === 'string') ? seat : (seat && seat.name) || 'orchestrator';
+    const own = cfg && cfg.seats && cfg.seats[name];
+    const ov = own && own.contextTokens;
+    if (Number.isInteger(ov) && ov >= 2048) return ov;
+    let rs;
+    try { rs = (seat && typeof seat === 'object' && seat.provider) ? seat : providers.resolveSeat(name, cfg); } catch (_) { return null; }
+    if (rs.provider === 'claude-cli' || rs.provider === 'codex-cli') return 200000;
+    if (rs.provider !== 'openai-compat' || rs.kind === 'cloud' || rs.apiKeyRef || !rs.url || !fetchFn) return null;
+    const key = rs.url + '\n' + rs.model;
+    const hit = _seatCtxCache.get(key);
+    if (hit && now() < hit.until) return hit.v;
+    let origin;
+    try { origin = new URL(rs.url).origin; } catch (_) { return null; }
+    const probe = async (url, pick) => {
+      let timer;
+      try {
+        const ac = typeof AbortController === 'function' ? new AbortController() : null;
+        const timeout = new Promise((_, rej) => { timer = setTimeout(() => { try { ac && ac.abort(); } catch (_) {} rej(new Error('timeout')); }, 3000); });
+        const call = (async () => {
+          const r = await fetchFn(url, ac ? { signal: ac.signal } : {});
+          if (!r || !r.ok) return null;
+          const n = pick(await r.json());
+          return (Number.isInteger(n) && n > 0) ? n : null;
+        })();
+        call.catch(() => {});
+        return await Promise.race([call, timeout]);
+      } catch (_) { return null; }
+      finally { clearTimeout(timer); }
+    };
+    // A2b: a llama.cpp ROUTER answers a bare /props with role "router" and n_ctx 0 (no model chosen) -> that is "no answer", never a limit of 0.
+    // So ask for the loaded model's own props first; a plain llama-server ignores the unknown ?model= parameter.
+    const pickCtx = j => j && j.default_generation_settings && j.default_generation_settings.n_ctx;
+    let n = await probe(origin + '/props?model=' + encodeURIComponent(rs.model), pickCtx);
+    if (n === null) n = await probe(origin + '/props', pickCtx);
+    if (n === null) n = await probe(origin + '/api/v0/models/' + encodeURIComponent(rs.model), j => j && j.loaded_context_length);
+    _seatCtxCache.set(key, { v: n, until: n === null ? now() + 60000 : Infinity });
+    return n;
+  } catch (_) { return null; }
+}
+
 async function runTurn(userInput, history, state, cfg, opts = {}) {
   const blenderOnly = !!opts.blenderOnly;
   const allowedTools = blenderOnly ? BLENDER_ONLY_TOOLS : null;
@@ -2117,14 +2496,61 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
   // M4: from here on EVERY use of the config inside the turn is run.cfg (Auto = gates off on a copy). The benchmark
   // (opts.complete) is always Ask with budget 3 — its scores must not move with a user setting.
   const run = runConfig(cfg, complete ? 'ask' : opts.mode);
-  const withMode = (o) => Object.assign(o, { mode: run.mode });   // every result reports the mode it ran as
+  const steps = [];   // A1: one line per executed tool step, returned on every result
+  let ctxInfo = { used: 0, limit: null, exchanges: 0 };   // A2: meter data, filled once the window is built
+  const withMode = (o) => Object.assign(o, { mode: run.mode, steps: steps.slice(), context: Object.assign({}, ctxInfo) });   // every result reports the mode it ran as
   run.stopped = null;   // set when an Auto run is stopped by the brake; detached jobs read it (phase C)
   const toolOpts = Object.assign({}, opts, { runState: run });
   const toolBudget = complete ? MAX_TOOL_CALLS : run.budget;
   cfg = run.cfg;
   const historyMessages = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3;
   // M5: history entries may carry a `turn` field — only role/content ever reach the model.
-  const window = history.slice(-historyMessages * 2).map(m => ({ role: m.role, content: m.content }));
+  // A1: an assistant entry with `steps` carries its tool-step lines to the model; `_orig` (non-enumerable) keeps the stored text.
+  const toModelMsg = (m) => {
+    if (m.role === 'assistant' && Array.isArray(m.steps) && m.steps.length) {
+      const o = { role: m.role, content: m.content + '\n\n[tool steps in that turn]\n' + m.steps.join('\n') };
+      Object.defineProperty(o, '_orig', { value: m.content });
+      return o;
+    }
+    return { role: m.role, content: m.content };
+  };
+  // A2: group entries into exchanges (a user entry + the assistant entry that follows it).
+  const groupExchanges = (entries) => {
+    const groups = [];
+    for (const m of entries) {
+      const g = groups[groups.length - 1];
+      if (m.role === 'assistant' && g && g.length === 1 && g[0].role === 'user') g.push(m);
+      else groups.push([m]);
+    }
+    return groups;
+  };
+  const sysText = buildSystemPrompt() + (extraSystem ? '\n\n' + extraSystem : '');
+  const seatLimit = await seatContext('orchestrator', cfg, opts.seatContextDeps);
+  let windowSrc;
+  if (seatLimit === null) {
+    windowSrc = history.slice(-historyMessages * 2);   // limit unknown: exactly the A1 window
+  } else {
+    const reserve = Math.min(4096, Math.floor(seatLimit / 4));
+    const budget = seatLimit - estTokens(sysText) - estTokens(userInput) - reserve;
+    const groups = groupExchanges(history);
+    const picked = [];
+    let total = 0;
+    if (budget > 0) {
+      for (let gi = groups.length - 1; gi >= 0 && picked.length < historyMessages; gi--) {
+        const cost = groups[gi].reduce((a, m) => a + estTokens(toModelMsg(m).content), 0);
+        if (total + cost > budget) break;
+        total += cost;
+        picked.unshift(groups[gi]);
+      }
+    }
+    windowSrc = [].concat(...picked);
+  }
+  const window = windowSrc.map(toModelMsg);
+  ctxInfo = {
+    used: estTokens(sysText) + window.reduce((a, m) => a + estTokens(m.content), 0) + estTokens(userInput),
+    limit: seatLimit,
+    exchanges: groupExchanges(windowSrc).length,
+  };
   window.push({ role: 'user', content: userInput });
   const turnNo = Number((state && state.turnSeq) || 0) || 0;
 
@@ -2178,7 +2604,7 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
       // is only parsed on the /action path — so the tile would never appear and the raw path would
       // leak into the conversation. Refuse cleanly and point at the tab. (It is also not advertised
       // in the system prompt, so the model should not reach here; this is the belt to that suspenders.)
-      toolResult = 'ERROR: image editing runs in the "Edit · i2i" tab, not from chat. Tell the user to open that tab, pick a reference image, and apply the edit there.';
+      toolResult = 'ERROR: image editing runs in the "Edit · i2i" tab, not from chat. Tell the user to open that tab, pick a reference image, and apply the edit there. (Generating a NEW image from reference images is different: use generate_from_refs.)';
     } else if (allowedTools && !allowedTools.includes(toolCall.name)) {
       toolResult = `ERROR: tool "${toolCall.name}" is disabled in Blender-only mode. Model the asset directly with blender_run (bpy) instead — do not use generation tools.`;
     } else if (!fn) {
@@ -2187,7 +2613,11 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
         : `ERROR: unknown tool "${toolCall.name}"`;
     } else {
       toolResult = await execToolStep(toolCall.name, toolCall.input, fn, { state, cfg, turnNo, history, toolOpts });
+      // generate_from_refs returns a REF_TILE marker (path + meta + tail): on the chat path it is consumed HERE (the picture goes to the
+      // Image tab through onArtifact, the raw path never reaches the conversation), like /action does for its own route.
+      if (toolCall.name === 'generate_from_refs' && typeof toolResult === 'string') toolResult = consumeRefTile(toolResult, state, toolOpts);
     }
+    steps.push(toolStepLine(toolCall.name, toolCall.input, toolResult));
     dbg.tool(toolCall.name, 'result', toolResult);
     if (typeof toolResult === 'string' && (toolResult.startsWith('PYTHON_ERROR') || toolResult.startsWith('ERROR'))) dbg.pyerr(toolResult);
     dbg.event('progress', { label: 'tool', name: toolCall.name, phase: 'done' });
@@ -2265,7 +2695,7 @@ async function main() {
     rl.question('you> ', async raw => {
       const input = raw.trim();
       if (!input)                              { ask(); return; }
-      if (input === 'exit' || input === 'quit') { saveHistory(history); saveState(state); rl.close(); return; }
+      if (input === 'exit' || input === 'quit') { saveHistory(history, 2 * ((cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3)); saveState(state); rl.close(); return; }
 
       if (input === '/config') {
         console.log('\n' + JSON.stringify(cfg, null, 2) + '\n');
@@ -2330,13 +2760,12 @@ async function main() {
 
       try {
         state.turnSeq = (Number(state.turnSeq) || 0) + 1;   // M5: monotonically increasing turn number
-        const { text, messages } = await runTurn(input, history, state, cfg);
+        const turnResult = await runTurn(input, history, state, cfg);
+        const { text } = turnResult;
 
         // Update history with the full exchange
-        history.push({ role: 'user', content: input, turn: state.turnSeq });
-        const lastAssistant = messages.findLast(m => m.role === 'assistant');
-        if (lastAssistant) history.push({ role: 'assistant', content: lastAssistant.content, turn: state.turnSeq });
-        saveHistory(history);
+        persistTurn(history, input, turnResult, state.turnSeq);
+        saveHistory(history, 2 * ((cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3));
         saveState(state);
 
         console.log(`\nphoenix> ${text}\n`);
@@ -2772,8 +3201,21 @@ Output ONLY the JSON object for the new category.`;
 
 // ─── inferWorkflowMap — "Phoenix maps" backend ────────────────────────────────
 // Calls the orchestrator seat to map a ComfyUI API-format workflow to Phoenix's
-// fixed node-map for a given stage ('image' or 'mesh').
-// Does NOT save anything — returns { nodes, deps, label, nodeChoices, modelCandidates }.
+// fixed node-map for a given stage ('image', 'mesh', 'i2i' or 'video').
+// Does NOT save anything — returns { nodes, deps, label, nodeChoices, modelCandidates } (+ { video, from } for stage 'video': AW1 - the numbers
+// of the video block are DERIVED from the graph and ComfyUI by workflows.deriveVideoBlock, the seat only maps the slots).
+
+// AW1: the "video" slot block, spliced into the prompt for stage "video" only (image/mesh/i2i keep their prompt byte-identical).
+const VIDEO_SLOTS_PROMPT = `Stage "video" slots (image-to-video: ONE start image + a prompt become a short clip):
+- image    -> node+field that receives the START image (the LoadImage 'image')
+- positive -> node+field holding the POSITIVE prompt text (usually a CLIPTextEncode 'text')
+- negative -> the NEGATIVE prompt text node+field; omit if the workflow has none
+- length   -> node+field holding the FRAME COUNT of the clip (e.g. WanImageToVideo 'length', or a PrimitiveInt 'value'). The field name VARIES - use the real field name from the field listing.
+- width    -> node+field that sets the output WIDTH in pixels (the node that sets the size, e.g. WanImageToVideo 'width' or an ImageScale 'width'); omit if the size is not set by a node field
+- height   -> the matching HEIGHT field (same node usually)
+- seed     -> the sampler's seed field. The field name VARIES: 'noise_seed' or 'seed'. Use the real field name from the field listing.
+- output   -> the node that WRITES the clip (SaveVideo, or the video-combine node)
+Do NOT output fps, frame step, sizes or timeouts - Phoenix reads those from the workflow and from ComfyUI.`;
 
 async function inferWorkflowMap(stage, jsonText, cfg) {
   // 1. Parse + strip non-node keys (UI-graph format is a hard error)
@@ -2866,7 +3308,9 @@ ${jsonText}
 Output ONLY the JSON object.`;
 
   // 7. Call the orchestrator seat
-  const raw = await callSeat('orchestrator', [{ role: 'user', content: userMsg }], systemPrompt, cfg, 'helper');
+  const MARK = '\n\nOutput ONLY one JSON object, no prose, no markdown:';
+  const seatPrompt = stage === 'video' ? systemPrompt.replace(MARK, '\n\n' + VIDEO_SLOTS_PROMPT + MARK) : systemPrompt;
+  const raw = await callSeat('orchestrator', [{ role: 'user', content: userMsg }], seatPrompt, cfg, 'helper');
 
   // 8. Parse JSON from raw (same pattern as draftPaletteCategory)
   let parsed = {};
@@ -2909,13 +3353,26 @@ Output ONLY the JSON object.`;
       : [],
   };
 
+  // LC2f (AW-L4): a class ComfyUI itself ships (python_module 'nodes' / 'comfy_extras.*') is never a custom node, whatever the LLM said. Only a class whose live
+  // /object_info entry names a module that is NOT under custom_nodes is dropped; no /object_info, or no python_module on the entry -> kept (the LLM's answer stands).
+  deps.custom_nodes = deps.custom_nodes.filter(c => {
+    const pm = slice[c] && slice[c].python_module;
+    return !(typeof pm === 'string' && pm && !pm.startsWith('custom_nodes'));
+  });
+
   // Union Claude's models with the auto-detected candidates (dedupe) so no referenced model is dropped
   deps.models = [...new Set([...deps.models, ...models])];
 
   const label = (typeof parsed.label === 'string' && parsed.label.trim()) ? parsed.label.trim() : '';
 
   // 10. Return
-  return { nodes, deps, label, nodeChoices: choices, modelCandidates: models };
+  const answer = { nodes, deps, label, nodeChoices: choices, modelCandidates: models };
+  if (stage === 'video') {
+    // AW1: the video block is derived, deterministically, from the graph + the same /object_info slice (null = ComfyUI offline -> 'default' markers)
+    const dv = workflows.deriveVideoBlock(obj, nodes, Object.keys(slice).length ? slice : null);
+    answer.video = dv.video; answer.from = dv.from;
+  }
+  return answer;
 }
 
 // ─── Claude CLI probe ─────────────────────────────────────────────────────────
@@ -2964,6 +3421,7 @@ async function brainStatus(cfg, cc, deps, seatName) {
       return { ok: true, provider, model, how: 'tool test passed' + when };
     }
     if (provider === 'claude-cli') {
+      if (cc && cc.present && cc.loggedIn === false) return { ok: false, provider, model, how: 'Claude CLI is installed but not logged in — run "claude", then /login' };
       return cc && cc.present
         ? { ok: true, provider, model, how: 'Claude CLI found' + (cc.version ? ' (' + cc.version + ')' : '') }
         : { ok: false, provider, model, how: 'Claude CLI not found' + (cc && cc.error ? ' (' + cc.error + ')' : '') };
@@ -3025,6 +3483,23 @@ async function onboardingStatus(cfg, deps) {
   let claudeCli;
   try { claudeCli = await (deps.claudeCliCheck || claudeCliCheck)(); }
   catch (e) { claudeCli = { present: false, error: (e && e.message) || String(e) }; }
+  // G6: login state of the Claude CLI (only when installed), Codex CLI, and which API keys are stored (booleans only). Each probe isolated.
+  if (claudeCli && claudeCli.present) {
+    try {
+      const au = await (deps.claudeAuthStatus || (() => require('./claude-cli').authStatus()))();
+      if (au && typeof au.loggedIn === 'boolean' && !au.error) { claudeCli.loggedIn = au.loggedIn; claudeCli.method = au.method || null; }
+    } catch (_) { /* unknown login state: present-only behaviour */ }
+  }
+  let codexCli = { present: false, loggedIn: false, mode: null };
+  try {
+    const cs = await (deps.codexLoginStatus || ((c) => require('./providers/codex-cli').loginStatus({ cfg: c })))(cfg);
+    codexCli = { present: !(cs && cs.missing), loggedIn: !!(cs && cs.loggedIn), mode: (cs && cs.mode) || null };
+  } catch (_) { /* keep the default */ }
+  let keys = { openai: false, meshy: false };
+  try {
+    const lk = (deps.listKeys || providers.listKeys)() || {};
+    keys = { openai: !!lk.openai, meshy: !!lk.meshy };
+  } catch (_) { /* keep the default */ }
   const brain = await brainStatus(cfg, claudeCli, deps);
   // Sweep 2 G11: the first-prop flow also needs the metaprompter and the category provider (`utility`); readiness covers them, not just the brain
   const seats = {};
@@ -3041,7 +3516,7 @@ async function onboardingStatus(cfg, deps) {
   try { blenderPresent = !!(blenderPath && fs.existsSync(blenderPath)); } catch {}
   const blender = { present: blenderPresent, path: blenderPath };
 
-  return { completed, node, comfyui, claudeCli, brain, seats, lmstudio, blender };
+  return { completed, node, comfyui, claudeCli, codexCli, keys, brain, seats, lmstudio, blender };
 }
 
-module.exports = { remeshEvents, remeshBusy, remeshStatus, assetFaces, _clearMaybeCharged: () => { remeshStore.clear(); }, _remeshStore: remeshStore, _setStagingBase, MCP_FORCE_CHECKPOINT, blenderRunWith, runTurn, runOneTool, toolResultFailed, runConfig, verdictOf, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, parseToolCallStrict, TOOL_RESULT_NUDGE, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };
+module.exports = { consumeRefTile, parseRefTile, applyRefTile, seatContext, estTokens, _clearSeatContextCache, remeshEvents, remeshBusy, remeshStatus, makeVideo, videoGate, scrubFalKey, videoEvents, videoBusy, videoStatus, videoCancel, _videoStore: videoStore, assetFaces, _clearMaybeCharged: () => { remeshStore.clear(); }, _remeshStore: remeshStore, _setStagingBase, MCP_FORCE_CHECKPOINT, blenderRunWith, runTurn, toolStepLine, persistTurn, runOneTool, toolResultFailed, runConfig, verdictOf, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, parseToolCallStrict, TOOL_RESULT_NUDGE, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };

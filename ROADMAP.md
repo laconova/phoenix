@@ -6,7 +6,7 @@ Phoenix is **alpha**: usable, but early.
 
 ## Now (this release)
 
-The core text → 3D prop pipeline, driven from one browser UI — now with a choice of brain per role, Ask/Auto run modes, scene checkpoints and an MCP server (see *New in 1.9.0* below):
+The core text → 3D prop pipeline, driven from one browser UI — now with storyboards and video, reference images, per-workflow settings and phone access (see *New in 1.10.0* below):
 
 - **Chat-driven generation** with per-stage gates (prompt · image · mesh) — plus a **vision gate**
   (`off` / `focused` / `full`) that renders the viewport after a scene-changing action and has a model
@@ -77,8 +77,8 @@ New in **1.8.1** — a library that ships with nothing, and a choice of voice:
 - **Voice — multiple engines** — an **engine picker** in the Sound Design workbench. **CrispASR**
   (the default, integrated) works today against your own CrispASR speech server. **Chatterbox** (MIT)
   and **CosyVoice** (Apache-2.0) are shown in the picker but route through a **voice-service
-  dispatcher** that isn't part of this release, so they appear greyed out ("coming in a future
-  version") for now. Choose and activate an engine from the workflow library and the choice persists
+  dispatcher**; since 1.10 that dispatcher ships, so Chatterbox runs on your own PC once you turn on
+  *Run voice engines on this PC* (CosyVoice stays blocked). Choose and activate an engine from the workflow library and the choice persists
   as your default; `/speak` never silently substitutes an unknown or unavailable engine — it tells you
   what's missing instead.
 - **Upgrade pickup** — existing installs pick up newly-shipped built-in workflow definitions on
@@ -106,6 +106,23 @@ New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a to
 - **Resizable, collapsible panels** — drag or collapse the assistant and the Library; Settings is split into
   a General and a Connections tab.
 
+New in **1.10.0** — from props to shots:
+
+- **Storyboards** — several boards of shots (image, prompt, duration, references, keyframe, clip), grouped in the
+  Library under Tools; Library images are linked, never copied.
+- **Make video** — keyframe + prompt → clip: free and local through ComfyUI with the built-in LTX-2 workflow (up to
+  about 3 s with sound), or optional and paid through fal.ai (Kling 3 Pro, cost shown and confirmed first). Bring your
+  own local video workflow (e.g. Wan 2.2) via + Add workflow; Phoenix measures which ComfyUI it runs on.
+- **Images and Videos tabs** in the Library — every generated or edited image and every clip is recorded.
+- **Reference images** — Flux Klein (two references) and the new built-in **Z-Image Turbo** (one, with a Change slider).
+- **Per-workflow settings** — CFG, steps, sampler, size, denoise … per workflow (Advanced), with category
+  overrides, reset and seed lock (`workflow-params.json`).
+- **Use Phoenix from your phone** *(optional, off by default)* — over your own Tailscale network, paired by QR code.
+- **Chatterbox on this PC** — the voice dispatcher now ships: turn on *Settings ▸ Voice ▸ Run voice engines on this
+  PC* and Acquire Chatterbox (Windows included).
+- **Acquire troubleshooting** — disk full, gated Hugging Face models, interrupted downloads and a wrong ComfyUI folder
+  each get an entry the error links to.
+
 ## Near future
 
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf
@@ -115,8 +132,8 @@ New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a to
 - **PBR material generator** — generate physically-based material sets, not just meshes.
 - **Deeper Unreal integration** — the 1.7.0 bridge places assets into a running editor; next is a
   fuller round trip (materials, level layout) and hardening the editor-side setup.
-- **Client access** — a thin client that connects to a remote Phoenix server (run the heavy
-  stack on one machine, drive it from another).
+- **Client access** — 1.10 lets a phone drive Phoenix over Tailscale; next is a full desktop client for a
+  Phoenix server on another machine (the whole UI, not the phone subset).
 - **Rigid binding for machines** — robots, vehicles and other hard-surface rigs want each part
   parented to a bone, not weighted deformation. The folder model already carries them; the binding
   step is manual for now.
@@ -126,7 +143,8 @@ New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a to
 
 ## Middle future
 
-- **Video generation** — a video stage beyond the current image/mesh pipeline.
+- **Longer and text-to-video** — 1.10 makes short image-to-video clips per shot; next are longer clips, text-to-video
+  and cutting a storyboard into one film.
 - **Live motion capture** — drive animation from live mocap.
 - **Depth-to-video** — depth-conditioned video generation.
 
@@ -140,6 +158,21 @@ New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a to
 
 ## Known limitations
 
+- **Edit tab: category overrides don't apply.** A per-category override set in a workflow's Advanced section is used for
+  images and meshes, but an Edit (i2i) run always uses the workflow-level value. *(fix planned for 1.10.1)*
+- **Custom video workflows: the frame rate field.** Changing *Frames per second* in a self-added video workflow changes
+  the frame count and the shown duration, but not the frame rate written into the clip — keep it at the workflow's own
+  value. The built-in LTX-2 workflow is not affected. *(1.10.1)*
+- **Storyboard after a workflow switch.** An open storyboard keeps showing the previous workflow's label and limits
+  until it is reopened; the run itself already uses the new workflow. *(1.10.1)*
+- **Make video backend choice is per click.** The local/fal pick in a shot is not remembered; a default other than
+  `auto` is set with `video.backend` in `phoenix-config.json`. *(1.10.1)*
+- **Keyframes from reference images can't be stopped.** Stop does not cancel a storyboard keyframe made from reference
+  images, and a ComfyUI that stops answering mid-request can keep that job waiting until Phoenix is restarted. *(1.10.1)*
+- **Paid jobs only from the laptop.** A paired phone cannot start Meshy remeshes or fal.ai clips; a switch to allow it is
+  planned. *(1.10.1)*
+- **Second ComfyUI only in the config file.** `endpoints.comfyui_bild` (a second ComfyUI for separate environments) has
+  no field in Settings yet. *(1.10.1)*
 - **Background isn't always clean.** Some `flat`-style props still render on a surface/"carpet"
   instead of a pure white background. The **style palette is the escape hatch** — edit the category's
   style preset to tune the look. Better shipped defaults are on the list.

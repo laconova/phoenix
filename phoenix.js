@@ -20,8 +20,10 @@ function loadConfig() {
 }
 
 const { loadPalette } = require('./palette');
+const wfp = require('./workflow-params');   // v1.10 ADV: cfg / steps / sampler / size / faces ... live per workflow here, not in the palette
 const { getActive, resolveSlot, resolveWorkflowFile } = require('./workflows');
 const providers = require('./providers');   // every LLM call (metaprompter, category) goes through the seat → provider layer
+const records = require('./records');   // append-only output record (v1.10 C1) - written here, where the file is written
 const i2iEngine = require('./i2i');   // freeOtherInstances — evict an i2i model left resident on the OTHER instance before mesh/image
 
 const _cfg     = loadConfig();
@@ -54,9 +56,14 @@ const STAGING_BASE   = path.join(__dirname, 'staging');
 
 // ─── Category defaults ────────────────────────────────────────────────────────
 
-const CATEGORIES = Object.fromEntries(
-  Object.entries(_palette.categories).map(([k, v]) => [k, { target_face_num: v.target_face_num, cfg: v.cfg, steps: v.steps }])
-);
+// v1.10 ADV: the palette only says WHICH categories exist (and their hint/style). The tunable values (cfg, steps, sampler, size, faces,
+// Trellis steps ...) are read per run from workflow-params.js for the ACTIVE workflow: category override -> workflow value -> JSON default.
+const CATEGORIES = Object.fromEntries(Object.keys(_palette.categories).map(k => [k, {}]));
+
+// The effective parameters of the active workflow of a stage for a category (stage = 'image' | 'mesh').
+function stageParams(stage, category) {
+  try { return wfp.effective(getActive(stage, _cfg).id, category); } catch (_) { return {}; }
+}
 
 // Every category in the palette gets a label — a hand-written one where we have it,
 // the palette's own hint otherwise. Hardcoding the list here is what made `leaf` and
@@ -78,6 +85,15 @@ const CATEGORY_LABELS = Object.fromEntries(
 
 const randomSeed  = () => Math.floor(Math.random() * 0x7fffffff);
 const slug        = t => t.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 28);
+// A locked seed (workflow window -> Advanced) replaces the random one for that workflow; only workflows with a seed slot can lock.
+function drawSeed(stage) {
+  try {
+    const w = getActive(stage, _cfg);
+    const locked = (w.nodes && w.nodes.seed != null) ? wfp.lockedSeed(w.id) : null;
+    if (locked != null) return locked;
+  } catch (_) { /* fall through to random */ }
+  return randomSeed();
+}
 const nowStamp    = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19); // to the second
 
 async function withProgress(label, fn) {
@@ -147,33 +163,69 @@ function comfyInstanceFor(base) {
   return null;
 }
 
+// <lc2c-comfy-gone> true = ComfyUI answers (already up, or restarted and reachable); false = it does not - the ONE `Stage error:` line is already printed,
+// its text is left in ensureComfyUp.lastMessage so comfyGoneError() can stop the stage without a second, bare line.
 async function ensureComfyUp() {
-  if (await comfyCheck()) return;                   // fast path: it's up
+  ensureComfyUp.lastMessage = null;
+  if (await comfyCheck()) return true;              // fast path: it's up
 
   // No remote supervisor configured → this is (or should be treated as) a local ComfyUI. Don't SSH
   // anywhere; give a clear, actionable message. The generation that follows will fail fast with the
   // same base in its error, so the user knows exactly what to start.
   if (!RIG_SSH || !COMFY_SUPERVISOR) {
-    console.log(`  [comfy] ComfyUI not reachable at ${COMFY_BASE} — start ComfyUI (or set endpoints.comfyui to the right port).`);
-    return;
+    // <lc2a-comfy-gone> one wording for every surface (stderr → pipeline error → chat / Image tab / storyboard keyframe)
+    const _msg = `ComfyUI is not answering at ${COMFY_BASE}. Start it (or fix endpoints.comfyui). If it runs on another machine that may stop it to free VRAM, set endpoints.rigSsh + endpoints.comfySupervisor so Phoenix restarts it by itself.`;
+    console.log(`  [comfy] ${_msg}`);
+    console.error(`Stage error: ${_msg}`);   // <lt-fixes> stderr wins in pipeline.js's error, so the cause must be there too
+    ensureComfyUp.lastMessage = _msg;
+    return false;
   }
 
   const inst = comfyInstanceFor(COMFY_BASE);
-  if (!inst) { console.log(`  [comfy] ${COMFY_BASE} is down and maps to no known supervisor instance — not auto-started.`); return; }
+  if (!inst) {
+    // <lc2a-r2> B2: same reporter as every other case — one `Stage error:` line, so chat / Image tab / keyframe show it
+    const _msg = `ComfyUI is not answering at ${COMFY_BASE} and Phoenix cannot restart it: endpoints.rigSsh (${RIG_SSH}) is set, but this port maps to no supervisor instance (8000 = trellis, 8188 = bild). Start ComfyUI yourself or fix endpoints.comfyui.`;
+    console.log(`  [comfy] ${COMFY_BASE} is down and maps to no known supervisor instance — not auto-started. ${_msg}`);
+    console.error(`Stage error: ${_msg}`);
+    ensureComfyUp.lastMessage = _msg;
+    return false;
+  }
   console.log(`  [comfy] ${inst} (${COMFY_BASE}) is down — restarting via ${RIG_SSH} (supervisor)…`);
+  let _restartFail = null;   // <lc2a-comfy-gone> short reason when the ssh restart itself failed
   try {
     const { spawnSync } = require('child_process');
     const r = spawnSync('ssh', ['-o', 'ConnectTimeout=10', RIG_SSH, `node ${COMFY_SUPERVISOR} up ${inst}`],
       { encoding: 'utf8', timeout: 120000 });
     const line = ((r.stdout || '') + (r.stderr || '')).trim();
     if (line) console.log(`  [comfy] ${line.split('\n').pop()}`);
-  } catch (e) { console.log(`  [comfy] auto-start threw: ${e.message}`); }
+    if (r.error || r.signal || (typeof r.status === 'number' && r.status !== 0)) {
+      _restartFail = (r.error && r.error.message) || (line && line.split('\n').pop()) || (r.signal ? 'killed by ' + r.signal : 'exit code ' + r.status);
+    }
+  } catch (e) { console.log(`  [comfy] auto-start threw: ${e.message}`); _restartFail = e.message; }
+  if (_restartFail) {
+    const _msg = `ComfyUI is not answering at ${COMFY_BASE} and the restart over ${RIG_SSH} failed: ${String(_restartFail).replace(/\s+/g, ' ').slice(0, 160)}.`;
+    console.log(`  [comfy] ${_msg}`);
+    console.error(`Stage error: ${_msg}`);
+    ensureComfyUp.lastMessage = _msg;
+    return false;
+  }
   // The server is back up rig-side; an SSH tunnel can lag a moment. Wait for the port before continuing.
   for (let i = 0; i < 20; i++) {
-    if (await comfyCheck()) { console.log(`  [comfy] ${inst} reachable again.`); return; }
+    if (await comfyCheck()) { console.log(`  [comfy] ${inst} reachable again.`); return true; }
     await new Promise((res) => setTimeout(res, 1500));
   }
-  console.log(`  [comfy] ${inst} still not reachable via ${COMFY_BASE} after restart — check the connection to ${RIG_SSH}.`);
+  const _msg2 = `ComfyUI is not answering at ${COMFY_BASE} and the restart over ${RIG_SSH} failed: ${inst} still not reachable after the restart (check the connection).`;
+  console.log(`  [comfy] ${_msg2}`);
+  console.error(`Stage error: ${_msg2}`);
+  ensureComfyUp.lastMessage = _msg2;
+  return false;
+}
+
+// <lc2c-comfy-gone> the error a stage throws when ensureComfyUp() said false: it carries comfyGone so the stage catch does not print a second line.
+function comfyGoneError() {
+  const e = new Error(ensureComfyUp.lastMessage || 'ComfyUI is not answering.');
+  e.comfyGone = true;
+  return e;
 }
 
 async function comfyUploadImage(filePath) {
@@ -378,6 +430,13 @@ Style rules by category:`;
 const META_SYSTEM = META_SYSTEM_HEADER +
   Object.entries(_palette.categories).map(([k, v]) => `\n- ${k}: ${v.style}`).join('');
 
+// <lt-fixes> label shows the model the metaprompter seat really uses
+function metaprompterLabel() {
+  let m = '';
+  try { m = (providers.resolveSeat('metaprompter', _cfg) || {}).model || ''; } catch (_) {}
+  return m ? `Metaprompter (${m})...` : 'Metaprompter...';
+}
+
 async function generateMetaprompt(userPrompt, category) {
   const _mpUser = `Category: ${category}\nDescription: ${userPrompt}`;
   const seat = providers.resolveSeat('metaprompter', _cfg);
@@ -412,10 +471,10 @@ async function generateMetaprompt(userPrompt, category) {
   };
 }
 
-// ─── Stage: Flux image gen ───────────────────────────────────────────────────
+// ─── Stage: image gen ───────────────────────────────────────────────────
 
 async function runFlux(session) {
-  await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
+  if (!(await ensureComfyUp())) throw comfyGoneError();   // <lc2c-comfy-gone> stop here, no ComfyUI request after a failed check; ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
   // Local model servers sharing the GPU: unload where possible, else one honest notice (never kills anything).
   await gpuShare.beforeGpuStage(_cfg, 'image');
   // Free an i2i model (Qwen) left resident on the OTHER instance before loading Flux here — same
@@ -425,18 +484,24 @@ async function runFlux(session) {
   const n  = wfEntry.nodes;
   const wf = JSON.parse(fs.readFileSync(resolveWorkflowFile(wfEntry), 'utf8'));
 
+  const lockedSeed = n.seed != null ? wfp.lockedSeed(wfEntry.id) : null;
+  if (lockedSeed != null) session.fluxSeed = lockedSeed;
   const set = (slot, value) => { if (n[slot] == null) return; const r = resolveSlot('image', slot, n[slot]); wf[r.node].inputs[r.field] = value; };
   set('positive', session.imagePrompt);
   set('negative', session.negativePrompt);
-  set('cfg', session.params.cfg);
-  set('steps', session.params.steps);
   set('seed', session.fluxSeed);
+  // v1.10 ADV: every declared param of the active workflow (cfg, steps, sampler, size ...) - category override -> workflow value ->
+  // JSON default, then a one-off from session.params (CLI edit), clamped. Every target of a param is written (size = width+height on all nodes).
+  const run = wfp.run(wfEntry.id, session.category, session.params);
+  const setKeys = wfp.applyToGraph(wfEntry, wf, run.values);
 
   // fluxSeed is drawn at random and is the ONLY thing that makes an image reproducible —
   // the `seed:` printed elsewhere is the Trellis seed. Log it, or the image is gone for good.
-  console.log(`  flux seed: ${session.fluxSeed}  |  cfg: ${session.params.cfg}  |  steps: ${session.params.steps}`);
+  // Only what was really set is logged, by param key; a category override is marked with its category.
+  const shown = wfp.describeRun(wfEntry, run, setKeys);
+  console.log(`  ${wfEntry.id}` + (shown ? ` · ${shown}` : '') + (n.seed != null ? ` · seed${lockedSeed != null ? ' (locked):' : ''} ${session.fluxSeed}` : ''));
 
-  return withProgress('Flux image gen', async () => {
+  return withProgress(`${wfEntry.label || wfEntry.id} image gen`, async () => {
     const promptId = await comfyQueue(wf);
     const outputs  = await comfyPoll(promptId, 600000); // 10 min — first run of a heavy image model (Flux) loads GBs before generating
 
@@ -454,8 +519,11 @@ async function runFlux(session) {
     // second (a background batch) otherwise built the SAME filename and one overwrote the other's PNG
     // before the mesh stage picked it up (fixed 2026-08-02).
     const rand    = Math.random().toString(36).slice(2, 6);
-    const outPath = path.join(outDir, `${slug(session.userPrompt)}_${nowStamp()}_${rand}_flux.png`);
+    // flux_klein keeps the historic `_flux.png` suffix (existing files, prop-feeder, history); every other workflow writes `_<id>.png`.
+    const sfx     = wfEntry.id === 'flux_klein' ? 'flux' : String(wfEntry.id).replace(/[^a-z0-9_]+/gi, '_');
+    const outPath = path.join(outDir, `${slug(session.userPrompt)}_${nowStamp()}_${rand}_${sfx}.png`);
     fs.writeFileSync(outPath, imgData);
+    try { records.appendRecord({ kind: 'image', path: outPath, workflow: wfEntry.id, prompt: session.imagePrompt, seed: session.fluxSeed, parent: null, category: session.category }); } catch (_) {}
     return outPath;
   });
 }
@@ -463,7 +531,7 @@ async function runFlux(session) {
 // ─── Stage: Trellis 3D gen ────────────────────────────────────────────────────
 
 async function runTrellis(session) {
-  await ensureComfyUp();   // ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
+  if (!(await ensureComfyUp())) throw comfyGoneError();   // <lc2c-comfy-gone> stop here, no ComfyUI request after a failed check; ComfyUI ggf. lazy neu hochfahren (nach Voice-Verdraengung / Reboot)
   // Mesh OOMs on 10GB cards while a local model still sits in VRAM (LM Studio JIT keeps it loaded ~1h).
   // Every local seat's model is unloaded where the server supports it (LM Studio, Ollama), otherwise an
   // honest PHOENIX_NOTICE — unconditionally, not gated by ejectAfterUse, so the --stage/CLI paths are covered.
@@ -497,9 +565,15 @@ async function runTrellis(session) {
 
     const set = (slot, value) => { if (n[slot] == null) return; const r = resolveSlot('mesh', slot, n[slot]); wf[r.node].inputs[r.field] = value; };
     set('image', uploadedName);
+    const lockedSeed = n.seed != null ? wfp.lockedSeed(wfEntry.id) : null;
+    if (lockedSeed != null) session.trellisSeed = lockedSeed;
     set('seed', session.trellisSeed);
-    set('target_face_num', session.params.target_face_num);
     set('output_prefix', prefix);
+    // v1.10 ADV: target_face_num, texture_size and the three step controls come from the workflow's declared params (every target written).
+    const run = wfp.run(wfEntry.id, session.category, session.params);
+    const setKeys = wfp.applyToGraph(wfEntry, wf, run.values);
+    const shown = wfp.describeRun(wfEntry, run, setKeys);
+    process.stdout.write(`\n  ${wfEntry.id}` + (shown ? ` · ${shown}` : '') + (n.seed != null ? ` · seed${lockedSeed != null ? ' (locked):' : ''} ${session.trellisSeed}` : '') + '\n');
 
     // ── OOM self-rescue ────────────────────────────────────────────────────────
     // The memory peak of the mesh step is the dual-contouring GRID, and it grows with the
@@ -667,7 +741,7 @@ async function stepPause(rl, label, withSameSeed = true) {
 async function editParams(rl, session) {
   console.log('\n  Current params:');
   for (const [k, v] of Object.entries(session.params)) {
-    console.log(`    ${k.padEnd(20)} ${v}`);
+    console.log(`    ${k.padEnd(20)} ${v && typeof v === 'object' ? v.w + 'x' + v.h : v}`);
   }
   console.log('  Enter param=value to change (empty to cancel):');
   while (true) {
@@ -678,8 +752,20 @@ async function editParams(rl, session) {
     const [, k, v] = m;
     if (!(k in session.params)) { console.log(`  Unknown: ${k}. Valid: ${Object.keys(session.params).join(', ')}`); continue; }
     const num = parseFloat(v);
-    session.params[k] = isNaN(num) ? v : (Number.isInteger(session.params[k]) ? Math.round(num) : num);
-    console.log(`  Set ${k} = ${session.params[k]}`);
+    if (session.params[k] && typeof session.params[k] === 'object') {   // size: WxH (one-off for this run, never stored; clamped when applied)
+      const sz = /^(\d+)\s*[x*,]\s*(\d+)$/i.exec(v.trim());
+      if (!sz) { console.log('  Size needs the form WIDTHxHEIGHT, e.g. 1344x768'); continue; }
+      session.params[k] = { w: Number(sz[1]), h: Number(sz[2]) };
+    } else {
+      // parse by the param's DECLARATION (a float that happens to be 4 may become 4.2); clamping to the range happens when it is applied
+      let decl = null;
+      for (const st of ['image', 'mesh']) { try { const d = wfp.declared(getActive(st, _cfg).id).find(x => x.key === k); if (d) { decl = d; break; } } catch (_) { /* no declaration */ } }
+      if (decl && decl.type === 'int') session.params[k] = isNaN(num) ? session.params[k] : Math.round(num);
+      else if (decl && decl.type === 'float') session.params[k] = isNaN(num) ? session.params[k] : num;
+      else if (decl && decl.type === 'enum' && Array.isArray(decl.options)) { const hit = decl.options.find(o => String(o) === v.trim()); if (hit !== undefined) session.params[k] = hit; }
+      else session.params[k] = isNaN(num) ? v : (Number.isInteger(session.params[k]) ? Math.round(num) : num);
+    }
+    console.log(`  Set ${k} = ${session.params[k] && typeof session.params[k] === 'object' ? session.params[k].w + 'x' + session.params[k].h : session.params[k]}  (this run only)`);
     return;
   }
 }
@@ -692,6 +778,8 @@ async function finalizeMesh(session, headless = false) {
     fs.mkdirSync(stagingDir, { recursive: true });
     const stagingPath = path.join(stagingDir, path.basename(session.meshPath));
     fs.copyFileSync(session.meshPath, stagingPath);
+    let meshWf = null; try { meshWf = getActive('mesh', _cfg).id; } catch (_) {}
+    try { records.appendRecord({ kind: 'mesh', path: stagingPath, workflow: meshWf, prompt: session.userPrompt, seed: session.trellisSeed, parent: session.imagePath, category: session.category }); } catch (_) {}
     console.log(`\n  Saved to staging:\n  ${stagingPath}`);
     if (headless) process.stdout.write(`\nRESULT_GLB: ${stagingPath}\n`);
     return stagingPath;
@@ -701,24 +789,33 @@ async function finalizeMesh(session, headless = false) {
 
 // ─── Stage entry points ───────────────────────────────────────────────────────
 
-async function runImageStage(userPrompt, categoryOverride, literalPos = null, literalNeg = null) {
+// 'storyboard' is a built-in, hidden destination (no palette entry, no palette UI): the storyboard keyframe of a shot with no references.
+// It is never inferred: output lands in output/storyboard/, the prompt is the user's literal one (no category style, no LLM call).
+const STORYBOARD_CATEGORY = 'storyboard';
+async function resolveImageCategory(categoryOverride, userPrompt) {
+  if (categoryOverride === STORYBOARD_CATEGORY) return STORYBOARD_CATEGORY;
+  return (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
+}
+
+async function runImageStage(userPrompt, categoryOverride, literalPos = null, literalNeg = null, size = null) {
   // Validate the override against the palette: an unknown category (LLM invented one, or a custom
   // category deleted after the image step) would make CATEGORIES[category] undefined → empty params →
   // undefined workflow inputs → a raw ComfyUI 400. inferCategory always returns a real category.
-  const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
-  const params   = { ...CATEGORIES[category] };
+  const category = await resolveImageCategory(categoryOverride, userPrompt);
+  const params   = stageParams('image', category);
+  if (size && size.w > 0 && size.h > 0) params.size = { w: size.w, h: size.h };   // one-off (never stored): the storyboard keyframe size; clamped by workflow-params like every one-off
   const session  = {
     userPrompt,
     category,
     params,
-    fluxSeed:      randomSeed(),
+    fluxSeed:      drawSeed('image'),
     imagePrompt:   null,
     negativePrompt: null,
     imagePath:     null,
   };
 
   process.stdout.write(`CATEGORY: ${category}\n`);
-  console.log(`  Category: ${category}  (${CATEGORY_LABELS[category]})`);
+  console.log(`  Category: ${category}  (${CATEGORY_LABELS[category] || 'storyboard keyframe'})`);
 
   // Step 1: Metaprompt (or bypass with literal prompt)
   if (literalPos && literalPos.trim()) {
@@ -726,7 +823,7 @@ async function runImageStage(userPrompt, categoryOverride, literalPos = null, li
     session.negativePrompt = literalNeg || '';
     console.log('  Using provided prompt (metaprompter skipped).');
   } else {
-    process.stdout.write('  Metaprompter (Gemma E4B)...');
+    process.stdout.write('  ' + metaprompterLabel());
     const { positive, negative } = await generateMetaprompt(userPrompt, category);
     session.imagePrompt    = positive;
     session.negativePrompt = negative;
@@ -750,21 +847,21 @@ async function runMeshStage(imagePath, userPrompt, categoryOverride, targetFaceN
   }
 
   const category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
-  const params   = { ...CATEGORIES[category] };
+  const params   = stageParams('mesh', category);
   if (Number.isFinite(targetFaceNum) && targetFaceNum > 0) {
-    params.target_face_num = Math.round(Math.min(300000, Math.max(200, targetFaceNum)));
+    params.target_face_num = Math.round(Math.min(300000, Math.max(200, targetFaceNum)));   // one-off (--faces): this call only, never stored
   }
   const session  = {
     userPrompt,
     category,
     params,
-    trellisSeed: randomSeed(),
+    trellisSeed: drawSeed('mesh'),
     imagePath,
     meshPath:    null,
   };
 
   console.log(`  Category: ${category}  (${CATEGORY_LABELS[category]})`);
-  console.log(`  seed: ${session.trellisSeed}  |  target_face_num: ${session.params.target_face_num}`);
+  console.log(`  seed: ${session.trellisSeed}` + (session.params.target_face_num != null ? `  |  target_face_num: ${session.params.target_face_num}` : ''));
 
   // Step 1: Trellis 3D gen
   session.meshPath = await runTrellis(session);
@@ -784,8 +881,8 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
     userPrompt,
     category:      null,
     params:        null,
-    fluxSeed:      randomSeed(),
-    trellisSeed:   randomSeed(),
+    fluxSeed:      drawSeed('image'),
+    trellisSeed:   drawSeed('mesh'),
     imagePrompt:   null,
     negativePrompt: null,
     imagePath:     null,
@@ -795,13 +892,13 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
   // Category
   process.stdout.write('  Detecting category...');
   session.category = (categoryOverride && CATEGORIES[categoryOverride]) ? categoryOverride : await inferCategory(userPrompt);
-  session.params   = { ...CATEGORIES[session.category] };
+  session.params   = { ...stageParams('image', session.category), ...stageParams('mesh', session.category) };
   console.log(` ${session.category}  (${CATEGORY_LABELS[session.category]})`);
-  console.log(`  Defaults → ${session.params.target_face_num} faces | CFG ${session.params.cfg} | ${session.params.steps} steps\n`);
+  console.log('  Defaults → ' + Object.entries(session.params).map(([k, v]) => `${k} ${v && typeof v === 'object' ? v.w + '×' + v.h : v}`).join(' | ') + '\n');
 
   // ── Step 1: Metaprompt ────────────────────────────────────────────────────
   while (true) {
-    process.stdout.write('  Metaprompter (Gemma E4B)...');
+    process.stdout.write('  ' + metaprompterLabel());
     try {
       const { positive, negative } = await generateMetaprompt(userPrompt, session.category);
       session.imagePrompt    = positive;
@@ -835,9 +932,9 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
 
     const c = await stepPause(rl, 'Image result', true);
     if (c === 'q') return;
-    if (c === 'r') { session.fluxSeed = randomSeed(); continue; }
+    if (c === 'r') { session.fluxSeed = drawSeed('image'); continue; }
     if (c === 's') continue;
-    if (c === 'e') { await editParams(rl, session); session.fluxSeed = randomSeed(); continue; }
+    if (c === 'e') { await editParams(rl, session); session.fluxSeed = drawSeed('image'); continue; }
     break;
   }
 
@@ -855,7 +952,7 @@ async function runPipeline(rl, userPrompt, categoryOverride = null, headless = f
 
     const c = await stepPause(rl, '3D mesh result', true);
     if (c === 'q') return;
-    if (c === 'r') { session.trellisSeed = randomSeed(); continue; }
+    if (c === 'r') { session.trellisSeed = drawSeed('mesh'); continue; }
     if (c === 's') continue;
     if (c === 'e') { await editParams(rl, session); continue; }
     break;
@@ -977,7 +1074,7 @@ const _si = _args.indexOf('--stage');
 const _hi = _args.indexOf('--headless');
 
 if (!_isMain) {
-  module.exports = { inferCategory, generateMetaprompt };
+  module.exports = { inferCategory, generateMetaprompt, resolveImageCategory, STORYBOARD_CATEGORY };
 } else if (_si >= 0) {
   // Stage mode: node phoenix.js --stage <image|mesh> --desc "<text>" [--cat <cat>] [--image "<path>"] [--prompt "<pos>"] [--neg "<neg>"]
   const _stageName = _args[_si + 1] || '';
@@ -994,9 +1091,11 @@ if (!_isMain) {
     const _nneg = _nni >= 0 ? _args[_nni + 1] : null;
     (async () => {
       try {
-        await runImageStage(_desc, _cat, _ppos, _nneg);
+        const _wi = _args.indexOf('--width'), _hgi = _args.indexOf('--height');
+        const _sz = (_wi >= 0 && _hgi >= 0 && parseInt(_args[_wi + 1], 10) > 0 && parseInt(_args[_hgi + 1], 10) > 0) ? { w: parseInt(_args[_wi + 1], 10), h: parseInt(_args[_hgi + 1], 10) } : null;
+        await runImageStage(_desc, _cat, _ppos, _nneg, _sz);
       } catch (e) {
-        process.stderr.write(`Stage error: ${e.message}\n`);
+        if (!e.comfyGone) process.stderr.write(`Stage error: ${e.message}\n`);   // <lc2c-comfy-gone> ComfyUI text already printed once by ensureComfyUp
         process.exitCode = 1;
         return;
       }
@@ -1013,7 +1112,7 @@ if (!_isMain) {
       try {
         await runMeshStage(_image, _desc, _cat, Number.isFinite(_faces) ? _faces : null);
       } catch (e) {
-        process.stderr.write(`Stage error: ${e.message}\n`);
+        if (!e.comfyGone) process.stderr.write(`Stage error: ${e.message}\n`);   // <lc2c-comfy-gone> ComfyUI text already printed once by ensureComfyUp
         process.exitCode = 1;
         return;
       }
@@ -1026,7 +1125,7 @@ if (!_isMain) {
         const category = _cat || await inferCategory(_desc);
         process.stdout.write(`CATEGORY: ${category}\n`);
         console.log(`  Category: ${category}  (${CATEGORY_LABELS[category]})`);
-        process.stdout.write('  Metaprompter (Gemma E4B)...');
+        process.stdout.write('  ' + metaprompterLabel());
         const { positive, negative } = await generateMetaprompt(_desc, category);
         console.log('\n\n  POSITIVE:\n  ' + positive);
         console.log('\n  NEGATIVE:\n  ' + negative);

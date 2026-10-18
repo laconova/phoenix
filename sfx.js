@@ -359,7 +359,8 @@ async function saveCharacter({ name, transcript, iHaveRights, overwrite } = {}) 
   }
 
   const base = apiBase();
-  if (!base) return { error: 'voice.api is not set in phoenix-config.json' };
+  // VO1b: baking a pack is CrispASR-only; without a CrispASR server (or on one that has no /bake) say so plainly.
+  if (!base) return { error: voice.NEEDS_CRISPASR };
   const buf = fs.readFileSync(f);
   const q = '/bake?name=' + encodeURIComponent(packName) +
             '&transcript=' + encodeURIComponent(text) +
@@ -368,6 +369,7 @@ async function saveCharacter({ name, transcript, iHaveRights, overwrite } = {}) 
     const r = await uploadWav(base + q, buf);
     let j = {};
     try { j = JSON.parse(r.buf.toString('utf8')); } catch (_) {}
+    if (r.status === 404) return { error: voice.NEEDS_CRISPASR };
     if (r.status >= 400) return { error: j.error || ('HTTP ' + r.status) };
     return Object.assign({ ok: true, transcript: text }, j);
   } catch (e) {

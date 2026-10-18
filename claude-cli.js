@@ -99,6 +99,14 @@ function buildArgs(model, extraFlags, sysFile, useShell) {
   return a;
 }
 
+// Reason text for a non-zero exit: trimmed stderr, else trimmed stdout (a missing / expired login is printed there), else a fixed note.
+// Capped at the last 500 characters. Only CLI output is ever used - never the prompt or the system prompt.
+function cliReason(stderr, stdout) {
+  const e = String(stderr || '').trim(), o = String(stdout || '').trim();
+  const r = e || o || '(no output from the CLI)';
+  return r.length > 500 ? '…' + r.slice(-500) : r;
+}
+
 // Synchronous call — returns trimmed stdout, throws on error.
 function runSync(model, systemPrompt, user, opts = {}) {
   const { extraFlags = [], maxBuffer = 4 * 1024 * 1024, timeout } = opts;
@@ -113,7 +121,7 @@ function runSync(model, systemPrompt, user, opts = {}) {
     const sopts = { input: user || '', encoding: 'utf8', maxBuffer, timeout, ...plan.opts };
     const r = plan.args ? spawnSync(plan.file, plan.args, sopts) : spawnSync(plan.file, sopts);
     if (r.error) throw new Error('Claude CLI: ' + r.error.message);
-    if (r.status !== 0) throw new Error('Claude CLI exit ' + r.status + ': ' + (r.stderr || ''));
+    if (r.status !== 0) throw new Error('Claude CLI exit ' + r.status + ': ' + cliReason(r.stderr, r.stdout));
     return (r.stdout || '').trim();
   } finally {
     if (sysFile) { try { fs.unlinkSync(sysFile); } catch (_) {} }
@@ -169,7 +177,7 @@ function runStream(model, systemPrompt, user, opts = {}) {
     child.stdout.on('data', d => out.push(d));
     child.stderr.on('data', d => err.push(d));
     child.on('close', code => {
-      if (code !== 0) return finish(reject, new Error('Claude CLI exit ' + code + ': ' + err.join('').trim()));
+      if (code !== 0) return finish(reject, new Error('Claude CLI exit ' + code + ': ' + cliReason(err.join(''), out.join(''))));
       finish(resolve, out.join('').trim());
     });
     try { child.stdin.write(user || '', 'utf8'); child.stdin.end(); } catch (_) {}
@@ -193,6 +201,8 @@ const FLAGS_VALUE = {
 };
 function assertSafeArgs(args, o = {}) {
   if (!Array.isArray(args)) throw new Error('Claude CLI: refused - arguments must be a list');
+  // G6: the login probe - exactly this three-element sequence, nothing broader ('auth' is allowed nowhere else)
+  if (args.length === 3 && args[0] === 'auth' && args[1] === 'status' && args[2] === '--json') return;
   for (let i = 0; i < args.length; i++) {
     const a = String(args[i]);
     if (FLAGS_NOARG.has(a)) continue;
@@ -207,6 +217,33 @@ function assertSafeArgs(args, o = {}) {
   }
 }
 
+// G6: is the CLI logged in? Runs `claude auth status --json` (8 s). Resolves { loggedIn, method } - never rejects, never returns or logs
+// anything from the CLI's answer but loggedIn / authMethod (the email field is dropped). opts.target is a test seam.
+function authStatus(opts = {}) {
+  return new Promise((resolve) => {
+    let done = false, child = null, timer = null;
+    const out = [];
+    const finish = (val) => { if (done) return; done = true; if (timer) clearTimeout(timer); try { if (child) child.kill(); } catch (_) {} resolve(val); };
+    const fail = (msg) => finish({ loggedIn: false, method: null, error: msg });
+    timer = setTimeout(() => fail('timeout'), 8000);
+    try {
+      const plan = planSpawn(opts.target || target(), ['auth', 'status', '--json']);
+      child = plan.args ? spawn(plan.file, plan.args, { encoding: 'utf8', ...plan.opts }) : spawn(plan.file, { encoding: 'utf8', ...plan.opts });
+    } catch (e) { fail(e.message); return; }
+    child.stdin.on('error', () => {});
+    try { child.stdin.end(); } catch (_) {}
+    child.stdout.on('data', d => out.push(d));
+    child.stderr.on('data', () => {});
+    child.on('error', e => fail(e.message));
+    child.on('close', () => {
+      let j = null;
+      try { j = JSON.parse(out.join('').trim()); } catch (_) {}
+      if (!j || typeof j !== 'object' || typeof j.loggedIn !== 'boolean') { fail('unexpected output from "claude auth status"'); return; }
+      finish({ loggedIn: j.loggedIn, method: typeof j.authMethod === 'string' ? j.authMethod : null });
+    });
+  });
+}
+
 // How to spawn the claude CLI. A resolved exe is spawned directly (shell:false, args array). Only when the exe could not be resolved
 // (Windows .cmd shim) the shell is needed - then ONE command string with shell:true and NO args array (an args array together with shell:true is
 // what Node 24 warns about as DEP0190). Because assertSafeArgs has already refused every shell metacharacter, the only quoting left is
@@ -219,4 +256,4 @@ function planSpawn(tgt, args) {
   return { file: [tgt.cmd].concat(args.map(q)).join(' '), args: null, opts: { shell: true } };
 }
 
-module.exports = { CLAUDE_EXE, resolveClaudeExe, target, planSpawn, assertSafeArgs, SHELL_BAD, runSync, runStream };
+module.exports = { CLAUDE_EXE, resolveClaudeExe, target, planSpawn, assertSafeArgs, SHELL_BAD, authStatus, runSync, runStream };

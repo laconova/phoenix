@@ -248,7 +248,7 @@ function resolveComfyTarget(cfg, entry) {
     };
   }
 
-  const root = String(inst.root).replace(/[\\/]+$/, '');
+  const root = (() => { const s0 = String(inst.root), pr = path.parse(s0).root, t = s0.replace(/[\\/]+$/, ''); return t.length < pr.length ? pr : t; })();   // keep a filesystem root intact
   const modelsRoot      = joinPath(via, root, 'models');
   const customNodesRoot = joinPath(via, root, 'custom_nodes');
 
@@ -288,7 +288,7 @@ function resolveComfyTarget(cfg, entry) {
 // ships).
 function resolveVoiceTarget(cfg, entry) {
   const instance = (entry && entry.instance) || 'voice';
-  const base = voiceBase(cfg);
+  let base = voiceBase(cfg);
 
   const voiceInstall = (cfg && cfg.voiceInstall) || {};
   const inst = voiceInstall[instance];
@@ -309,7 +309,7 @@ function resolveVoiceTarget(cfg, entry) {
     };
   }
 
-  const root = String(inst.root).replace(/[\\/]+$/, '');
+  const root = (() => { const s0 = String(inst.root), pr = path.parse(s0).root, t = s0.replace(/[\\/]+$/, ''); return t.length < pr.length ? pr : t; })();   // keep a filesystem root intact
   const engine = (entry && entry.install && entry.install.engine) || {};
   const venvSub = (engine.venv && engine.venv.path) || 'venv';
   const venvPath = joinPath(via, root, venvSub);
@@ -328,7 +328,12 @@ function resolveVoiceTarget(cfg, entry) {
     return { kind: 'supervisor', base, instance, engineRoot: root, venvPath, weightsDir, ssh, reason: null };
   }
 
-  return { kind: 'local', base, instance, engineRoot: root, venvPath, weightsDir, ssh: null, reason: null };
+  // VO1b: LOCAL dispatcher mode + via:"local" = the engine is installed on THIS PC. There is no remote
+  // service to probe, so the target carries no base (voice.api may stay empty) and preflight skips
+  // the /health + VRAM probe for it. Rig mode / remote targets keep today's behaviour exactly.
+  const localMode = !!(cfg && cfg.voice && cfg.voice.dispatcher && typeof cfg.voice.dispatcher === 'object' && cfg.voice.dispatcher.local === true);
+  if (localMode) base = '';
+  return { kind: 'local', base, instance, engineRoot: root, venvPath, weightsDir, ssh: null, reason: null, localInstall: localMode };
 }
 
 // Where a voice engine's git repo (kind:"git+requirements") gets cloned to — the manifest has no
@@ -462,7 +467,8 @@ async function preflightForTarget(cfg, entry, target) {
 
   // #9: an empty base (a voice target whose cfg.voice.api is unset) must say so plainly — otherwise the
   // fetch below is handed a bare "/health" and throws the opaque "Failed to parse URL from /health".
-  if (!target.base) {
+  // VO1b: a local-install target (local dispatcher mode) has no base by design — no probe, no block.
+  if (!target.base && !target.localInstall) {
     const reason = serviceType === 'voice'
       ? 'voice.api is not set in phoenix-config.json'
       : 'target base URL is not set';
@@ -477,9 +483,11 @@ async function preflightForTarget(cfg, entry, target) {
   // parsed (kasse pass-through); ComfyUI's /system_stats body is not needed in Stage 1.
   let health = null;
   try {
-    const r = await fetchWithTimeout(livenessUrl, REACHABILITY_TIMEOUT_MS);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    if (serviceType === 'voice') health = await r.json();
+    if (!target.localInstall) {
+      const r = await fetchWithTimeout(livenessUrl, REACHABILITY_TIMEOUT_MS);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      if (serviceType === 'voice') health = await r.json();
+    }
   } catch (e) {
     return {
       ok: false, reason: `${livenessUrl} unreachable — ${(e && e.message) || e}`,
@@ -495,7 +503,9 @@ async function preflightForTarget(cfg, entry, target) {
   let vramVerified = false;
   const vramGb = entry && entry.install && typeof entry.install.vram_gb === 'number' ? entry.install.vram_gb : null;
   if (vramGb != null) {
-    if (serviceType === 'comfyui') {
+    if (target.localInstall) {
+      warnings.push('VRAM not verified — local install');
+    } else if (serviceType === 'comfyui') {
       // ComfyUI has no kasse at all in Stage 1 (future: /system_stats carries real VRAM figures —
       // Stage 2/3, not here). Always unverified, always surfaced, never blocked.
       warnings.push('VRAM not verified — no ledger on this target');
@@ -530,10 +540,18 @@ async function preflightForTarget(cfg, entry, target) {
   let neededGb = 0;
   if (serviceType === 'comfyui') {
     const models = (entry && entry.install && Array.isArray(entry.install.models)) ? entry.install.models : [];
-    neededGb = models.reduce((sum, m) => sum + (typeof (m && m.size_gb) === 'number' ? m.size_gb : 0), 0);
+    // Only models whose destination file is not there yet still have to be downloaded — same presence check
+    // plan() uses for 'skip'. Presence unknown (remote target that cannot be checked) → counted, as before.
+    const probes = [];
+    models.forEach((m, i) => { if (typeof (m && m.size_gb) === 'number' && isValidModelSource(m)) probes.push({ key: 'model#' + i, test: '-f', path: modelDestPath(target, m) }); });
+    const presentModels = probes.length ? resolvePresence(target, probes, true).present : new Set();
+    neededGb = models.reduce((sum, m, i) => presentModels.has('model#' + i) ? sum : sum + (typeof (m && m.size_gb) === 'number' ? m.size_gb : 0), 0);
   } else {
     const w = entry && entry.install && entry.install.engine && entry.install.engine.weights;
     neededGb = (w && typeof w.size_gb === 'number') ? w.size_gb : 0;
+    // VO1b: the venv (Python + CUDA libraries) is part of the need — manifest estimate engine.venv.size_gb.
+    const vsz = entry && entry.install && entry.install.engine && entry.install.engine.venv && entry.install.engine.venv.size_gb;
+    if (typeof vsz === 'number') neededGb = Math.round((neededGb + vsz) * 100) / 100;
   }
   if (neededGb > 0) {
     const freeGb = await diskFreeGb(target, diskRoot);
@@ -641,7 +659,8 @@ function resolvePresence(target, probes, pfOk) {
 // rebuild, exactly as a node's marker.ref does. pip engines pin by `pip` spec; git by repo.commit.
 function voiceBuildId(engine) {
   if (!engine) return null;
-  if (engine.kind === 'pip') return 'pip:' + (engine.pip || '');
+  // VO1b: the venv pins (resemble-perth, setuptools) are part of the version identity - a changed pin list rebuilds an old venv.
+  if (engine.kind === 'pip') { const pins = (engine.venv && Array.isArray(engine.venv.pins)) ? engine.venv.pins.filter(Boolean) : []; return 'pip:' + (engine.pip || '') + (pins.length ? '|' + pins.join(',') : ''); }
   if (engine.kind === 'git+requirements') return 'git:' + ((engine.repo && engine.repo.commit) || '');
   return null;
 }
@@ -724,7 +743,7 @@ function planVoiceSteps(target, entry, pfOk) {
   const steps = [];
 
   const weights = engine.weights || {};
-  const weightsLazy = weights.lazy === true;
+  const weightsLazy = weights.lazy === true && !(weights.source && Array.isArray(weights.source.files));
   const validWeights = isValidWeightsSource(weights.source) && !!target.weightsDir;
 
   // Presence is MARKER-based now (spec #1/#3): a bare venv dir left by a failed `pip install` no longer
@@ -782,7 +801,12 @@ function planVoiceSteps(target, entry, pfOk) {
     steps.push({ kind: 'pip', name: 'pip-install', from: null, to: target.venvPath, action: 'manual' });
   }
 
-  const weightsPresent = weightsLazy ? true : present.has('weightsmk');
+  let weightsPresent = weightsLazy ? true : present.has('weightsmk');
+  // VO1b: a marker is not proof — when the weights are a file list in an HF cache, ALL files must still be there (same check as the
+  // dispatcher's engineStatus). A deleted snapshot file turns the weights step back into "fetch", so Install repairs it.
+  if (weightsPresent && !weightsLazy && target.kind === 'local' && weights.source && weights.source.hf && Array.isArray(weights.source.files) && weights.source.files.length) {
+    if (!require('./voice-dispatcher.js').snapshotFilesPresent(target.weightsDir, weights.source.hf, weights.source.files)) weightsPresent = false;
+  }
   const weightsAction = !validWeights ? 'manual' : (weightsPresent ? 'skip' : 'fetch');
   steps.push({ kind: 'weights', name: 'weights', from: describeWeightsSource(weights.source), to: target.weightsDir, action: weightsAction });
 
@@ -866,7 +890,7 @@ function killTree(child, detached) {
   try {
     if (detached && !IS_WIN && typeof child.pid === 'number') { process.kill(-child.pid, 'SIGKILL'); return; }
   } catch (_) { /* group gone or platform lacks it → fall back */ }
-  try { child.kill('SIGKILL'); } catch (_) {}
+  try { if (process.platform === 'win32') child.kill(); else child.kill('SIGKILL'); } catch (_) {}   // Windows has no signal names
 }
 function runProc(cmd, args, opts = {}) {
   const { timeout, signal, onLine, label, detached, env } = opts;
@@ -1074,12 +1098,90 @@ async function cloneNode(target, src, opts = {}) {
   });
 }
 
+// The platform the voice-engine executor branches on. A seam (not a bare process.platform) so the suites that assert the
+// POSIX shell form can pin 'linux' on a Windows host; production never sets it.
+let PLATFORM_OVERRIDE = null;
+function hostPlatform() { return PLATFORM_OVERRIDE || process.platform; }
+
+// VO1 — torch/torchaudio pinned from the manifest's own index (e.g. the cu124 wheel index) BEFORE the
+// engine package, so pip never resolves a CPU-only torch. null when the manifest declares no index_url.
+function torchFirst(engine) {
+  const v = (engine && engine.venv) || {};
+  if (!v.index_url || !v.torch) return null;
+  return { pkgs: ['torch==' + v.torch, 'torchaudio==' + v.torch], indexUrl: v.index_url };
+}
+
+// VO1 — find a Python of the manifest's version on Windows: `py -3.12` first, then plain `python` WITH a
+// version check. Nothing found = a manual step with a clear message, never a silent other version.
+async function findWinPython(wantVersion, ro) {
+  const want = String(wantVersion || '3');
+  const probes = [{ cmd: 'py', pre: ['-' + want] }, { cmd: 'python', pre: [] }];
+  for (const p of probes) {
+    try {
+      const r = await runProc(p.cmd, [...p.pre, '--version'], Object.assign({ label: 'python probe', timeout: 30000 }, { signal: ro.signal }));
+      const out = String((r && (r.stdout || r.stderr)) || '').trim();
+      const m = /Python\s+(\d+)\.(\d+)/.exec(out);
+      if (m && (m[1] + '.' + m[2]).startsWith(want)) return p;
+    } catch (_) { /* not installed / not this version — try the next */ }
+  }
+  throw new Error(`Python ${want} not found — install it from python.org (then run Acquire again)`);
+}
+
+// VO1b — the python one-liner that fetches ONLY the listed files of an HF repo into the HF cache (HF_HOME).
+function hfSnapshotCode(repo, files) {
+  return `from huggingface_hub import snapshot_download; snapshot_download(${JSON.stringify(repo)}, allow_patterns=${JSON.stringify(files)})`;
+}
+
+// VO1 — the Windows (local target) form of the voice-engine steps: fs.mkdirSync + spawn, no shell
+// pipeline. Only the Chatterbox class (kind:"pip") is supported; the git+requirements class stays POSIX-only.
+async function acquireVoiceStepWin(target, entry, step, opts = {}) {
+  const engine = entry.install.engine;
+  const ro = { signal: opts.signal, onLine: opts.onLine };
+  const winPy = path.win32.join(target.venvPath, 'Scripts', 'python.exe');
+  switch (step.kind) {
+    case 'venv': {
+      fs.mkdirSync(target.engineRoot, { recursive: true });
+      const py = await findWinPython(engine.venv && engine.venv.python, ro);
+      await runProc(py.cmd, [...py.pre, '-m', 'venv', target.venvPath], Object.assign({ label: 'venv creation' }, ro));
+      return;
+    }
+    case 'pip': {
+      const pins = Array.isArray(engine.venv && engine.venv.pins) ? engine.venv.pins : [];
+      const tt = torchFirst(engine);
+      if (tt) await runProc(winPy, ['-m', 'pip', 'install', ...tt.pkgs, '--index-url', tt.indexUrl], Object.assign({ label: 'pip install (torch)', timeout: 3600000 }, ro));
+      await runProc(winPy, ['-m', 'pip', 'install', ...[engine.pip, ...pins].filter(Boolean)], Object.assign({ label: 'pip install', timeout: 1800000 }, ro));
+      return;
+    }
+    case 'weights': {
+      const w = engine.weights;
+      fs.mkdirSync(target.weightsDir, { recursive: true });
+      if (w.source.hf && Array.isArray(w.source.files) && w.source.files.length) {
+        // VO1b: exactly the model files, INTO the HF cache the adapter reads (HF_HOME) — no --local-dir, no whole repo.
+        await runProc(winPy, ['-c', hfSnapshotCode(w.source.hf, w.source.files)], Object.assign({ label: 'weights fetch', timeout: 3600000, env: { HF_HOME: target.weightsDir } }, ro));
+      } else if (w.source.hf) {
+        await runProc(path.win32.join(target.venvPath, 'Scripts', 'hf.exe'), ['download', w.source.hf, '--local-dir', target.weightsDir], Object.assign({ label: 'weights fetch', timeout: 3600000 }, ro));
+      } else if (w.source.url) {
+        const filename = String(w.source.url).split('/').filter(Boolean).pop() || 'weights.bin';
+        await runProc('curl.exe', ['-fL', '-o', path.win32.join(target.weightsDir, filename), w.source.url], Object.assign({ label: 'weights fetch', timeout: 3600000 }, ro));
+      } else {
+        throw new Error('this weights source can only be fetched on Linux/macOS — install manually');
+      }
+      return;
+    }
+    default:
+      // clone / submodules / pip-pre / requirements / pip-post = the CosyVoice class (shell pipelines, native builds).
+      throw new Error(`step "${step.kind}" is Linux/macOS only (it needs a POSIX shell) — install this engine manually on Windows`);
+  }
+}
+
 // ── voice-engine executor (Stage 2a) ──────────────────────────────────────────
 // Every voice step is a SHELL command (python -m venv, pip, git, grep -v -iE, curl, modelscope's
 // python -c) — the CosyVoice-class "requirements surgery" genuinely needs a shell pipeline. Async now
 // (runShell → cp.spawn): streams output + is cancellable via opts.signal, same as the ComfyUI path.
 async function acquireVoiceStep(target, entry, step, opts = {}) {
   const engine = entry.install.engine;
+  // VO1: a local target on Windows has no `sh`, no `bin/pip` — a separate, shell-free path (see below).
+  if (hostPlatform() === 'win32' && target.kind === 'local') return acquireVoiceStepWin(target, entry, step, opts);
   const pythonBin = 'python' + ((engine.venv && engine.venv.python) || '3');
   const pipBin = `${target.venvPath}/bin/pip`;
   const pyBin  = `${target.venvPath}/bin/python`;
@@ -1092,7 +1194,12 @@ async function acquireVoiceStep(target, entry, step, opts = {}) {
     case 'pip': {
       const pins = Array.isArray(engine.venv && engine.venv.pins) ? engine.venv.pins : [];
       const pkgs = [engine.pip, ...pins].filter(Boolean).map(shQ).join(' ');
-      await runShell(target, `${pipBin} install ${pkgs}`, Object.assign({ label: 'pip install', timeout: 1800000 }, ro));
+      // VO1: torch must come from the CUDA index first (the default PyPI wheel on some platforms is CPU-only).
+      const tt = torchFirst(engine);
+      // the venv DIRECTORY is quoted (a root with spaces / ';' must not become shell syntax); the tail stays plain text
+      const pipQ = `${shQ(target.venvPath)}/bin/pip`;
+      const torchCmd = tt ? `${pipQ} install ${tt.pkgs.map(shQ).join(' ')} --index-url ${shQ(tt.indexUrl)} && ` : '';
+      await runShell(target, `${torchCmd}${pipQ} install ${pkgs}`, Object.assign({ label: 'pip install', timeout: 1800000 }, ro));
       return;
     }
     case 'clone': {
@@ -1111,7 +1218,7 @@ async function acquireVoiceStep(target, entry, step, opts = {}) {
     }
     case 'pip-pre': {
       const pkgs = engine.requirements.pre.map(shQ).join(' ');
-      await runShell(target, `${pipBin} install ${pkgs}`, Object.assign({ label: 'pip pre-install', timeout: 1800000 }, ro));
+      await runShell(target, `${shQ(pipBin)} install ${pkgs}`, Object.assign({ label: 'pip pre-install', timeout: 1800000 }, ro));
       return;
     }
     case 'requirements': {
@@ -1122,12 +1229,12 @@ async function acquireVoiceStep(target, entry, step, opts = {}) {
       // The surgery, AS ORDERED DATA: strip the listed packages out of the repo's requirements.txt
       // (grep -v -iE, case-insensitive, extended regex over the '|'-joined strip list) before install.
       const filterCmd = strip ? `grep -v -iE ${shQ(strip)} ${shQ(reqPath)} > ${shQ(strippedPath)}` : `cp ${shQ(reqPath)} ${shQ(strippedPath)}`;
-      await runShell(target, `${filterCmd} && ${pipBin} install -r ${shQ(strippedPath)}`, Object.assign({ label: 'requirements install', timeout: 1800000 }, ro));
+      await runShell(target, `${filterCmd} && ${shQ(pipBin)} install -r ${shQ(strippedPath)}`, Object.assign({ label: 'requirements install', timeout: 1800000 }, ro));
       return;
     }
     case 'pip-post': {
       const pkgs = engine.requirements.post.map(shQ).join(' ');
-      await runShell(target, `${pipBin} install ${pkgs}`, Object.assign({ label: 'pip post-install', timeout: 1800000 }, ro));
+      await runShell(target, `${shQ(pipBin)} install ${pkgs}`, Object.assign({ label: 'pip post-install', timeout: 1800000 }, ro));
       return;
     }
     case 'weights': {
@@ -1136,11 +1243,13 @@ async function acquireVoiceStep(target, entry, step, opts = {}) {
       let cmd;
       // `hf download` (huggingface_hub's CLI; the old `huggingface-cli` is a deprecated non-zero shim).
       // ModelScope path uses snapshot_download; url path a plain curl. All args shQ'd.
-      if (w.source.hf) {
-        cmd = `mkdir -p ${shQ(dir)} && ${pipBin.replace(/pip$/, 'hf')} download ${shQ(w.source.hf)} --local-dir ${shQ(dir)}`;
+      if (w.source.hf && Array.isArray(w.source.files) && w.source.files.length) {
+        cmd = `mkdir -p ${shQ(dir)} && HF_HOME=${shQ(dir)} ${shQ(pyBin)} -c ${shQ(hfSnapshotCode(w.source.hf, w.source.files))}`;
+      } else if (w.source.hf) {
+        cmd = `mkdir -p ${shQ(dir)} && ${shQ(pipBin.replace(/pip$/, "hf"))} download ${shQ(w.source.hf)} --local-dir ${shQ(dir)}`;
       } else if (w.source.modelscope) {
         const pyCode = `from modelscope import snapshot_download; snapshot_download(${JSON.stringify(w.source.modelscope)}, local_dir=${JSON.stringify(dir)})`;
-        cmd = `mkdir -p ${shQ(dir)} && ${pyBin} -c ${shQ(pyCode)}`;
+        cmd = `mkdir -p ${shQ(dir)} && ${shQ(pyBin)} -c ${shQ(pyCode)}`;
       } else if (w.source.url) {
         const filename = String(w.source.url).split('/').filter(Boolean).pop() || 'weights.bin';
         cmd = `mkdir -p ${shQ(dir)} && curl -fL -o ${shQ(dir + '/' + filename)} ${shQ(w.source.url)}`;
@@ -1314,4 +1423,153 @@ async function acquire(cfg, entry, opts = {}) {
   return { done, skipped, failed, warnings };
 }
 
-module.exports = { validateInstall, resolveTarget, preflight, plan, acquire, status };
+// <b2r-uninstall>
+// v1.10 B2r — uninstall for a workflow's models / custom nodes, LOCAL targets only. Two pure-ish steps the server wires up:
+// uninstallPlan() decides what would go (never touches disk beyond existence checks), uninstallMove() MOVES it into
+// <comfyInstall root>/.phoenix-trash/<time>/ — nothing is ever deleted, the user empties the trash folder by hand.
+// Phoenix only removes what it can prove it installed: node dirs carrying MARKER_NAME; a model file counts as ours when the
+// workflow's install block names it and it sits at modelDestPath. Anything another workflow still lists is kept.
+const TRASH_DIR = '.phoenix-trash';
+
+function uninstallPlan(cfg, entry, ctx) {
+  ctx = ctx || {};
+  const e = entry || {};
+  const out = (ok, reason) => ({ ok, reason: ok ? undefined : reason, remove: [], keep: [], manual: [], unsafe: false, total_gb: 0, trash_root: null });
+  if (e.stage === 'voice') return out(false, 'voice engines: later');
+  const target = resolveTarget(cfg, e);
+  if (target.kind === 'supervisor') return out(false, 'uninstall on a remote machine comes later');
+  if (target.kind !== 'local') return out(false, target.reason || 'no install folder configured');
+  const active = ctx.active || {};
+  if (e.stage && e.id && active[e.stage] === e.id) return out(false, 'select another workflow first');
+  if (ctx.running) return out(false, 'an install of this workflow is running — wait for it to finish');
+
+  const root = String(cfg.comfyInstall[target.instance].root).replace(/[\\/]+$/, '');
+  const res = out(true);
+  res.warning = 'Workflows installed outside Phoenix may also use these files — check before emptying the trash folder.';
+  res.trash_root = path.join(root, TRASH_DIR);
+  const r = ctx.registry;
+  const allOthers = Object.entries((r && r.workflows && typeof r.workflows === 'object') ? r.workflows : (r || {}))
+    .filter(([id, o]) => id !== e.id && o && typeof o === 'object')
+    .map(([id, o]) => ({ id, label: o.label || id, entry: o }));
+  // Only workflows that are actually installed keep a shared file (ctx.installed = Set of ids); no set → every other counts (old callers).
+  const others = allOthers.filter(o => !(ctx.installed instanceof Set) || ctx.installed.has(o.id));
+  const inst = (e.install && typeof e.install === 'object') ? e.install : {};
+
+  // Amendment 1 (2): a manifest path with a `..` segment, a separator in a file name, or an absolute path is never normalised into a
+  // remove item — it goes to `manual`. Repo dir names are checked the same way.
+  const segs = (p) => String(p == null ? '' : p).split(/[\\/]+/);
+  const absolute = (p) => path.isAbsolute(String(p)) || /^[\\/]/.test(String(p)) || /^[A-Za-z]:/.test(String(p));
+  const unsafeName = (n) => { const t = String(n == null ? '' : n); return !t || t === '.' || segs(t).includes('..') || /[\\/]/.test(t) || absolute(t); };
+  const unsafeDir = (dd) => dd != null && dd !== '' && (segs(dd).includes('..') || absolute(dd));
+  // Amendment 1 (1): which repo a class type belongs to, over EVERY workflow's install.custom_nodes — so a workflow that only lists
+  // the class type in deps.custom_nodes still counts as a user of that repo.
+  const repoOfType = {};
+  for (const o of [{ entry: e }].concat(allOthers)) {   // the map comes from the WHOLE registry; only the users are filtered by installed state
+    const oc = o.entry.install && Array.isArray(o.entry.install.custom_nodes) ? o.entry.install.custom_nodes : [];
+    for (const x of oc) if (x && x.classType && x.git) repoOfType[x.classType] = gitRepoDirName(x.git);
+  }
+
+  const seen = new Set();
+  for (const m of (Array.isArray(inst.models) ? inst.models : [])) {
+    if (!m || !m.filename) continue;
+    if (unsafeName(m.filename) || unsafeDir(m.dir)) { res.manual.push({ what: String(m.dir || '') + '/' + String(m.filename), why: 'unsafe path in the manifest' }); res.unsafe = true; continue; }
+    const dest = modelDestPath(target, m);
+    if (!dest || seen.has(dest) || !localPathExists(dest)) continue;
+    seen.add(dest);
+    const users = others.filter(o => {
+      const om = o.entry.install && Array.isArray(o.entry.install.models) ? o.entry.install.models : [];
+      const dm = o.entry.deps && Array.isArray(o.entry.deps.models) ? o.entry.deps.models : [];
+      return om.some(x => x && x.filename === m.filename) || dm.includes(m.filename);
+    });
+    if (users.length) res.keep.push({ path: dest, why: 'also used by ' + users.map(u => u.label).join(', ') });
+    else {
+      const item = { kind: 'model', path: dest };
+      if (typeof m.size_gb === 'number') { item.size_gb = m.size_gb; res.total_gb += m.size_gb; }
+      res.remove.push(item);
+    }
+  }
+  for (const n of (Array.isArray(inst.custom_nodes) ? inst.custom_nodes : [])) {   // trellis2 lists one repo 6x → counted once
+    if (!n || !n.git) continue;
+    if (unsafeName(gitRepoDirName(n.git))) { res.manual.push({ what: String(n.git), why: 'unsafe path in the manifest' }); res.unsafe = true; continue; }
+    const dest = nodeDestPath(target, n);
+    if (!dest || seen.has(dest) || !localPathExists(dest)) continue;
+    seen.add(dest);
+    if (!localPathExists(path.join(dest, MARKER_NAME))) {
+      res.manual.push({ what: dest, why: 'installed by hand — Phoenix only removes what it installed' });
+      continue;
+    }
+    const name = gitRepoDirName(n.git);
+    const users = others.filter(o => {
+      const oc = o.entry.install && Array.isArray(o.entry.install.custom_nodes) ? o.entry.install.custom_nodes : [];
+      const byType = o.entry.deps && Array.isArray(o.entry.deps.custom_nodes) ? o.entry.deps.custom_nodes : [];
+      return oc.some(x => x && x.git && gitRepoDirName(x.git) === name) || byType.some(t => repoOfType[t] === name);
+    });
+    if (users.length) res.keep.push({ path: dest, why: 'also used by ' + users.map(u => u.label).join(', ') });
+    else res.remove.push({ kind: 'node', path: dest });
+  }
+  const selfDownloads = (!Array.isArray(inst.models) || inst.models.length === 0) && Array.isArray(inst.custom_nodes) && inst.custom_nodes.length > 0;
+  if (selfDownloads) res.manual.push({ what: 'model weights', why: 'downloaded by the node on first run — not tracked' });
+  res.total_gb = Math.round(res.total_gb * 100) / 100;
+  return res;
+}
+
+// Moves plan.remove into <root>/.phoenix-trash/<ISO time>/<path relative to root>. Everything is validated BEFORE the first move
+// (outside the root, `..`, a parent or the item itself resolving outside via a symlink → refused, nothing moved); then a failed
+// move stops the run and reports what already moved. → { ok, moved:[{from,to}], trash, error? }
+function uninstallMove(cfg, entry, plan, opts) {
+  const fail = (error, moved) => ({ ok: false, error, moved: moved || [], trash: null });
+  if (!plan || plan.ok !== true || !Array.isArray(plan.remove)) return fail('nothing to do — the plan is not ok');
+  const target = resolveTarget(cfg, entry || {});
+  if (target.kind !== 'local') return fail('uninstall works on a local install folder only');
+  const root = path.resolve(String(cfg.comfyInstall[target.instance].root));
+  let realRoot;
+  try { realRoot = fs.realpathSync(root); } catch (_) { return fail('install folder not found: ' + root); }
+  const inside = (base, p) => { const rel = path.relative(base, p); return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel); };
+  const stamp = (opts && opts.now ? new Date(opts.now) : new Date()).toISOString().replace(/[:.]/g, '-');   // ':' is not a legal Windows file name char
+  const trash = path.join(root, TRASH_DIR, stamp);
+  const segs0 = (p) => String(p == null ? '' : p).split(/[\\/]+/);
+  const jobs = [];
+  for (const item of plan.remove) {
+    if (segs0(item && item.path).includes('..')) return fail('refused: ' + String(item && item.path) + ' contains a ".." segment');
+    const p = path.resolve(String(item && item.path || ''));
+    if (!inside(root, p)) return fail('refused: ' + p + ' is outside the install folder');
+    if (path.relative(root, p).split(path.sep)[0] === TRASH_DIR) return fail('refused: ' + p + ' is already in the trash folder');
+    try {
+      if (!inside(realRoot, path.join(fs.realpathSync(path.dirname(p)), path.basename(p)))) return fail('refused: ' + p + ' resolves outside the install folder');
+      if (fs.lstatSync(p).isSymbolicLink() && !inside(realRoot, fs.realpathSync(p))) return fail('refused: ' + p + ' is a link leaving the install folder');
+    } catch (e) { return fail('refused: cannot check ' + p + ' (' + ((e && e.code) || e) + ')'); }
+    const to = path.join(trash, path.relative(root, p));
+    if (fs.existsSync(to)) return fail('refused: ' + to + ' already exists');
+    jobs.push({ from: p, to });
+  }
+  const moved = [];
+  for (const j of jobs) {
+    try {
+      fs.mkdirSync(path.dirname(j.to), { recursive: true });
+      fs.renameSync(j.from, j.to);
+      moved.push(j);
+    } catch (e) {
+      const r = fail('move failed for ' + j.from + ': ' + ((e && e.message) || e), moved);
+      r.trash = moved.length ? trash : null;
+      return r;
+    }
+  }
+  return { ok: true, moved, trash };
+}
+// </b2r-uninstall>
+
+// v1.10 B3 — map an acquire error text to a troubleshooting entry id (troubleshooting/entries/<id>.md).
+// Pure, never throws; first match wins; anything that is not a string (or matches nothing) → null.
+function acquireFaq(text) {
+  try {
+    if (typeof text !== 'string') return null;
+    if (/needs [\d.]+ GB disk|ENOSPC|no space left/i.test(text)) return 'acquire-disk-full';
+    if (/HTTP 40[13]\b/.test(text)) return 'acquire-hf-gated';
+    if (/cancelled|interrupted clone|sha256 mismatch|ECONNRESET|ETIMEDOUT|socket hang up/i.test(text)) return 'acquire-interrupted';
+    if (/no acquisition target configured|comfyInstall\.|voiceInstall\.|not a git repository/i.test(text)) return 'acquire-wrong-comfy-root';
+    return null;
+  } catch (_) { return null; }
+}
+
+module.exports = { validateInstall, resolveTarget, preflight, plan, acquire, status, acquireFaq, uninstallPlan, uninstallMove,
+                   _test: { setPlatform: (p) => { PLATFORM_OVERRIDE = p || null; } } };

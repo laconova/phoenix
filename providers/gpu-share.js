@@ -1,6 +1,6 @@
 'use strict';
 // providers/gpu-share.js — a local model server and ComfyUI often share one GPU. Before a heavy
-// image/mesh stage, unload the local model where the server has an unload command (LM Studio, Ollama);
+// image/mesh/video stage, unload the local model where the server has an unload command (LM Studio, Ollama);
 // llama.cpp in ROUTER mode (--models-preset: POST /models/unload, status via GET /models), unloaded and
 // waited for; where it has none (plain llama-server ...) say so, honestly, once. Phoenix NEVER kills a
 // process it did not start: nothing here spawns kill/pkill/fuser/taskkill (an API unload request is not a kill).
@@ -142,7 +142,7 @@ async function routerUnload(root, model, deps = {}, url) {
   } catch (e) { ev({ phase: 'unload-error', model, server: 'llamacpp-router', error: (e && e.message) || String(e) }); }
 }
 
-// stage = 'image' | 'mesh'. Best-effort, never throws. deps (tests): fetchImpl, spawnSyncImpl, dbg, log,
+// stage = 'image' | 'mesh' | 'video' (LC2f: the local video backend calls it too; the unload itself does not depend on the stage). Best-effort, never throws. deps (tests): fetchImpl, spawnSyncImpl, dbg, log,
 // lmsUnload (override of the unload call).
 async function beforeGpuStage(cfg, stage, deps = {}) {
   try {

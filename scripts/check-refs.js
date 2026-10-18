@@ -29,6 +29,7 @@ const EXPECTED_ABSENT = {
   'library-labels.json':  'optional; loadLibraryLabels() falls back to {assets:{}} and writes on save',
   'library-folders.json': 'optional; library-folders.js load() returns EMPTY() when absent, save() writes on first mutation',
   'SUSPECTED-ISSUES.md':  'optional troubleshooter input; read in a try/catch with an empty-string fallback',
+  'workflow-params.json': 'self-seeds on ENOENT (workflow-params.js read(), migrates the palette values)',
 };
 
 // Skipped while walking: VCS/deps, everything git already ignores as runtime or user data, and
@@ -99,4 +100,20 @@ if (missing.length) {
   missing.forEach(x => console.log('  ✗ ' + x));
   process.exit(1);
 }
-console.log('\nno file left behind ✓');
+// VO1: product files that are only reached through data (the engine registry names the adapter, Phoenix spawns the dispatcher by
+// path) - no require() points at them, so presence is checked explicitly.
+const MUST_SHIP = ['voice-dispatcher.js', 'voice-engines/chatterbox_adapter.py'];
+const notShipped = MUST_SHIP.filter(f => !fs.existsSync(f));
+if (notShipped.length) {
+  console.log('\nMISSING product files (reached via the voice engine registry):');
+  notShipped.forEach(x => console.log('  ✗ ' + x));
+  process.exit(1);
+}
+// VO1: the same gate also refuses to release the user's own reference voice (see check-voice-release.js).
+const voiceBad = require('./check-voice-release').scan('.');
+if (voiceBad.length) {
+  console.log('\nVOICE RELEASE GUARD — the user\'s voice must never ship:');
+  voiceBad.forEach(x => console.log('  ✗ ' + x));
+  process.exit(1);
+}
+console.log('\nno file left behind ✓  (voice release guard green ✓' + (String(process.env.PHOENIX_RELEASE_FORBIDDEN || '').trim() ? ')' : ' — no private strings checked: set PHOENIX_RELEASE_FORBIDDEN for a release)'));

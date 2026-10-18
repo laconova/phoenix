@@ -23,9 +23,16 @@ function flatten(messages) {
 const CLI_MISSING = /^Claude CLI: spawn \S+ ENOENT|is not recognized as an internal or external command|command not found/i;
 const CLI_MISSING_MSG = 'Claude CLI not found — install Claude Code (see README) or pick another brain in Settings → General → Seats';
 
+// A missing / expired login: the CLI prints the reason (usually to stdout) and exits 1. Matched against the retained reason text only.
+const CLI_LOGIN = /oauth|session expired|not logged in|please run \/login|invalid api key|authentication/i;
+
 function typeError(e, seat) {
   const msg = (e && e.message) || String(e);
   if (CLI_MISSING.test(msg)) return new ProviderError('unreachable', CLI_MISSING_MSG, { seat: seat.name, provider: 'claude-cli', model: seat.model });
+  const exit = /^Claude CLI exit \d+: ([\s\S]*)$/.exec(msg);
+  if (exit && CLI_LOGIN.test(exit[1])) {
+    return new ProviderError('rejected', 'Claude CLI is not logged in or the login expired — open a terminal, run "claude", log in, then try again. (CLI said: ' + exit[1] + ')', { seat: seat.name, provider: 'claude-cli', model: seat.model });
+  }
   const kind = /exit \d+/.test(msg) ? 'rejected' : /timed out/.test(msg) ? 'timeout' : 'unreachable';
   return new ProviderError(kind, msg, { seat: seat.name, provider: 'claude-cli', model: seat.model });
 }
