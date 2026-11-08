@@ -18,7 +18,7 @@
 bl_info = {
     "name": "Phoenix Blender IPC",
     "author": "Laconova",
-    "version": (1, 0, 0),
+    "version": (1, 1, 2),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar (N) > Phoenix",
     "description": "File-based IPC so Phoenix can run Python in Blender (no sockets).",
@@ -200,7 +200,68 @@ class PHOENIX_PT_panel(bpy.types.Panel):
 _classes = (PHOENIX_OT_start, PHOENIX_OT_stop, PHOENIX_PT_panel)
 
 
+PHOENIX_HANDLERS_PY = r'''import bpy, os
+@bpy.app.handlers.persistent
+def phoenix_clear_saved(*args):
+    if args and isinstance(args[0], str):
+        saved = os.path.normcase(os.path.abspath(args[0])).replace('\\', '/').lower()
+        current = os.path.normcase(os.path.abspath(bpy.data.filepath)).replace('\\', '/').lower()
+        if saved == current:
+            bpy.app.driver_namespace.pop('phoenix_modified', None)
+@bpy.app.handlers.persistent
+def phoenix_clear_loaded(*args):
+    bpy.app.driver_namespace.pop('phoenix_rescue_undo', None)
+    bpy.app.driver_namespace.pop('phoenix_modified', None)
+    bpy.app.driver_namespace['phoenix_orphan_kept'] = []
+    changed = False
+    scene = bpy.context.scene
+    if scene.get('phoenix_scene'):
+        tagged = [a for a in bpy.data.actions if a.library is None and a.get('phoenix_orphan')]
+        used = {a for a, users in bpy.data.user_map(subset=tagged).items() if any(u is not a and u.library is None for u in users)}
+        for act in bpy.data.actions:
+            if act in used:
+                for key in ('phoenix_orphan', 'phoenix_orphan_object'):
+                    if key in act: del act[key]; changed = True
+            if act.library is None and act.users == 0:
+                act.use_fake_user = True
+                act['phoenix_orphan'] = scene['phoenix_scene']
+                act['phoenix_orphan_object'] = act.slots[0].identifier[2:] if act.slots else ''
+                changed = True
+        for col in scene.collection.children:
+            if col.name == '_movable' and col.library is None and col.override_library is not None:
+                for ob in col.all_objects:
+                    if ob.override_library and ob.override_library.is_system_override:
+                        ob.override_library.is_system_override = False
+                        changed = True
+    if changed:
+        bpy.app.driver_namespace['phoenix_modified'] = True
+        loaded_path = bpy.data.filepath
+        def push_rescue_undo():
+            try:
+                if bpy.data.filepath != loaded_path:
+                    return None
+                windows = bpy.context.window_manager.windows
+                if windows:
+                    w = windows[0]
+                    with bpy.context.temp_override(window=w, screen=w.screen):
+                        r = bpy.ops.ed.undo_push(message='Phoenix: rescue animation')
+                    if 'FINISHED' in r:
+                        bpy.app.driver_namespace['phoenix_rescue_undo'] = True
+            except Exception:
+                pass
+            return None
+        bpy.app.timers.register(push_rescue_undo, first_interval=0)
+for handlers, handler in ((bpy.app.handlers.save_post, phoenix_clear_saved), (bpy.app.handlers.load_post, phoenix_clear_loaded)):
+    for old in list(handlers):
+        if old.__name__ == handler.__name__: handlers.remove(old)
+    handlers.append(handler)
+'''
+
+def install_handlers():
+    exec(PHOENIX_HANDLERS_PY, {'__name__': 'phoenix_handlers'})
+
 def register():
+    install_handlers()
     for c in _classes:
         bpy.utils.register_class(c)
     start_server()   # auto-start: enabling the addon is all the user has to do

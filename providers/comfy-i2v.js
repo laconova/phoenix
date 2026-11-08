@@ -28,6 +28,14 @@ const BAD_TTL_MS = 8000;    // a "not ready" answer is re-checked soon (the user
 const SLOW_TTL_MS = 300000; // ComfyUI answers but lacks the models / nodes: /object_info is big, so wait 5 min (invalidate() re-probes at once after an Acquire / a workflow switch)
 
 // frames = step*k + offset (k whole), clamped to the model's [min, max]; 3 s at 25 fps -> 73 (LC2f: the builtin cap, motion fades after ~3 s)
+// F6.5: sets the frame rate in a graph the way workflows.js deriveVideoBlock reads it: a CreateVideo with a numeric inputs.fps, else any node with one. -> true when a node was set; a graph without one stays unchanged.
+function setGraphFps(graph, fps) {
+  const ids = Object.keys(graph || {}), has = (id) => !!graph[id] && !!graph[id].inputs && typeof graph[id].inputs.fps === 'number';
+  const id = ids.find(i => has(i) && graph[i].class_type === 'CreateVideo') || ids.find(has);
+  if (id === undefined) return false;
+  graph[id].inputs.fps = fps;
+  return true;
+}
 function framesFor(v, durationS) {
   const f = (v && v.frames) || { step: 8, offset: 1, min: 9, max: 73 };
   const fps = Number(v && v.fps) || 25;
@@ -342,6 +350,7 @@ function create(deps) {
         set('length', frames, true);
         set('width', sz[0]); set('height', sz[1]);
         set('seed', seed);
+        setGraphFps(wf, fps);   // F6.5: the clip's frame rate also lands in the graph, so the saved file plays at the speed the frame count was planned for
         const outSlot = slotOf(entry, 'output');
         if (!outSlot) throw new Error('the ' + shortName(entry) + ' workflow has no output node in its node map');
         const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -424,4 +433,4 @@ function create(deps) {
   return backend;
 }
 
-module.exports = { create, framesFor, ID, OOM_TEXT };
+module.exports = { create, framesFor, setGraphFps, ID, OOM_TEXT };

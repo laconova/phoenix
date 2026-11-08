@@ -21,7 +21,7 @@ function flatten(messages) {
 // Anchored to the real shapes only: Node's own spawn failure ("Claude CLI: spawn <cmd> ENOENT ...") or the shell's missing-command text.
 // An ENOENT somewhere inside a CLI's own stderr ("Claude CLI exit 1: ... ENOENT ...") is a normal failure and keeps its kind.
 const CLI_MISSING = /^Claude CLI: spawn \S+ ENOENT|is not recognized as an internal or external command|command not found/i;
-const CLI_MISSING_MSG = 'Claude CLI not found — install Claude Code (see README) or pick another brain in Settings → General → Seats';
+const CLI_MISSING_MSG = 'Claude CLI not found — install Claude Code (see README) or pick another brain in Settings → Brains';
 
 // A missing / expired login: the CLI prints the reason (usually to stdout) and exits 1. Matched against the retained reason text only.
 const CLI_LOGIN = /oauth|session expired|not logged in|please run \/login|invalid api key|authentication/i;

@@ -135,8 +135,9 @@ TOOLS:
 - blender_run     runs Python in Blender. INPUT: {"code": "python as single string, \\n for newlines"}
 - unreal_run      runs Python in a RUNNING Unreal Editor (separate app from Blender — this does NOT touch the Blender scene). Use for Unreal-side work: querying assets, spawning/inspecting actors, taking a viewport screenshot. INPUT: {"code": "python as single string, \\n for newlines"}. NOTE: Unreal writes screenshots at the END of the frame, so take the shot in one call and collect the file in the NEXT one — checking os.path.exists() in the same call always reports False.
 - unreal_to_blender is the OTHER direction: it pulls an existing Unreal asset back into Blender. INPUT: {"asset": "/Game/MHExport/spudermin_Body", "refresh": true (optional — re-export instead of using the cached GLB), "export_only": true (optional — write the GLB and stop, do not touch Blender)}. Works on StaticMesh, SkeletalMesh and AnimSequence; a SkeletalMesh arrives with its armature, vertex groups and ARMATURE modifier intact. Two things it reports and you should relay: a material named WorldGridMaterial means the SOURCE asset had an empty material slot and the grey checker was substituted — the real look did NOT travel; and materials with no metallicFactor are corrected to 0 on the way in, because glTF's default for the missing key is 1.0 (fully metal) and that is almost never what the asset meant. Assets whose metallic comes from a TEXTURE are left alone.
-- unreal_to_brush goes one step further than unreal_to_blender: it fetches the Unreal asset into Blender and saves it into the BRUSH LIBRARY, so it can be placed anywhere afterwards. INPUT: {"asset": "/Game/Props/SM_Crate", "name": "crate" (optional — defaults to the asset name), "category": "item" (optional), "force": true (optional — overwrite an existing brush of that name), "keep_in_blender": true (optional)}. REFUSES a rigged asset on purpose: a brush holds meshes only, so an armature would be dropped silently — rigged characters belong in the Human tab (mixamorig) or the Custom-Rig tab. By default the imported objects are removed from Blender again AFTER the brush is confirmed in the registry.
-- character_to_unreal carries a RIGGED character from the Human tab into Unreal as SkeletalMeshes with their skeleton — the counterpart to brush_to_unreal, which cannot do this because a brush is meshes only. INPUT: {"rig": "Human.rig" (optional — omitted takes the first mixamorig armature in the scene), "name": "my_char" (optional), "unreal_path": "/Game/PhoenixCharacters" (optional), "with_animation": true (optional)}. Two things worth relaying: characters built in the Human tab are HIDDEN (staged) and are unhidden for the export and re-hidden afterwards; and every import creates its OWN skeleton asset, so several characters imported this way do not share an animation library until their skeletons are merged. For animation work FBX is the right carrier, not glTF — with_animation is preview-grade.
+- unreal_to_brush goes one step further than unreal_to_blender: it fetches the Unreal asset into Blender and saves it into the BRUSH LIBRARY, so it can be placed anywhere afterwards. INPUT: {"asset": "/Game/Props/SM_Crate", "name": "crate" (optional — defaults to the asset name), "category": "item" (optional), "force": true (optional — overwrite an existing brush of that name), "keep_in_blender": true (optional)}. REFUSES a rigged asset on purpose: a brush holds meshes only, so an armature would be dropped silently — rigged characters belong in Characters ▸ MakeHuman (mixamorig) or Characters ▸ Custom rig. By default the imported objects are removed from Blender again AFTER the brush is confirmed in the registry.
+- character_to_unreal carries a RIGGED character from Characters ▸ MakeHuman into Unreal as SkeletalMeshes with their skeleton — the counterpart to brush_to_unreal, which cannot do this because a brush is meshes only. INPUT: {"rig": "Human.rig" (optional — omitted takes the first mixamorig armature in the scene), "name": "my_char" (optional), "unreal_path": "/Game/PhoenixCharacters" (optional), "with_animation": true (optional)}. Two things worth relaying: characters built in Characters ▸ MakeHuman are HIDDEN (staged) and are unhidden for the export and re-hidden afterwards; and every import creates its OWN skeleton asset, so several characters imported this way do not share an animation library until their skeletons are merged. For animation work FBX is the right carrier, not glTF — with_animation is preview-grade.
+- asset_to_unreal sends a staged GLB to Unreal. INPUT: {"category": "furniture", "name": "chair.glb"}. Imported asset packages are saved; the level is not saved.
 - brush_to_unreal carries a brush from the library into Unreal as a placed ACTOR TREE (hierarchy and relative transforms intact), not loose meshes. Blender is used only the first time per brush; afterwards a cached GLB is imported directly, so this works with Blender closed. INPUT: {"name": "slug", "unreal_path": "/Game/PhoenixBrushes" (optional), "refresh": true (optional — rebuild the cached GLB), "keep_in_blender": true (optional)}. By default the brush is removed from the Blender scene again AFTER the export is verified — never before, so a failed export cannot cost the placed objects. Reports how many parameters each imported material carries; a material with 0 renders black and the call fails rather than shipping it.
 - inspect_unreal   renders the Unreal level AND LOOKS AT IT — returns a description written by a vision model that actually saw the image, not a file path. INPUT: {"focus": "ActorLabel" (optional — frames that actor and its children automatically), "question": "what to check" (optional), "mode": "camera" (default) | "viewport", "width": 1280, "height": 720}. The camera route works no matter which window is in focus but carries NO post-processing, so emissive materials do not glow in it — judge placement/material/breakage from it, not final looks. "viewport" is the real editor view including bloom and FAILS with a clear error unless the Unreal window is in the foreground. If this tool returns an error, or if Unreal vision is switched off, you have NOT seen the level: say so plainly and never describe its contents from memory or inference.
 - read_state      reads session state: sceneObjects (what was in the Blender scene at the last sync — refreshed by imports, by an explicit refresh, and by the optional scene-sync poller if it is running; treat it as possibly stale and verify with blender_run when it matters), stagedFiles (GLB FILES on disk in staging/, ready to import), lastCompletedTask (historical — the last generation that finished this session; context only, NEVER a command to re-run), sceneUpdatedAt. INPUT: {}
@@ -150,11 +151,11 @@ TOOLS:
 - use_brush       places a brush from the library into the scene at optional coordinates. INPUT: {"name": "slug", "x": 0, "y": 0, "z": 0, "instance_name": "optional"}
 - make_human      creates a parametric MakeHuman character directly in the Blender scene (MPFB2), with a skin material + body parts. Body sliders are 0..1, optional (omit = 0.5 neutral). A skin is auto-matched to gender/age/race; eyes+teeth+eyebrows+eyelashes are ON by default. INPUT: {"gender": 0=female..1=male, "age": 0=young..1=old, "muscle": 0..1, "weight": 0..1, "height": 0=short..1=tall, "proportions": 0..1, "cupsize": 0..1, "firmness": 0..1, "race": {"asian":0..1,"caucasian":0..1,"african":0..1}, "rig": false|"default"|"mixamo" (add a skeleton; use "mixamo" if you will animate it via animate_human), "name": "optional", "skin": false (procedural, no assets) | "substr" (pick a skin asset by name), "eyes"/"teeth"/"eyebrows"/"eyelashes": true|false, "eyeColor": "brown|blue|green|grey|...", "hair": true (default style) | "short01|long01|afro01|bob01|ponytail01|braid01|...", "clothes": "male_casualsuit01" or ["...","..."], "targets": {"nose/nose-scale-horiz-more": 0.7, ...} (MakeHuman detail targets 0..1), "staged": true (build hidden in a staging collection for the tab's Preview & Place flow instead of dropping it visibly into the scene)}
 - place_human     commits the currently staged human (from a make_human call with staged:true) into the scene at the origin, visible. INPUT: {}
-- animate_human    applies a Mixamo FBX animation to a MakeHuman character that was built with rig:"mixamo". Retargets + bakes the animation onto the character (source rig removed), sets the scene frame range. The FBX must already be in the animations/ folder (dropped via the Human tab). INPUT: {"fbx": "Low Crawl.fbx" (filename in animations/), "character": "optional target name — defaults to the mixamo-rigged character in the scene"}
+- animate_human    applies a Mixamo FBX animation to a MakeHuman character that was built with rig:"mixamo". Retargets + bakes the animation onto the character (source rig removed), sets the scene frame range. The FBX must already be in the animations/ folder (dropped via Characters ▸ MakeHuman). INPUT: {"fbx": "Low Crawl.fbx" (filename in animations/), "character": "optional target name — defaults to the mixamo-rigged character in the scene"}
 - hy_motion       generates an animation FROM A TEXT DESCRIPTION (HY-Motion in ComfyUI) and applies it to a rig:"mixamo" character — use this when the user describes a motion that is not already an FBX in animations/ ("make him walk in a circle and sit down"). Takes ~230s for 6s of motion; the clip is saved in animations/ for reuse. INPUT: {"prompt": "a person walks forward and looks around" (English, describe the MOTION not the character), "duration": 6 (seconds, 1-12), "seed": optional int for a repeatable result, "apply": true (set false to only generate), "character": "optional target name"}
 - save_animation   saves the animation currently ON a rig:"mixamo" character (hand-keyframed, or a built sequence) as a reusable FBX clip in animations/, so it can be re-applied and sequenced. Use when the user asks to save/export/keep the current animation. INPUT: {"name": "my_clip" (filename to save under), "character": "optional source name — defaults to the mixamo-rigged character in the scene"}
 - sequence_animations  chains several Mixamo FBX clips onto a rig:"mixamo" character as blended NLA strips. Each clip is retargeted WITH its own real root motion and offset so it starts exactly where the previous clip stood at the seam — no snap-back, no foot sliding. Use append:true to add clips to the END of the existing sequence instead of rebuilding. INPUT: {"fbxs": ["Idle.fbx","Walking.fbx",...] (ordered, from animations/), "blend": 8 (crossfade frames), "speed": 0 (OPTIONAL extra forward drift in metres/frame — leave at 0 for normal clips; only genuine Mixamo "In Place" clips need a value), "append": false, "character": "optional target"}
-- inspect_render  renders the CURRENT Blender scene (EEVEE, non-destructive) and returns a vision verdict (PASS/FAIL + what is visibly wrong). Use it to SEE a result instead of guessing: after a visual change (spawn, animation, mesh/rig edit, placement) to confirm it actually looks right, and BEFORE claiming anything visual is fixed. INPUT: {} or {"question": "specific thing to check, e.g. is the deer head attached and undamaged"}
+- inspect_render  renders the CURRENT Blender scene (EEVEE, non-destructive) and returns a vision verdict (PASS/FAIL + what is visibly wrong). Use it to SEE a result instead of guessing: after a visual change (spawn, animation, mesh/rig edit, placement) to confirm it actually looks right, and BEFORE claiming anything visual is fixed. INPUT: {} or {"question": "specific thing to check, e.g. is the deer head attached and undamaged"}. It looks at an EEVEE preview of the current scene (the scene's own aspect), not at a file; to judge an image a blender_run saved, or one under output/, pass {"path": "<saved image>"} instead.
 - remesh_asset   rebuilds the topology of a STAGED GLB through Meshy (PAID cloud: it UPLOADS the mesh to Meshy and spends credits, about 5 per remesh) and stages the result as a NEW file next to the original (the original stays; textures are re-baked; Meshy normalises the size). Needs the Settings opt-in and runs in Auto only — in Ask mode tell the user to use the Library's "Remesh via Meshy…" button instead. INPUT: {"name": "filename.glb", "category": "optional", "topology": "quad|triangle", "target_polycount": 20000}. The result is NOT in the scene — import_asset next.
 
 WORKFLOW RULES:
@@ -276,11 +277,11 @@ function saveState(state) {
 
 const LIBRARY_LABELS_FILE = path.join(__dirname, 'library-labels.json');
 function loadLibraryLabels() {
-  try { const o = JSON.parse(fs.readFileSync(LIBRARY_LABELS_FILE, 'utf8')); if (!o.assets) o.assets = {}; return o; }
+  try { const o = JSON.parse(fs.readFileSync(process.env.PHOENIX_LIBRARY_LABELS_FILE || LIBRARY_LABELS_FILE, 'utf8')); if (!o.assets) o.assets = {}; return o; }
   catch { return { assets: {} }; }
 }
 function saveLibraryLabels(obj) {
-  try { fs.writeFileSync(LIBRARY_LABELS_FILE, JSON.stringify(obj, null, 2)); } catch (_) {}
+  try { fs.writeFileSync(process.env.PHOENIX_LIBRARY_LABELS_FILE || LIBRARY_LABELS_FILE, JSON.stringify(obj, null, 2)); } catch (_) {}
 }
 
 // ─── Scene cache (separate file) ────────────────────────────────────────────
@@ -311,13 +312,13 @@ function saveSceneCache(cache) {
 
 // File-based transport — see blender-ipc.js. (Was a 9876 socket; sockets fail
 // cross-process on Windows + Blender 5.1 / Python 3.13. WinError 10035.)
-function callBlender(code) {
-  return blenderIpc.callBlender(code);
+function callBlender(code, opts) {
+  return blenderIpc.callBlender(code, opts);
 }
 
 // ─── Tool implementations ─────────────────────────────────────────────────────
 
-let STAGING_BASE = path.join(__dirname, 'staging');
+let STAGING_BASE = process.env.PHOENIX_STAGING_DIR || path.join(__dirname, 'staging');
 function _setStagingBase(p) { STAGING_BASE = p || path.join(__dirname, 'staging'); }   // test seam (M9): staging writes of the remesh tests go to a temp dir
 
 // ─── Conductor advance result → status string ─────────────────────────────────
@@ -335,7 +336,8 @@ function describeAdvance(adv) {
 }
 
 // Live list of staged GLB FILES on disk (staging/) — single source of truth for "staged".
-function listStagedFiles() {
+function listStagedFiles(opts) {
+  const strict = !!(opts && opts.strict);   // destructive callers (cache cleanup): a real read error throws instead of looking like "nothing staged"
   // Walk the STAGING FOLDER, not just the palette's category list. Filing by palette meant a
   // category removed from the palette took its staged GLBs out of sight with it — still on
   // disk, invisible to list_assets / read_state / import. Deleting such a category is refused
@@ -345,8 +347,8 @@ function listStagedFiles() {
   let dirs = [];
   try {
     dirs = fs.readdirSync(STAGING_BASE, { withFileTypes: true })
-      .filter(d => d.isDirectory()).map(d => d.name);
-  } catch (_) { dirs = []; }
+      .filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name);
+  } catch (e) { if (strict && e && e.code !== 'ENOENT') throw e; dirs = []; }
   for (const cat of categories) if (!dirs.includes(cat)) dirs.push(cat);
 
   const found = [];
@@ -359,7 +361,7 @@ function listStagedFiles() {
       // .GLB case-insensitiv, damit dieselbe Datei zaehlt wie in der Palette-Wache (server.js).
       files = fs.readdirSync(dir).filter(f => f.toLowerCase().endsWith('.glb'))
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-    } catch (_) { continue; }
+    } catch (e) { if (strict && e && e.code !== 'ENOENT' && e.code !== 'ENOTDIR') throw e; continue; }
     for (const f of files) {
       found.push({ name: f, category: cat, path: path.join(dir, f), orphaned: !categories.includes(cat) });
     }
@@ -368,7 +370,7 @@ function listStagedFiles() {
 }
 
 function listBrushesData() {
-  const REG = path.join(__dirname, 'brushes', 'registry.json');
+  const REG = path.join(process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes'), 'registry.json');
   try {
     const reg = JSON.parse(fs.readFileSync(REG, 'utf8'));
     const brushes = reg.brushes || {};
@@ -538,6 +540,7 @@ async function toolUnrealToBrush(input, _state, cfg, opts) {
       beforeBlender: opts && opts.checkpointHook,
       cfg,
     });
+    require('./brush-previews').kick('save');
     return `Brush "${r.slug}" saved from ${r.asset}\n` + r.steps.map(s => '  ' + s).join('\n') +
            `\n  Say "use brush ${r.slug}" to place it.`;
   } catch (e) {
@@ -581,7 +584,7 @@ async function toolBrushPreview(input, _state, cfg, opts) {
            `${r.cached ? 'from cache' : 'exported from Blender'} (${r.bytes} bytes)` + (r.notes || []).map(n => '\n' + n).join('');
   } catch (e) {
     return 'BRUSH_PREVIEW_ERROR: ' + (e.message || String(e)) +
-           (/not responding|IPC/i.test(e.message || '')
+           (/not responding|not answering|IPC/i.test(e.message || '')
              ? '\nThe first preview of a brush needs Blender open with the Phoenix IPC addon; ' +
                'after that it is served from the cache.'
              : '');
@@ -664,11 +667,11 @@ async function toolInspectUnreal(input, _state, cfg) {
 
 // Shared by the real tool and the M2.1 benchmark (which passes its own isolated callBlender):
 // identical result formatting, so a benchmark turn sees exactly what a live turn would.
-async function blenderRunWith(input, call) {
+async function blenderRunWith(input, call, opts) {
   const code = input.code;
   if (!code) return 'ERROR: no code provided';
   try {
-    const result = await call(code);
+    const result = await call(code, opts);
     // Blender MCP returns print() output in result.stdout (not result.output)
     const out = (result.stdout || result.output || '').trim();
     if (result.status === 'error') {
@@ -685,7 +688,7 @@ async function blenderRunWith(input, call) {
 }
 
 async function toolBlenderRun(input, _state, _cfg) {
-  return blenderRunWith(input, callBlender);
+  return blenderRunWith(input, callBlender, { label: 'assistant: blender_run' });
 }
 
 async function toolImportAsset(input, state, cfg, opts) {
@@ -704,7 +707,7 @@ async function toolImportAsset(input, state, cfg, opts) {
 
 async function toolGenerateProp(input, state, cfg) {
   const { description, category } = input;
-  if (!description) return 'ERROR: description required';
+  if (!description) return 'ERROR: Describe what you want to make first, then try again.';
   // One heavy GPU job at a time. generate_prop spawns the FULL headless pipeline (Flux + Trellis) as
   // a child that never registers in the jobs slot, so without this a chat prop could start while a
   // detached image/mesh/text→motion job is still generating on the one shared GPU → the measured OOM
@@ -764,7 +767,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
   // A literal prompt (the Approve/Edit path) skips the metaprompter and goes straight to image.
   // This path is ALWAYS synchronous — it's fast and stops before FLUX.
   if (gates.prompt === true && !hasLiteral) {
-    if (!description) return 'ERROR: description required';
+    if (!description) return 'ERROR: Describe what you want to make first, then try again.';
     const pctx = { stage: 'prompt', desc: description, cat: category || undefined };
     dbg.event('progress', { label: 'generate_prompt', description, category: category || 'auto' });
 
@@ -786,7 +789,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
   }
 
   // ── Image path (literal prompt, or prompt gate off) ──
-  if (!description && !hasLiteral) return 'ERROR: description required';
+  if (!description && !hasLiteral) return 'ERROR: Describe what you want to make first, then try again.';
 
   const ctx = {
     stage:     'prompt',
@@ -850,7 +853,7 @@ async function toolGenerateImage(input, state, cfg, opts = {}) {
       const meshGateOff = !(cfg.gates && cfg.gates.mesh === true);
       let status;
       if (meshGateOff && ctx.glb) {
-        await lock.acquire();
+        await lock.acquire('an import into Blender');
         try {
           const rs = opts && opts.runState && opts.runState.stopped;
           if (rs) {
@@ -964,7 +967,7 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
       const meshGateOff = !(cfg.gates && cfg.gates.mesh === true);
       let status;
       if (meshGateOff && ctx.glb) {
-        await lock.acquire();
+        await lock.acquire('an import into Blender');
         try {
           const rs = opts && opts.runState && opts.runState.stopped;
           if (rs) {
@@ -1009,14 +1012,14 @@ async function toolImageTo3d(input, state, cfg, opts = {}) {
   return describeAdvance(adv);
 }
 
-const BRUSHES_REGISTRY = path.join(__dirname, 'brushes', 'registry.json');
+const BRUSHES_REGISTRY = path.join(process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes'), 'registry.json');
 
 // registry.json used to record the absolute path of the machine that saved the brush, which
 // resolves to nothing anywhere else. save_brush.js now writes paths relative to brushes/lib;
 // older absolute entries are still resolved here so existing registries keep working.
 function resolveBrushLib(lib) {
   if (!lib) return null;
-  const libDir = path.join(__dirname, 'brushes', 'lib');
+  const libDir = path.join(process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes'), 'lib');
   const m = String(lib).replace(/\\/g, '/').match(/(?:^|\/)brushes\/lib\/(.+)$/);
   return path.join(libDir, m ? m[1] : String(lib).replace(/\\/g, '/'));
 }
@@ -1072,6 +1075,7 @@ async function toolSaveAsBrush(input, _state, _cfg) {
 
   if (r.error)    return `ERROR: ${r.error.message}`;
   if (r.code !== 0) return `ERROR (exit ${r.code}): ${(r.stderr || r.stdout || '').trim()}`;
+  require('./brush-previews').kick('save');
   return (r.stdout || '').trim() || 'Brush saved.';
 }
 
@@ -1114,7 +1118,7 @@ async function toolApplyMaterial(input) {
     "else:\n    for _o in _sel:\n        if _o.data.materials:\n            _o.data.materials[0] = _m\n        else:\n            _o.data.materials.append(_m)\n    print('APPLIED:' + _n + ' to ' + str(len(_sel)) + ' object(s)')",
   ].join('\n');
   try {
-    const r = await callBlender(code);
+    const r = await callBlender(code, { label: 'apply material ' + name });
     const o = (r.stdout || r.output || '').trim();
     if (r.status === 'error') return 'ERROR: ' + (r.message || o);
     if (/error/i.test(o)) return o.replace(/^ERROR:\s*/i, 'ERROR: ');
@@ -1137,13 +1141,21 @@ async function toolRenameAsset(input) {
 async function toolRenameBrush(input) {
   const { slug, display } = input || {};
   if (!slug || !display) return 'ERROR: slug and display required';
-  const REG = path.join(__dirname, 'brushes', 'registry.json');
+  const REG = path.join(process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes'), 'registry.json');
   try {
-    const reg = JSON.parse(fs.readFileSync(REG, 'utf8'));
-    if (!reg.brushes || !reg.brushes[slug]) return 'ERROR: brush not found: ' + slug;
-    reg.brushes[slug].display = String(display).trim();
-    writeFileAtomic(REG, JSON.stringify(reg, null, 2));
-    return 'Renamed brush to "' + reg.brushes[slug].display + '"';
+    // the read-modify-write of the registry runs under the brush lock (a running save would otherwise lose or overwrite the rename); the body is sync
+    const BL = require('./brush-lock');
+    const res = BL.withLock(() => {
+      const reg = JSON.parse(fs.readFileSync(REG, 'utf8'));
+      if (!reg.brushes || !reg.brushes[slug]) return { err: 'brush not found: ' + slug };
+      reg.brushes[slug].display = String(display).trim();
+      writeFileAtomic(REG, JSON.stringify(reg, null, 2));
+      return { display: reg.brushes[slug].display };
+    });
+    if (res.ok === false) return 'ERROR: ' + BL.SAVE_RUNNING;
+    if (res.err) return 'ERROR: ' + res.err;
+    require('./brush-previews').kick('rename');
+    return 'Renamed brush to "' + res.display + '"';
   } catch (e) { return 'ERROR: ' + e.message; }
 }
 
@@ -1177,20 +1189,25 @@ function assetFaces(category, name) {
   finally { if (fd !== null) { try { fs.closeSync(fd); } catch (_) {} } }
 }
 
-async function toolDeleteAsset(input) {
-  const { category, name } = input || {};
-  const CATS = Object.keys(palette.loadPalette().categories);
-  if (!category || !name || !CATS.includes(category)) return 'ERROR: valid category and name required';
-  const safe = path.basename(name);
-  if (safe !== name || !safe.endsWith('.glb')) return 'ERROR: invalid asset name';
-  const abs = path.join(STAGING_BASE, category, safe);
+async function toolAssetToUnreal(input, _state, cfg) {
   try {
-    if (!fs.existsSync(abs)) return 'ERROR: file not found';
-    fs.unlinkSync(abs);
-    const labels = loadLibraryLabels();
-    if (labels.assets) { delete labels.assets[category + '/' + safe]; saveLibraryLabels(labels); }
-    return 'Deleted ' + category + '/' + safe;
-  } catch (e) { return 'ERROR: ' + e.message; }
+    const hit = listStagedFiles().find(f => f.category === input.category && f.name === input.name);
+    if (!hit) throw new Error('Asset not found in staging');
+    const mod = require('./brush-to-unreal');
+    const slug = (hit.category + '_' + path.basename(hit.name, path.extname(hit.name))).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!slug) throw new Error('Asset name has no usable Unreal folder name');
+    const destPath = '/Game/PhoenixAssets/' + slug;
+    const imported = await mod.importIntoUnreal(hit.path, destPath, cfg);
+    if (!imported.count) throw new Error('Unreal import is empty');
+    if (imported.flatMaterials.length) throw new Error('Materials have no parameters: ' + imported.flatMaterials.join(', '));
+    const saved = await mod.saveImportedAssets(imported.assets, cfg);
+    return 'Imported into ' + destPath + ': ' + imported.count + ' assets; saved ' + saved.saved + ' packages' + (saved.failed.length ? '; save failed: ' + saved.failed.join(', ') : '') + '; level NOT saved';
+  } catch (e) { return 'ASSET_TO_UNREAL_ERROR: ' + e.message; }
+}
+
+async function toolDeleteAsset(input) {
+  const r = require('./library-trash').trashAsset(input && input.category, input && input.name);
+  return r.ok ? 'Moved asset to trash' : 'ERROR: ' + r.error;
 }
 
 // ─── remesh_asset (v1.9 M9) — Meshy remesh, paid cloud, opt-in ────────────────────────────────────────────────────────
@@ -1215,10 +1232,10 @@ async function toolRemeshAsset(input, _state, cfg, opts) {
   opts = opts || {};
   if (opts.remote === true) return 'REJECTED: Only on the laptop: paid jobs (Meshy, fal.ai).';   // LC2i: a turn that came from a paired phone (POST /chat sets it) - Auto mode does not unlock a paid job for the phone
   const rc = (cfg && cfg.remesh && typeof cfg.remesh === 'object') ? cfg.remesh : {};
-  if (rc.enabled !== true) return 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Connections';
+  if (rc.enabled !== true) return 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Cloud & keys';
   const secrets = require('./providers/secrets');
   const key = secrets.getKey('meshy');
-  if (!key) return 'REJECTED: no Meshy API key — add it in Settings → Connections';
+  if (!key) return 'REJECTED: no Meshy API key — add it in Settings → Cloud & keys';
   // D1 (Amendment 1): default-deny. Allowed: (a) the Library button (/action passes its own marker uiButton:true), (b) MCP (/mcp/call: mode:'auto',
   // runState without a mode), (c) a chat turn only when runTurn's resolved runState.mode === 'auto'. `background` plays NO role (/chat sets it too).
   const rsMode = opts.runState && opts.runState.mode;
@@ -1249,7 +1266,7 @@ async function toolRemeshAsset(input, _state, cfg, opts) {
       if (!st0.isFile()) return 'ERROR: ' + src.name + ' is not a file — nothing was sent';
       if (st0.size > limitMB * 1048576) {
         const mb = st0.size / 1048576;
-        return 'ERROR: ' + src.name + ' is ' + Number(mb.toFixed(mb < 1 ? 3 : 1)) + ' MB — larger than the remesh upload limit (' + limitMB + ' MB, Settings → Connections)';
+        return 'ERROR: ' + src.name + ' is ' + Number(mb.toFixed(mb < 1 ? 3 : 1)) + ' MB — larger than the remesh upload limit (' + limitMB + ' MB, Settings → Cloud & keys)';
       }
       fileBytes = fs.readFileSync(src.path);
       resumeKey = crypto.createHash('sha256').update(fileBytes).digest('hex') + '|' + String(topology) + '|' + String(target);
@@ -1366,7 +1383,7 @@ async function toolRemeshAsset(input, _state, cfg, opts) {
 }
 
 // ─── make_video (v1.10 V3) — fal.ai Kling 3 Pro image-to-video, paid cloud, opt-in ───────────────────────────────────────
-// Same safety shape as remesh_asset: opt-in (Settings → Connections), key, default-deny, ONE job at a time, the submission INTENT is on disk before
+// Same safety shape as remesh_asset: opt-in (Settings → Cloud & keys), key, default-deny, ONE job at a time, the submission INTENT is on disk before
 // the request leaves (fail closed), the request id is recorded on submit and removed only after the mp4 is on disk, an unresolved intent holds 15 min,
 // an identical retry with a recorded request id polls that request instead of submitting again.
 const videoStore = require('./video-tasks');
@@ -1418,8 +1435,8 @@ function scrubFalKey(text) {
 function videoGate(cfg, opts) {
   opts = opts || {};
   const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
-  if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Connections';
-  if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Connections';
+  if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Cloud & keys';
+  if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Cloud & keys';
   if (opts.uiButton !== true) return "REJECTED: video runs only from the Storyboard's Make video button (it spends fal credit and needs your confirmation of the cost).";
   if (videoInFlight && opts.ignoreBusy !== true) return 'BUSY: a video is already rendering';
   return '';
@@ -1543,8 +1560,8 @@ async function makeVideo(job, cfg, opts) {
 async function toolMakeVideo(input, _state, cfg, _opts) {
   const fc = (cfg && cfg.video && cfg.video.fal && typeof cfg.video.fal === 'object') ? cfg.video.fal : {};
   try {
-    if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Connections';
-    if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Connections';
+    if (fc.enabled !== true) return 'REJECTED: video uploads keyframes to fal.ai (paid) — enable it in Settings → Cloud & keys';
+    if (!require('./providers/secrets').getKey('fal')) return 'REJECTED: no fal.ai API key — add it in Settings → Cloud & keys';
     const fal = require('./providers/fal-video');
     const job = input && input.job;
     const pe = fal.checkPaths(job, { outputDir: path.join(__dirname, 'output'), cwd: __dirname });
@@ -1556,32 +1573,8 @@ async function toolMakeVideo(input, _state, cfg, _opts) {
 }
 
 async function toolDeleteBrush(input) {
-  const slug = input && input.slug;
-  if (!slug) return 'ERROR: slug required';
-  const REG = path.join(__dirname, 'brushes', 'registry.json');
-  const PY  = path.join(__dirname, 'brushes', 'phoenix_brushes.py');
-  try {
-    const reg = JSON.parse(fs.readFileSync(REG, 'utf8'));
-    const b = reg.brushes && reg.brushes[slug];
-    if (!b) return 'ERROR: brush not found: ' + slug;
-    if (b.type === 'phoenix') {
-      const libFile = resolveBrushLib(b.lib);
-      if (libFile) { try { if (fs.existsSync(libFile)) fs.unlinkSync(libFile); } catch (_) {} }
-      try {
-        let src = fs.readFileSync(PY, 'utf8');
-        const marker = '\ndef add_' + slug + '(';
-        const start = src.indexOf(marker);
-        if (start >= 0) {
-          const nextDef = src.indexOf('\ndef ', start + 1);
-          src = src.slice(0, start) + (nextDef >= 0 ? src.slice(nextDef) : '');
-          writeFileAtomic(PY, src);
-        }
-      } catch (_) {}
-    }
-    delete reg.brushes[slug];
-    writeFileAtomic(REG, JSON.stringify(reg, null, 2));
-    return 'Deleted brush ' + slug;
-  } catch (e) { return 'ERROR: ' + e.message; }
+  const r = require('./library-trash').trashBrush(input && input.slug);
+  return r.ok ? 'Moved brush to trash' : 'ERROR: ' + r.error;
 }
 
 async function toolListPalette() {
@@ -1686,7 +1679,7 @@ async function runHyMotion(inp, cfg, takeLock, runState, cpHook) {
                (gen.note ? ` Note: ${gen.note}.` : '');
   if (inp.apply === false) return made + ' Not applied (apply:false).';
   // Applying DOES touch Blender — seconds, not minutes.
-  if (takeLock) await lock.acquire();
+  if (takeLock) await lock.acquire('applying a motion');
   try {
     // M4: an Auto run that was stopped by the brake while this job was generating must not touch the scene afterwards.
     if (runState && runState.stopped) {
@@ -1711,7 +1704,7 @@ async function runHyMotion(inp, cfg, takeLock, runState, cpHook) {
 //            and the job takes it itself only for the seconds-long apply step.
 //            ⭐ This cannot reproduce the old SELF-DEADLOCK — that one happened because /chat was
 //            AWAITING this call while holding the lock, so the waiter could never be resolved. A
-//            detached job is not awaited by anyone: if it reaches lock.acquire() first, it simply
+//            detached job is not awaited by anyone: if it reaches the lock first, it simply
 //            waits for a lock that WILL be released.
 //            The outcome travels back via opts.onNote, because a job's return value reaches only the
 //            debug log — without it the user would never learn how the four minutes ended.
@@ -1743,27 +1736,77 @@ async function toolHyMotion(input, _state, cfg, opts = {}) {
   return runHyMotion(inp, cfg, !opts.holdsLock, opts.runState, opts.checkpointHook);
 }
 
+// T8-12: the image files a tool result says were written. Per line: absolute Windows or POSIX paths (spaces allowed, quoted or not)
+// ending in .png|.jpg|.jpeg|.webp; kept when the file exists, is non-empty and is not older than the step (mtime >= sinceMs - 1000).
+function savedRendersFrom(text, sinceMs) {
+  const out = [], seen = new Set();
+  const isFresh = (p) => { try { const st = fs.statSync(p); return st.isFile() && st.size > 0 && st.mtimeMs >= Number(sinceMs || 0) - 1000; } catch (_) { return false; } };
+  const re = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![^\s"'(\[=:,])\/)[^\r\n"'<>|*?]*?\.(?:png|jpe?g|webp)(?![\w])/gi;
+  for (const line of String(text == null ? '' : text).split(/\r?\n/)) {
+    for (const m of line.matchAll(re)) {
+      const cand = m[0], tries = [cand];
+      // a POSIX match may have swallowed words before the real path: try the suffixes that start at a later "/" or "X:\"
+      for (const sm of cand.matchAll(/\s+(?=\/|[A-Za-z]:[\\/])/g)) tries.push(cand.slice(sm.index + sm[0].length));
+      for (const c of tries) {
+        if (!path.isAbsolute(c) || !isFresh(c)) continue;
+        const key = path.resolve(c).toLowerCase();
+        if (!seen.has(key)) { seen.add(key); out.push(c); }
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 // inspect_render — render the CURRENT scene and get a vision verdict, so the
 // orchestrator can SEE a result instead of guessing (the gap behind blind
 // "fixed ✓" claims). Non-destructive: render_check saves/restores the user's
 // render settings. The render lands in output/render-check.png; server.js
 // surfaces it in the Image tab (mtime-guarded broadcast, like make_human).
-async function toolInspectRender(input, _state, cfg) {
+async function toolInspectRender(input, _state, cfg, opts) {
   const q = (input && typeof input.question === 'string' && input.question.trim())
     ? input.question.trim() : undefined;
   const outAbs = path.join(__dirname, 'output', 'render-check.png');
+  const runState = (opts && opts.runState) || null;
+  // T7-6: {"path": "<saved image>"} judges a file that already exists (under output/, or saved by a blender_run of this turn)
+  if (input && typeof input.path === 'string' && input.path.trim()) {
+    const abs = path.resolve(__dirname, input.path.trim());
+    if (!/\.(png|jpe?g|webp)$/i.test(abs)) return 'inspect_render could not complete: ' + path.basename(abs) + ' is not an image (png, jpg, jpeg or webp).';
+    let isFile = false; try { isFile = fs.statSync(abs).isFile(); } catch (_) {}
+    if (!isFile) return 'inspect_render could not complete: ' + path.basename(abs) + ' does not exist.';
+    const norm = (p) => path.resolve(p).toLowerCase();
+    const real = (p) => { try { return fs.realpathSync(p).toLowerCase(); } catch (_) { return null; } };   // null = cannot resolve
+    const realAbs = real(abs);
+    if (!realAbs) return 'inspect_render could not complete: ' + path.basename(abs) + ' does not exist.';
+    const realOut = real(path.resolve(__dirname, 'output'));
+    const inOut = !!realOut && realAbs.startsWith(realOut + path.sep.toLowerCase());
+    const known = Array.isArray(runState && runState.savedRenders) && runState.savedRenders.some((p) => { const r = real(p); return r !== null && r === realAbs; });
+    if (!(inOut || known)) return 'inspect_render could not complete: ' + path.basename(abs) + ' is neither under output/ nor a render saved in this turn.';
+    const noV = visionGuard(cfg);
+    if (noV) return 'inspect_render could not complete: ' + noV;
+    try {
+      const r = await renderCheck.judgeFile({ claudeCli }, { imageAbs: realAbs ? fs.realpathSync(abs) : abs, question: q, cfg, visionTimeout: 150000 });
+      const sr0 = runState && runState.savedRender;
+      if (sr0 && [sr0.abs, sr0.shown].some((c) => c && ((real(c) || norm(c)) === realAbs || norm(c) === norm(abs)))) sr0.looked = true;
+      return r.verdict + '\n\nLooked at: saved render ' + path.basename(abs);
+    } catch (e) {
+      return INSPECT_VISION_DOWN + ': ' + (e.message || String(e)) + ' — check the vision seat in Settings\n\nLooked at: saved render ' + path.basename(abs);
+    }
+  }
   const noVision = visionGuard(cfg);
   if (noVision) return 'inspect_render could not complete: ' + noVision;
+  const op = await require('./levels').readOpen({cfg});
+  const stageLine = require('./levels').renderStageLine(op && op.kind ? op.stage : null);
   try {
     const r = await renderCheck.checkRender({ blenderIpc, claudeCli }, { outAbs, question: q, cfg });
-    return r.verdict + '\n\n(frame ' + r.frame + ')  → output/render-check.png';
+    return r.verdict + '\n\n(frame ' + r.frame + ')  → output/render-check.png' + (stageLine ? '\n' + stageLine : '') + '\nLooked at: EEVEE preview of the current scene, not the saved render';
   } catch (e) {
     // M6.1 Part E: the render itself worked and only the vision call failed → say so (the Blender hint would send the user
     // to the wrong place). The text deliberately does NOT start with "inspect_render could not complete": the render exists,
     // so this is neither a failure nor "no evidence" — the caller still has the image, just no verdict.
     if (e && e.visionFailed) {
       return INSPECT_VISION_DOWN + ': ' + (e.message || String(e)) + ' — check the vision seat in Settings' +
-        '\n\n(frame ' + e.frame + ')  → output/render-check.png';
+        '\n\n(frame ' + e.frame + ')  → output/render-check.png' + (stageLine ? '\n' + stageLine : '');
     }
     return 'inspect_render could not complete: ' + (e.message || String(e)) +
       ' — is Blender open with the Phoenix IPC addon enabled?';
@@ -1831,6 +1874,7 @@ async function toolGenerateFromRefs(input, state, cfg, opts = {}) {
     width: num(input.width), height: num(input.height), denoise: num(input.denoise), seed: num(input.seed),
     workflowId: input.workflowId || undefined, category,
     onTick: (s) => { if (s % 15 === 0) dbg.event('progress', { label: 'generate_from_refs', seconds: s }); },
+    ...(opts.signal ? { signal: opts.signal } : {}), ...(opts.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),   // M4: the storyboard keyframe's Stop / deadline
   });
   const tail = `Image from ${r.refs} reference${r.refs === 1 ? '' : 's'} done in ${r.seconds}s (${r.workflowId}, seed ${r.seed}).`;
   const meta = JSON.stringify({ seed: r.seed, workflowId: r.workflowId, seconds: r.seconds, refs: r.refs, width: r.width, height: r.height, denoise: r.denoise, sizeFrom: r.sizeFrom, category: category || null, prompt });
@@ -1885,6 +1929,7 @@ const TOOLS = {
   generate_prop:  toolGenerateProp,
   blender_run:    toolBlenderRun,
   unreal_run:     toolUnrealRun,
+  asset_to_unreal: toolAssetToUnreal,
   brush_to_unreal: toolBrushToUnreal,
   unreal_to_blender: toolUnrealToBlender,
   unreal_to_brush: toolUnrealToBrush,
@@ -1893,11 +1938,11 @@ const TOOLS = {
   inspect_unreal:  toolInspectUnreal,
   list_assets:    toolListAssets,
   read_palette:   toolReadPalette,
-  import_asset:   toolImportAsset,
+  import_asset:   (input, state, cfg, opts) => require('./levels').withRouting(() => toolImportAsset(input, state, cfg, opts), {cfg, label: 'import ' + (input.name || input.path || 'asset')}),
   read_state:     toolReadState,
   list_brushes:   toolListBrushes,
   save_as_brush:  toolSaveAsBrush,
-  use_brush:      toolUseBrush,
+  use_brush:      (input, state, cfg, opts) => require('./levels').withRouting(() => toolUseBrush(input, state, cfg, opts), {cfg, label: 'use brush ' + (input.name || 'brush')}),
   apply_material: toolApplyMaterial,
   rename_asset:   toolRenameAsset,
   remesh_asset:   toolRemeshAsset,
@@ -1912,6 +1957,12 @@ const TOOLS = {
 
 // ─── Claude CLI call ──────────────────────────────────────────────────────────
 
+// S1 T7-7: the orchestrator's chat-step timeout lives on the seat (60..1800 s), default 300 s.
+function stepTimeoutMs(cfg) {
+  const s = cfg && cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.stepTimeoutS;
+  return (Number.isInteger(s) && s >= 60 && s <= 1800) ? s * 1000 : 300000;
+}
+
 function callClaude(messages, cfg, extraSystem, complete) {
   // buildSystemPrompt(), not the startup snapshot — picks up palette categories added since boot
   const base = buildSystemPrompt();
@@ -1921,8 +1972,14 @@ function callClaude(messages, cfg, extraSystem, complete) {
     return Promise.resolve(complete(messages, systemPrompt)).then(r => (r && typeof r === 'object') ? String(r.text || '') : String(r == null ? '' : r));
   }
   // Seat → provider (Claude CLI / local server / OpenAI): see providers/index.js.
-  return providers.complete('orchestrator', cfg, { system: systemPrompt, messages, purpose: 'chat', timeoutMs: 300000 })
-    .then(r => r.text);
+  return providers.complete('orchestrator', cfg, { system: systemPrompt, messages, purpose: 'chat', timeoutMs: stepTimeoutMs(cfg) })
+    .then(r => r.text, e => {
+      if (e && /timed out after/i.test(String(e.message))) {
+        const min = Math.max(1, Math.round(stepTimeoutMs(cfg) / 60000));
+        throw new Error('The model took longer than ' + min + ' min for one step. Raise Step timeout under Settings ▸ Brains, or ask for smaller steps.');
+      }
+      throw e;
+    });
 }
 
 // ─── Tool dispatch parser ─────────────────────────────────────────────────────
@@ -2023,7 +2080,7 @@ function stripToolBlock(text) {
 
 // ─── Render-vision gate ───────────────────────────────────────────────────────
 // Which tool results get an automatic look at the scene. Three modes, set in
-// Settings → Approval gates (cfg.gates.vision):
+// Quick switches → Render vision (cfg.gates.vision):
 //   'off'      never fires; inspect_render stays available on request
 //   'focused'  the expensive/error-prone actions only (default)
 //   'full'     every step that can change what the scene looks like
@@ -2072,9 +2129,10 @@ const DEFERRED_FORCED = ['hy_motion', 'brush_preview', 'brush_to_unreal', 'unrea
 // append to the tool result, or ''. Respects checkpoints.enabled. ctx = { label, turn, history }.
 async function takeForcedCheckpoint(name, cfg, ctx) {
   if (!checkpoints.settings(cfg).enabled) return '';
-  let alive = true;
-  try { alive = (await blenderIpc.probeBlender(cfg, 3000)) === 'reachable'; } catch (_) { alive = false; }
-  if (!alive) return '\n(no checkpoint — Blender did not answer within 3 s)';
+  let probe = 'unreachable';
+  try { probe = await blenderIpc.probeBlender(cfg, 3000); } catch (_) { probe = 'unreachable'; }
+  if (probe === 'busy') return '\n(no checkpoint — Blender is busy with another command)';   // F6.2
+  if (probe !== 'reachable') return '\n(no checkpoint — Blender did not answer within 3 s)';
   const cp = await checkpoints.take(ctx.label || name, { cfg, turn: ctx.turn, history: ctx.history });
   if (cp && cp.ok === false) return '\n⚠ checkpoint failed before ' + name + ': ' + cp.error + ' — this step cannot be rewound.';
   return '';
@@ -2222,7 +2280,15 @@ function gateQuestion(userInput, toolName) {
 // The two halves of runTurn's per-tool block, moved here unchanged: execToolStep = M5 checkpoint → tool;
 // gateStep = the render-vision gate and the artifact broadcasts. Both read the test seams from toolOpts
 // (toolOpts is runTurn's opts + runState, so complete / tools / noVisionGate / onArtifact are all there).
-async function execToolStep(name, input, fn, { state, cfg, turnNo, history, toolOpts }) {
+const GENERATION_TOOLS = new Set(['generate_image', 'generate_prop', 'image_to_3d', 'hy_motion', 'i2i_edit', 'generate_from_refs']);
+// A generation inside a turn says so on the lock (the busy refusals tell a generation from any other holder) for as long as the tool runs.
+// Only the owner of the lock may relabel it (toolOpts.holdsLock); the turn's own label is back in the finally. Chat (runTurn) and MCP (runOneTool) both come through here.
+async function execToolStep(name, input, fn, ctx) {
+  const relabel = !!(ctx.toolOpts && ctx.toolOpts.holdsLock && GENERATION_TOOLS.has(name)), heldAs = relabel ? lock.holder() : null;
+  if (relabel) lock.relabel(lock.GENERATION);
+  try { return await execToolStepInner(name, input, fn, ctx); } finally { if (relabel) lock.relabel(heldAs); }
+}
+async function execToolStepInner(name, input, fn, { state, cfg, turnNo, history, toolOpts }) {
   // M5: a scene-changing tool gets a checkpoint of the open Blender file FIRST — before EVERY VISION_GATE_FULL tool, unless
   // checkpoints.enabled is false or a test seam is set: opts.complete (the benchmark; its headless Blender is throw-away)
   // or opts.tools (an injected tool map). A wrapper around a listed tool still checkpoints.
@@ -2283,8 +2349,10 @@ async function gateStep(name, toolResult, { cfg, userInput, toolOpts, toolStart 
         // source:'inspect' — a diagnostic render must NOT become the i2i edit reference (F3). Covers
         // the automatic vision gate too, which shows its render through this same helper.
         toolOpts.onArtifact({ slot: 'image', source: 'inspect', rel: RENDER_CHECK_REL });
+        return true;
       }
     } catch (_) { /* keine Datei = nichts zu zeigen */ }
+    return false;
   };
 
   let gateNote = '';
@@ -2296,6 +2364,8 @@ async function gateStep(name, toolResult, { cfg, userInput, toolOpts, toolStart 
     stopReason = 'the render check could not look: ' + visionGuard(cfg);
     verdict = 'none';
   } else if (!gateOff && !noEvidence && visionGateFires(cfg, name)) {
+    const gateOpen = await require('./levels').readOpen({cfg});
+    const gateStageLine = require('./levels').renderStageLine(gateOpen && gateOpen.kind ? gateOpen.stage : null);
     const gateStart = Date.now();
     dbg.event('progress', { label: 'vision-gate', name, phase: 'start' });
     try {
@@ -2311,6 +2381,7 @@ async function gateStep(name, toolResult, { cfg, userInput, toolOpts, toolStart 
       gateNote = '\n\nRENDER GATE (automatic — the render was taken FOR you, you did not call it):\n' +
                  r.verdict + '\n(frame ' + r.frame + ')  → ' + RENDER_CHECK_REL + '\n' +
                  'This is evidence about the CURRENT scene. Do NOT claim a visual result the render contradicts.';
+      if (gateStageLine) gateNote += '\n' + require('./levels').renderStageLine(gateOpen.stage);
       broadcastIfFresh(gateStart);
       stopReason = autoStopReason(r.verdict);
       verdict = verdictOf(r.verdict);
@@ -2318,15 +2389,50 @@ async function gateStep(name, toolResult, { cfg, userInput, toolOpts, toolStart 
     } catch (e) {
       gateNote = '\n\nRENDER GATE: could not look at the scene (' + (e.message || String(e)) +
                  '). Do not assume the result is fine — tell the user you could not verify it visually.';
+      if (e && e.visionFailed && gateStageLine) gateNote += '\n' + gateStageLine;
       verdict = 'none';
       stopReason = 'the render check could not look: ' + (e.message || String(e));
       dbg.event('progress', { label: 'vision-gate', name, phase: 'error' });
     }
   }
+  // T8-12: a blender_run that saved a render shows THAT file (the last one found), not the scene preview.
+  if (!noEvidence && name === 'blender_run') {
+    try {
+      const found = savedRendersFrom(toolResult, toolStart);
+      if (found.length) {
+        const rs = toolOpts.runState;
+        if (rs && typeof rs === 'object') {
+          if (!Array.isArray(rs.savedRenders)) rs.savedRenders = [];
+          for (const f of found) if (!rs.savedRenders.includes(f)) rs.savedRenders.push(f);
+        }
+        const abs = found[found.length - 1], outRoot = path.resolve(__dirname, 'output') + path.sep;
+        let shown = null;
+        if (path.resolve(abs).toLowerCase().startsWith(outRoot.toLowerCase())) shown = abs;
+        else {
+          try {
+            const dir = process.env.PHOENIX_RENDERS_DIR || path.join(__dirname, 'output', 'renders');
+            fs.mkdirSync(dir, { recursive: true });
+            shown = path.join(dir, Date.now() + '_' + path.basename(abs));
+            fs.copyFileSync(abs, shown);
+          } catch (_) { shown = null; }   // a copy failure adds nothing and never fails the step
+        }
+        if (shown) {
+          const inTree = path.resolve(shown).toLowerCase().startsWith((path.resolve(__dirname) + path.sep).toLowerCase());
+          const rel = (inTree ? path.relative(__dirname, shown) : shown).replace(/\\/g, '/');
+          if (typeof toolOpts.onArtifact === 'function') toolOpts.onArtifact({ slot: 'image', source: 'inspect', rel });
+          if (rs && typeof rs === 'object') {
+            rs.savedRender = { abs, shown, name: path.basename(abs), rel, looked: false };
+            if (!rs.savedRenders.includes(shown)) rs.savedRenders.push(shown);
+          }
+        }
+      }
+    } catch (_) { /* the saved-render step never fails the tool step */ }
+  }
   // A model-invoked inspect_render belongs in the Image tab too. The /action route
   // broadcast it, the chat path never did — which is why the render stayed invisible
   // even though it had been taken (live-test finding 2026-07-25).
-  if (!noEvidence && name === 'inspect_render') broadcastIfFresh(toolStart);
+  // Finding 6: this preview now sits on top of a saved render; any later image clears the mark (runTurn wraps onArtifact).
+  if (!noEvidence && name === 'inspect_render' && broadcastIfFresh(toolStart) && toolOpts.runState) toolOpts.runState.previewOnTop = true;
   // Same for the Unreal render — a picture nobody sees is a claim, not evidence. Its own file,
   // so the freshness check cannot pass off a stale Blender render as the Unreal one.
   if (!noEvidence && name === 'inspect_unreal') {
@@ -2501,6 +2607,7 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
   const withMode = (o) => Object.assign(o, { mode: run.mode, steps: steps.slice(), context: Object.assign({}, ctxInfo) });   // every result reports the mode it ran as
   run.stopped = null;   // set when an Auto run is stopped by the brake; detached jobs read it (phase C)
   const toolOpts = Object.assign({}, opts, { runState: run });
+  if (typeof opts.onArtifact === 'function') toolOpts.onArtifact = (art) => { if (art && (!art.slot || art.slot === 'image')) run.previewOnTop = false; return opts.onArtifact(art); };
   const toolBudget = complete ? MAX_TOOL_CALLS : run.budget;
   cfg = run.cfg;
   const historyMessages = (cfg.seats && cfg.seats.orchestrator && cfg.seats.orchestrator.historyMessages) || 3;
@@ -2571,6 +2678,28 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
     ? withMode({ text: '⚠ Auto ran without render vision — nothing checked the result visually.\n\n' + text, messages, visionOff: true })
     : withMode({ text, messages });
 
+  // T8-10: one look at the render a blender_run saved this turn, when nothing (inspect_render) has looked at it yet.
+  // -> the text to append to the reply, '' when no look is due. A failed look never fails the turn.
+  // Finding 6: the saved render goes back to the Image tab at the end of the turn, only when an EEVEE preview (inspect_render {}) is the last image shown after it.
+  // Any newer image (inspect_unreal, generate_from_refs) stays, and a turn without a preview broadcasts nothing extra (each broadcast switches to the Image tab).
+  const showSavedRender = () => {
+    try {
+      if (run.previewOnTop && run.savedRender && run.savedRender.rel && typeof opts.onArtifact === 'function') opts.onArtifact({ slot: 'image', source: 'inspect', rel: run.savedRender.rel });
+    } catch (_) { /* never fails the turn */ }
+  };
+  const endOfTurnLook = async () => {
+    showSavedRender();
+    const sr = run.savedRender;
+    if (!sr || sr.looked || opts.noVisionGate || visionGateMode(run.cfg) === 'off' || visionGuard(run.cfg)) return '';
+    sr.looked = true;
+    try {
+      const r = await renderCheck.judgeFile({ claudeCli }, { imageAbs: sr.shown || sr.abs, question: gateQuestion(userInput, 'blender_run'), cfg: run.cfg, visionTimeout: 120000 });
+      return '\n\nRender check (saved render ' + (sr.name || path.basename(sr.abs)) + '): ' + String((r && r.verdict) || '').trim();
+    } catch (e) {
+      return '\n\nRender check: could not look (' + ((e && e.message) || String(e)) + ').';
+    }
+  };
+
   while (true) {
     const raw = await callClaude(messages, cfg, extraSystem, complete);
     const toolCall = parseToolCall(raw);
@@ -2582,13 +2711,15 @@ async function runTurn(userInput, history, state, cfg, opts = {}) {
         messages.push({ role: 'user', content: 'TOOL_LIMIT_REACHED: Reply to the user in plain text now. No more TOOL blocks.' });
         const finalRaw = await callClaude(messages, cfg, extraSystem, complete);
         const text = stripToolBlock(finalRaw).trim();
+        const look = await endOfTurnLook();
         // Sweep 2 G6: the summary the user sees is also what the history keeps (otherwise the last assistant message stays the TOOL block)
-        messages.push({ role: 'assistant', content: text || '(reached tool limit — no summary)' });
-        return autoWarn(text || '(reached tool limit — no summary)');
+        messages.push({ role: 'assistant', content: (text || '(reached tool limit — no summary)') + look });
+        return autoWarn((text || '(reached tool limit — no summary)') + look);
       }
       const text = stripToolBlock(raw).trim();
-      messages.push({ role: 'assistant', content: raw });
-      return autoWarn(text || '(no response)');
+      const look = await endOfTurnLook();
+      messages.push({ role: 'assistant', content: raw + look });
+      return autoWarn((text || '(no response)') + look);
     }
 
     // Execute tool
@@ -2729,7 +2860,7 @@ async function main() {
       if (input === 'refresh') {
         try {
           const result = await callBlender(
-            'import bpy\nnames=[o.name for o in bpy.context.scene.objects]\nprint("OBJECTS:"+str(names))'
+            'import bpy\nnames=[o.name for o in bpy.context.scene.objects]\nprint("OBJECTS:"+str(names))', {readOnly:true}
           );
           const raw = result.stdout || result.output || '';
           const m = raw.match(/OBJECTS:\[([^\]]*)\]/);
@@ -3411,8 +3542,8 @@ async function brainStatus(cfg, cc, deps, seatName) {
     const guard = seatName === 'orchestrator' ? seatToolFailure('orchestrator', cfg) : null;   // the tool test / benchmark belong to the orchestrator only
     if (guard) {
       return { ok: false, provider, model, how: guard.bench
-        ? (model || provider) + ' solved only ' + guard.bench.passed + '/' + guard.bench.total + ' benchmark tasks — pick another brain in Settings → General → Seats'
-        : 'the tool test failed for ' + (model || provider) + ' — pick another brain in Settings → General → Seats' };
+        ? (model || provider) + ' solved only ' + guard.bench.passed + '/' + guard.bench.total + ' benchmark tasks — pick another brain in Settings → Brains'
+        : 'the tool test failed for ' + (model || provider) + ' — pick another brain in Settings → Brains' };
     }
     const caps = seatName === 'orchestrator' ? capabilities.getCaps(seat) : null;
     if (caps && caps.tools === 'pass') {
@@ -3519,4 +3650,4 @@ async function onboardingStatus(cfg, deps) {
   return { completed, node, comfyui, claudeCli, codexCli, keys, brain, seats, lmstudio, blender };
 }
 
-module.exports = { consumeRefTile, parseRefTile, applyRefTile, seatContext, estTokens, _clearSeatContextCache, remeshEvents, remeshBusy, remeshStatus, makeVideo, videoGate, scrubFalKey, videoEvents, videoBusy, videoStatus, videoCancel, _videoStore: videoStore, assetFaces, _clearMaybeCharged: () => { remeshStore.clear(); }, _remeshStore: remeshStore, _setStagingBase, MCP_FORCE_CHECKPOINT, blenderRunWith, runTurn, toolStepLine, persistTurn, runOneTool, toolResultFailed, runConfig, verdictOf, callClaude, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, parseToolCallStrict, TOOL_RESULT_NUDGE, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };
+module.exports = { savedRendersFrom, consumeRefTile, parseRefTile, applyRefTile, seatContext, estTokens, _clearSeatContextCache, remeshEvents, remeshBusy, remeshStatus, makeVideo, videoGate, scrubFalKey, videoEvents, videoBusy, videoStatus, videoCancel, _videoStore: videoStore, assetFaces, _clearMaybeCharged: () => { remeshStore.clear(); }, _remeshStore: remeshStore, _setStagingBase, MCP_FORCE_CHECKPOINT, blenderRunWith, runTurn, toolStepLine, persistTurn, runOneTool, toolResultFailed, runConfig, verdictOf, callClaude, _callOrchestrator: callClaude, stepTimeoutMs, callBlender, loadConfig, saveConfig, ensureConfig, loadHistory, saveHistory, loadState, saveState, loadSceneCache, saveSceneCache, listStagedFiles, listBrushesData, listMaterialsData, loadLibraryLabels, TOOLS, SYSTEM_PROMPT, buildSystemPrompt, tsTailDebugLog, runTroubleshootTurn, parseToolCallStrict, TOOL_RESULT_NUDGE, draftPaletteCategory, inferWorkflowMap, claudeCliCheck, onboardingStatus, listLmStudioModels };

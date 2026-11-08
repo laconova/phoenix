@@ -15,7 +15,6 @@
 const fs   = require('fs');
 const path = require('path');
 const { ensureBrushScaffold } = require('./brush-scaffold');
-ensureBrushScaffold();
 
 const PHOENIX_PY = path.join(__dirname, 'brushes', 'phoenix_brushes.py');
 
@@ -37,6 +36,18 @@ if (delName && (delName !== path.basename(delName) || delName === '.' || delName
   console.error('ERROR: material name must be a plain name, not a path');
   process.exit(1);
 }
+
+// --delete rewrites the runtime and the library, so it takes the brush lock (one brush writer at a time) and hands it to the scaffold.
+// --list takes none itself; the scaffold takes it only if the runtime must be created or upgraded.
+if (delName) {
+  const lock = require('./brush-lock').acquire();
+  if (!lock.ok) {
+    console.error('REFUSED: another brush save is running (pid ' + (lock.holder ? lock.holder.pid : '?') + '). Nothing was written.');
+    process.exit(1);
+  }
+  process.on('exit', () => lock.release());
+}
+ensureBrushScaffold({ locked: !!delName });
 
 const PAL_DIR = path.join(__dirname, 'brushes', 'palette_materials');
 

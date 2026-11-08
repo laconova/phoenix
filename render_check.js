@@ -36,7 +36,7 @@ const VISION_SYSTEM =
 // Render the current scene to `outAbs` (EEVEE, fast) via the Blender IPC.
 // Saves + restores the user's render settings. Resolves to { ok, frame } or throws.
 async function renderCurrentScene(blenderIpc, outAbs, cfg, opts = {}) {
-  const rx = opts.resX || 1280, ry = opts.resY || 720;
+  const rx = opts.resX || 1280, ry = opts.resY || 0;   // no resY: keep the scene's own aspect (T7-6)
   const outFwd = outAbs.replace(/\\/g, '/'); // forward slashes: valid in Blender/Python everywhere, no escaping traps
   const py = `
 import bpy, os, json
@@ -44,6 +44,9 @@ sc = bpy.context.scene
 r = sc.render
 _saved = (r.engine, r.resolution_x, r.resolution_y, r.resolution_percentage,
           r.filepath, r.image_settings.file_format)
+# the preview keeps the scene's aspect: width ${rx}, height rounded from resolution_x:resolution_y to an even number
+_ar = float(r.resolution_y) / float(max(1, r.resolution_x))
+_ry = ${ry} or max(2, int(round(${rx} * _ar / 2.0)) * 2)
 ok = False; err = None
 try:
     # EEVEE is 'BLENDER_EEVEE_NEXT' on Blender 4.2-4.4, 'BLENDER_EEVEE' on 4.1 and 5.x.
@@ -53,7 +56,7 @@ try:
             break
         except Exception:
             continue
-    r.resolution_x = ${rx}; r.resolution_y = ${ry}; r.resolution_percentage = 100
+    r.resolution_x = ${rx}; r.resolution_y = _ry; r.resolution_percentage = 100
     r.image_settings.file_format = 'PNG'
     _out = ${JSON.stringify(outFwd)}
     os.makedirs(os.path.dirname(_out), exist_ok=True)
@@ -67,7 +70,7 @@ finally:
      r.filepath, r.image_settings.file_format) = _saved
 print("RC_JSON:" + json.dumps({"ok": bool(ok), "frame": sc.frame_current, "err": err}))
 `;
-  const resp = await blenderIpc.callBlender(py, { cfg, timeoutMs: opts.timeoutMs || 600000 });
+  const resp = await blenderIpc.callBlender(py, { cfg, timeoutMs: opts.timeoutMs || 600000, readOnly: true });
   if (!resp || resp.status !== 'ok') {
     throw new Error('render failed: ' + (resp && resp.message ? resp.message : 'no response'));
   }
@@ -130,7 +133,7 @@ function visionSeatProblem(cfg) {
   try { seat = providers.resolveSeat('vision', cfg); } catch (e) { return e.message; }
   if (seat.provider === 'claude-cli') return null;
   const v = capabilities.getVision(seat);
-  return v && v.vision === 'pass' ? null : 'vision test not passed for ' + (seat.model || 'Codex default') + ' — run it in Settings → General → Seats';
+  return v && v.vision === 'pass' ? null : 'vision test not passed for ' + (seat.model || 'Codex default') + ' — run it in Settings → Brains';
 }
 
 // Ask the vision SEAT about an image on disk → the verdict string. Claude: askVision, unchanged. Local/OpenAI: card +
@@ -162,6 +165,19 @@ async function askVisionSeat(cfg, imgAbs, question, { timeoutMs = 150000, claude
     'based on the render and must not be trusted.\n\n' + verdict;
 }
 
+const DEFAULT_QUESTION =
+  "Look at this render. Answer with 'VERDICT: PASS' or 'VERDICT: FAIL' on the first " +
+  'line, then one short sentence. FAIL only if something is visibly broken (holes, torn ' +
+  'mesh, missing/pink textures, floating or clipping geometry, broken proportions).';
+
+// Judge a render that already exists on disk (a saved file, no Blender involved) -> { verdict }.
+// deps: { claudeCli, complete, rng, dbg }. Called as renderCheck.judgeFile(...) so tests can stub it.
+async function judgeFile(deps, { imageAbs, question, cfg, visionTimeout } = {}) {
+  const d = deps || {};
+  const verdict = await askVisionSeat(cfg, imageAbs, question || DEFAULT_QUESTION, { timeoutMs: visionTimeout, claudeCli: d.claudeCli, complete: d.complete, rng: d.rng, dbg: d.dbg });
+  return { verdict: String(verdict || '').trim() };
+}
+
 /**
  * checkRender — render the current scene and get a vision verdict.
  * deps: { blenderIpc, claudeCli }
@@ -173,11 +189,7 @@ async function askVisionSeat(cfg, imgAbs, question, { timeoutMs = 150000, claude
 async function checkRender(deps, opts) {
   const { blenderIpc, claudeCli } = deps;
   const outAbs = opts.outAbs;
-  const question =
-    opts.question ||
-    "Look at this render. Answer with 'VERDICT: PASS' or 'VERDICT: FAIL' on the first " +
-    'line, then one short sentence. FAIL only if something is visibly broken (holes, torn ' +
-    'mesh, missing/pink textures, floating or clipping geometry, broken proportions).';
+  const question = opts.question || DEFAULT_QUESTION;
   const info = await renderCurrentScene(blenderIpc, outAbs, opts.cfg, opts);
   // M6.1: the render exists from here on. A vision failure is tagged so the caller can tell it from a failed render
   // (visionFailed → 'rendered, but the vision model could not look'); the message itself is unchanged.
@@ -192,4 +204,4 @@ async function checkRender(deps, opts) {
   return { imagePath: outAbs, verdict: String(verdict || '').trim(), frame: info.frame };
 }
 
-module.exports = { checkRender, renderCurrentScene, askVision, askVisionSeat, visionSeatProblem, VISION_SYSTEM };
+module.exports = { checkRender, judgeFile, renderCurrentScene, askVision, askVisionSeat, visionSeatProblem, VISION_SYSTEM };

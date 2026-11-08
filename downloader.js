@@ -25,7 +25,7 @@
 //   sha mismatch, manual target → loud, structured outcome, never a pretend-OK.
 // - Disk + VRAM checked BEFORE fetch/run (preflight()).
 // - Endpoint reachability is fast + explicit (AbortSignal.timeout), never a hang.
-// - Our rig is NEVER a silent default target — comfyInstall absent/instance-missing => manual,
+// - A remote host is NEVER a silent default target — comfyInstall absent/instance-missing => manual,
 //   always, regardless of what endpoints.comfyui happens to resolve to.
 // - Licence is a property of `install` (surfaced by the caller/UI); NC confirm is a UI concern
 //   (server.js/index.html), not enforced here — this module only ever acts on an explicit request.
@@ -48,7 +48,7 @@ const i2i   = require('./i2i.js');   // baseForInstance — reused, never reimpl
 const REACHABILITY_TIMEOUT_MS = 5000;
 
 // ── small path helper ─────────────────────────────────────────────────────────
-// A "supervisor" target lives on another host reached over ssh (today: our Linux rig) — its paths
+// A "supervisor" target lives on another host reached over ssh (e.g. a Linux GPU box) — its paths
 // are POSIX regardless of what OS Phoenix itself runs on (this app runs from Windows too). A "local"
 // target is THIS machine, so the native path module is correct there. Never mix the two.
 function joinPath(kind, base, ...parts) {
@@ -203,8 +203,8 @@ function validateInstall(entry) {
 
 // ── 2. resolveTarget(cfg, entry) → target ─────────────────────────────────────
 // comfyInstall/voiceInstall absent, or this instance missing from it => kind:"manual". NEVER inferred
-// from the base URL (our bases read localhost via an SSH tunnel even for the rig) and NEVER a silent
-// default to our own rig — a fresh install with zero config must resolve to "manual", every time.
+// from the base URL (a base can read localhost via an SSH tunnel even for a remote machine) and NEVER a silent
+// default to some other machine — a fresh install with zero config must resolve to "manual", every time.
 // Dispatches on serviceTypeFor(entry): image/mesh/i2i → ComfyUI shape (modelsRoot/customNodesRoot,
 // unchanged from Stage 1); voice → the Stage-2a voice-engine shape (engineRoot/venvPath/weightsDir).
 function resolveTarget(cfg, entry) {
@@ -268,7 +268,7 @@ function resolveComfyTarget(cfg, entry) {
 }
 
 // Stage 2a — voice-engine target. Same rules as comfyInstall (config-driven root, via defaults to
-// "local", "supervisor" must be explicit, absent config/instance = manual, never our rig by default),
+// "local", "supervisor" must be explicit, absent config/instance = manual, never another machine by default),
 // mirrored onto a NEW `voiceInstall` config block ({root, via} per instance — see the example config
 // phoenix-config.example.json's `_comment_voiceInstall`). "modelsRoot"/"customNodesRoot" have no voice
 // equivalent — instead:

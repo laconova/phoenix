@@ -91,8 +91,20 @@ function event(cat, fields = {}) {
 
 // ─── Convenience wrappers ─────────────────────────────────────────────────────
 
+// R4d3 P7: keep head AND tail of an error reply, so the root-cause line (last line of a traceback) survives
+function truncateTail(s, head = 600, tail = 2000) {
+  s = String(s);
+  if (s.length <= head + tail) return s;
+  return s.slice(0, head) + '…[−' + (s.length - head - tail) + ']…' + s.slice(-tail);
+}
+function isErrorReply(data) {
+  let o = data;
+  if (typeof data === 'string') { try { o = JSON.parse(data); } catch (_) { return /Traceback|Error/.test(data); } }
+  if (o === null || typeof o !== 'object') return typeof o === 'string' ? /Traceback|Error/.test(o) : false;
+  return o.status === 'error' || /Traceback|Error/.test(String(o.stdout == null ? '' : o.stdout)) || /Traceback|Error/.test(String(o.message == null ? '' : o.message));
+}
 function ipc(dir, data) {
-  event('ipc', { dir, data: truncate(data) });
+  event('ipc', { dir, data: dir === 'recv' && isErrorReply(data) ? truncateTail(typeof data === 'string' ? data : JSON.stringify(data)) : truncate(data) });
 }
 
 function tool(name, phase, data) {
@@ -121,4 +133,4 @@ function error(where, msg) {
 
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
-module.exports = { initDebug, setDebug, isDebug, event, ipc, tool, llm, comfy, progress, pyerr, error, subscribe };
+module.exports = { initDebug, setDebug, isDebug, event, ipc, truncateTail, isErrorReply, tool, llm, comfy, progress, pyerr, error, subscribe };

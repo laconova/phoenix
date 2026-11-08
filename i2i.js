@@ -83,7 +83,7 @@ async function freeOtherInstances(config, keepBase) {
 }
 
 // Best-effort: ask a ComfyUI to unload its models + free VRAM. Uses ComfyUI's own /free endpoint —
-// PORTABLE (no supervisor, no SSH), so it works on a single machine as well as the dev rig. Never
+// PORTABLE (no supervisor, no SSH), so it works on a single machine as well as with a separate GPU box. Never
 // throws: a free that fails (instance down / unreachable) must not block the run.
 const freedAt = new Map();   // v1.10 V2 r3: normalised base -> when something last asked that ComfyUI to unload its models (a loaded model is gone then: the next run is a cold one)
 const lastFreed = (base) => freedAt.get(normBase(base)) || 0;
@@ -391,7 +391,7 @@ function resolveImageEntry(config, workflowId) {
 const stampNow = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
 async function runReference(config, opts = {}) {
-  const { refs, prompt, width, height, denoise, seed, workflowId, category, outDir, timeoutMs, onTick } = opts;
+  const { refs, prompt, width, height, denoise, seed, workflowId, category, outDir, timeoutMs, onTick, signal, intervalMs } = opts;   // M4: signal = the keyframe run's AbortSignal (every request gets a deadline); intervalMs = poll seam
   const entry = resolveImageEntry(config, workflowId);
   const label = entry.label || entry.id;
   const R = entry.reference;
@@ -448,7 +448,7 @@ async function runReference(config, opts = {}) {
   for (let i = 0; i < list.length; i++) {
     // unique upload name per reference: uploads overwrite by name, so two refs called image.png would both become the second file
     const upName = `phx_ref_${stampNow()}_${i}_${crypto.randomBytes(3).toString('hex')}${path.extname(list[i]).toLowerCase() || '.png'}`;
-    const uploaded = i === 0 ? await uploadOrExplain(config, base, list[i], upName) : await uploadImage(base, list[i], upName);   // only the first contact can be "ComfyUI is gone"
+    const uploaded = i === 0 ? await uploadOrExplain(config, base, list[i], upName, signal) : await uploadImage(base, list[i], upName, signal);   // only the first contact can be "ComfyUI is gone"
     setIn(n.ref_images[i], 'image', uploaded);
   }
   // explicit seed wins, then a seed locked in the workflow window (Advanced), else a fresh random one (same precedence as runI2I)
@@ -473,14 +473,24 @@ async function runReference(config, opts = {}) {
   if (wf[outNode] && wf[outNode].inputs && 'filename_prefix' in wf[outNode].inputs) wf[outNode].inputs.filename_prefix = uniquePrefix;
 
   const t0 = Date.now();
-  const promptId = await queue(base, wf);
-  const outputs  = await poll(base, promptId, { timeoutMs: timeoutMs || 600000, onTick });
-  const saveNode = outputs[outNode];
-  if (!saveNode || !saveNode.images || !saveNode.images.length) {
-    throw new Error(`reference generation produced no image in output node ${outNode}. The engine ran but returned nothing — check the ComfyUI log on ${base}.`);
+  // M4: with a signal the prompt id is ours (ComfyUI keeps a client-supplied id), so a Stop / timeout can cancel it even while the submission is in flight
+  let promptId = signal ? crypto.randomUUID() : undefined, outputs, imgData, saveNode;
+  try {
+    promptId = signal ? await queue(base, wf, signal, promptId) : await queue(base, wf);
+    outputs = await poll(base, promptId, { timeoutMs: timeoutMs || 600000, onTick, ...(signal ? { signal } : {}), ...(intervalMs ? { intervalMs } : {}) });
+    saveNode = outputs[outNode];
+    if (!saveNode || !saveNode.images || !saveNode.images.length) {
+      throw new Error(`reference generation produced no image in output node ${outNode}. The engine ran but returned nothing — check the ComfyUI log on ${base}.`);
+    }
+    const img = saveNode.images[0];
+    imgData = signal ? await download(base, img.filename, img.subfolder, img.type, { signal }) : await download(base, img.filename, img.subfolder, img.type);
+  } catch (e) {
+    if (signal) {
+      await cancelQueued(base, promptId);   // best effort, never throws
+      if (signal.aborted && !(e && e.aborted)) throw Object.assign(new Error('Stopped'), { aborted: true });
+    }
+    throw e;
   }
-  const img = saveNode.images[0];
-  const imgData = await download(base, img.filename, img.subfolder, img.type);
 
   const outRoot = path.resolve(__dirname, 'output');
   const destDir = outDir || path.join(outRoot, category || 'reference');
@@ -498,6 +508,26 @@ async function runReference(config, opts = {}) {
   };
 }
 
+// M4: best-effort cancel of one prompt after a Stop / timeout: dequeue it by id; POST /interrupt only when /queue says OUR prompt is the one running
+// (/interrupt has no id - it would stop a foreign job). 3 s timeouts, never throws. -> { reached, dequeued, running, interrupted }
+async function cancelQueued(base, promptId) {
+  const out = { reached: false, dequeued: false, running: false, interrupted: false };
+  if (!base || !promptId) return out;
+  const t = () => AbortSignal.timeout(3000);
+  try {
+    const r = await fetch(`${base}/queue`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete: [promptId] }), signal: t() });
+    out.reached = true; out.dequeued = !!(r && r.ok);
+  } catch (_) { /* unreachable: nothing else to try */ }
+  try {
+    const q = await fetch(`${base}/queue`, { signal: t() });
+    const j = await q.json();
+    out.reached = true;
+    out.running = (j.queue_running || []).some((it) => Array.isArray(it) && it.includes(promptId));
+    if (out.running) { await fetch(`${base}/interrupt`, { method: 'POST', signal: t() }); out.interrupted = true; }
+  } catch (_) { /* best effort */ }
+  return out;
+}
+
 // List the available i2i workflows (for the UI engine picker / dep checks).
 function listI2I() {
   const reg = wfLib.loadRegistry();
@@ -506,4 +536,4 @@ function listI2I() {
     .map(([id, e]) => ({ id, label: e.label || id, instance: e.instance || 'trellis', mode: e.mode || 'edit', builtin: !!e.builtin }));
 }
 
-module.exports = { runI2I, runReference, listI2I, comfyGoneMessage, baseForInstance, resolveEntry, freeOtherInstances, freeInstance, uploadOrExplain, queue, poll, download, lastFreed };   // v1.10 V2: the local video backend reuses the same ComfyUI client
+module.exports = { runI2I, runReference, cancelQueued, listI2I, comfyGoneMessage, baseForInstance, resolveEntry, freeOtherInstances, freeInstance, uploadOrExplain, queue, poll, download, lastFreed };   // v1.10 V2: the local video backend reuses the same ComfyUI client

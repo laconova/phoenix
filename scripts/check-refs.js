@@ -48,6 +48,16 @@ function walk(d, out = []) {
   return out;
 }
 
+// R0b: assembly validates both directions of page.json <-> on-disk parts,
+// including missing, extra, duplicate and unsafe names. The retired page is not shipped.
+try {
+  require('../web/assemble').assemblePage({ webRoot: path.resolve('web') });
+  console.log('page manifest and parts agree');
+} catch (e) {
+  console.log('MISSING/INVALID page assembly: ' + e.message);
+  process.exit(1);
+}
+
 const files = walk('.').filter(f => f.endsWith('.js'));
 const missing = [];
 const expected = new Set();
@@ -102,7 +112,7 @@ if (missing.length) {
 }
 // VO1: product files that are only reached through data (the engine registry names the adapter, Phoenix spawns the dispatcher by
 // path) - no require() points at them, so presence is checked explicitly.
-const MUST_SHIP = ['voice-dispatcher.js', 'voice-engines/chatterbox_adapter.py'];
+const MUST_SHIP = ['voice-dispatcher.js', 'voice-engines/chatterbox_adapter.py', 'web/assemble.js', 'web/src/page.json'];
 const notShipped = MUST_SHIP.filter(f => !fs.existsSync(f));
 if (notShipped.length) {
   console.log('\nMISSING product files (reached via the voice engine registry):');

@@ -128,8 +128,8 @@ const { lmsLoad, lmsUnload } = gpuShare;
 
 // File-based transport — see blender-ipc.js. (Was a 9876 socket; sockets fail
 // cross-process on Windows + Blender 5.1 / Python 3.13. WinError 10035.)
-function callBlender(code) {
-  return blenderIpc.callBlender(code);
+function callBlender(code, opts) {
+  return blenderIpc.callBlender(code, opts);
 }
 
 // ─── ComfyUI helpers ─────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ async function comfyCheck() {
 // (comfy-supervisor.js). Deckt zugleich "ComfyUI ueberlebte keinen Reboot" ab —
 // Phoenix heilt sich beim naechsten Auftrag selbst.
 // OPTIONAL remote-restart config. A user whose ComfyUI is managed by a supervisor on another host
-// (the dev rig) can set these to let Phoenix restart it over SSH when it is down. UNSET by default:
+// (e.g. a separate GPU box) can set these to let Phoenix restart it over SSH when it is down. UNSET by default:
 // a single-machine user has no rig to SSH into, so we must NOT ship a hardcoded host/path — that
 // both leaks the dev's box and sends a normal user's failing generation on a doomed SSH detour.
 const RIG_SSH          = (_cfg.endpoints && _cfg.endpoints.rigSsh)         || null;
@@ -369,7 +369,7 @@ async function comfyPoll(promptId, timeoutMs = 600000) {
   // then report — otherwise the card stays busy on a result nobody will ever collect.
   await comfyCancel(promptId, `timeout after ${timeoutMs / 60000} min`);
   throw new Error(
-    `ComfyUI timed out after ${timeoutMs / 60000} min — the job was cancelled on the rig ` +
+    `ComfyUI timed out after ${timeoutMs / 60000} min — the job was cancelled in ComfyUI ` +
     `(dequeued, and interrupted only if it was still the running job). If this keeps happening ` +
     `on the same image, the object is ` +
     `likely too heavy: check "Number of voxels (Nvox)" in the ComfyUI log — above ~6 M this ` +
@@ -700,7 +700,7 @@ async function blenderCleanup(session) {
     'print("CLEANUP_DONE:" + str(len(imported)))',
   ].join('\n');
 
-  return withProgress('Blender cleanup', () => callBlender(code));
+  return withProgress('Blender cleanup', () => callBlender(code, { label: 'clean up imported mesh' }));
 }
 
 async function importRaw(session) {
@@ -717,7 +717,7 @@ async function importRaw(session) {
     'print("IMPORT_RAW_DONE:" + str(len(imported)))',
   ].join('\n');
 
-  return withProgress('Import raw', () => callBlender(code));
+  return withProgress('Import raw', () => callBlender(code, { label: 'import raw mesh' }));
 }
 
 // ─── UX helpers ──────────────────────────────────────────────────────────────

@@ -505,8 +505,29 @@ function upgradeScaffold() {
   return { migrated: true, from, to: SCAFFOLD_VERSION, backup, keptBytes: tail.length, carried, skipped, collided };
 }
 
-function ensureBrushScaffold() {
+// Read-only: must anything be written (runtime missing, registry missing, runtime version below SCAFFOLD_VERSION)?
+function needsWrite() {
+  if (!fs.existsSync(REGISTRY)) return true;
+  let existing;
+  try { existing = fs.readFileSync(PY, 'utf8'); } catch (e) { return e.code === 'ENOENT'; }
+  const m = existing.match(VERSION_RE);
+  return (m ? parseInt(m[1], 10) : 1) < SCAFFOLD_VERSION;
+}
+
+// opts.locked: the caller already holds brush-lock. Otherwise the lock is taken here, only when something must be written.
+function ensureBrushScaffold(opts) {
   fs.mkdirSync(LIB_DIR, { recursive: true });
+  let lock = null;
+  if (!(opts && opts.locked) && needsWrite()) {
+    lock = require('./brush-lock').acquire();
+    if (!lock.ok) {
+      return { BRUSHES_DIR, PY, REGISTRY, LIB_DIR, scaffold: { migrated: false, reason: 'locked' } };
+    }
+  }
+  try { return ensureBrushScaffoldWork(); } finally { if (lock) lock.release(); }
+}
+
+function ensureBrushScaffoldWork() {
   let scaffold;
   if (!fs.existsSync(PY)) {
     fs.writeFileSync(PY, SCAFFOLD.replace('__PHOENIX_LIB_DIR__', LIB_DIR), 'utf8');

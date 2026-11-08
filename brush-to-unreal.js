@@ -46,10 +46,13 @@ const path      = require('path');
 const { spawnNode } = require('./spawn-node');
 
 const { callBlender } = require('./blender-ipc');
+const { HIDE_HELPERS_PY } = require('./animate_human');
 const unrealIpc       = require('./unreal-ipc');
 
 const BRUSHES_DIR   = path.join(__dirname, 'brushes');
-const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
+const brushesDir = () => process.env.PHOENIX_BRUSHES_DIR || BRUSHES_DIR;
+const registryFile = () => path.join(brushesDir(), 'registry.json');
+const cacheDir = () => process.env.PHOENIX_BRUSH_CACHE_DIR || CACHE_DIR;
 // 🔴 NOT under staging/. listStagedFiles() treats EVERY directory in staging/ as a palette
 // category, so a cache folder there turns every cached brush into a fake "staged asset" in the
 // library — and import_asset then fails on it with "Asset not found in staging", because it
@@ -72,7 +75,7 @@ async function sceneObjectNames(cfg) {
     // JSON, not a "|"-join: a Blender object name may legally contain "|", which split() would
     // shatter into phantom names — those then read as "new" objects and get exported AND DELETED.
     'import bpy, json\nprint("PHX_OBJS:" + json.dumps([o.name for o in bpy.context.scene.objects]))',
-    { cfg, timeoutMs: 20000 }
+    { cfg, timeoutMs: 20000, readOnly: true }
   );
   if (r.status !== 'ok') throw new Error(`Blender: ${r.message || 'scene listing failed'}`);
   const m = String(r.stdout || '').match(/PHX_OBJS:(\[.*\])/);
@@ -88,11 +91,13 @@ async function placeBrush(slug, instanceName) {
   return (r.stdout || '').trim();
 }
 
-// Export the objects the brush just created, then remove them — in that order, and only if
-// the file is really on disk. Returns { glb, bytes, exported: [names] }.
-async function exportAndClean(beforeNames, glbPath, cfg, keepInBlender) {
-  const py = [
+// The Python that exports what the brush created. 🔴 Same silent trap as the character save: a hidden object cannot be selected and
+// select_set() says nothing, so a brush with a hidden part (or one placed with the H key) exported without it. Unhide for the export,
+// verify every pick with select_get(), put the exact hide state back in a finally, and only then (and only after the file is checked) delete.
+function buildExportCode(beforeNames, glbPath, keepInBlender) {
+  return [
     'import bpy, os, json',
+    ...HIDE_HELPERS_PY,
     'before = set(json.loads(' + JSON.stringify(JSON.stringify(beforeNames)) + '))',
     'fresh = [o for o in bpy.context.scene.objects if o.name not in before]',
     'if not fresh:',
@@ -107,30 +112,42 @@ async function exportAndClean(beforeNames, glbPath, cfg, keepInBlender) {
     '    for r in roots:',
     '        sel.append(r)',
     '        sel.extend(r.children_recursive)',
-    '    bpy.ops.object.select_all(action="DESELECT")',
-    '    for o in sel:',
-    '        o.select_set(True)',
-    '    bpy.context.view_layer.objects.active = roots[0]',
     '    out = ' + JSON.stringify(fwd(glbPath)),
     '    os.makedirs(os.path.dirname(out), exist_ok=True)',
-    '    bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True,',
-    '                              export_materials="EXPORT", export_apply=True, export_yup=True)',
-    '    # VERIFY BEFORE DELETING. A missing or empty file here means the export failed, and',
-    '    # deleting anyway would destroy the only copy of what was placed.',
-    '    ok = os.path.exists(out) and os.path.getsize(out) > 0',
-    '    print("PHX_GLB:", out)',
-    '    print("PHX_BYTES:", os.path.getsize(out) if ok else 0)',
-    '    print("PHX_ROOTS:", json.dumps([r.name for r in roots]))',
-    '    print("PHX_OBJECTS:", json.dumps([o.name for o in sel]))',
-    '    if ok and ' + (keepInBlender ? 'False' : 'True') + ':',
+    '    exported = False',
+    '    _prior = _phx_unhide(sel)',
+    '    try:',
+    '        _phx_select(sel, roots[0])',
+    '        bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True,',
+    '                                  export_materials="EXPORT", export_apply=True, export_yup=True)',
+    '        # VERIFY BEFORE DELETING. A missing or empty file here means the export failed, and',
+    '        # deleting anyway would destroy the only copy of what was placed.',
+    '        ok = os.path.exists(out) and os.path.getsize(out) > 0',
+    '        print("PHX_GLB:", out)',
+    '        print("PHX_BYTES:", os.path.getsize(out) if ok else 0)',
+    '        print("PHX_ROOTS:", json.dumps([r.name for r in roots]))',
+    '        print("PHX_OBJECTS:", json.dumps([o.name for o in sel]))',
+    '        exported = ok',
+    '    except _PhxNoSelect as _e:',
+    '        print("PHX_ERROR: " + str(_e))',
+    '    finally:',
+    '        _phx_restore(_prior)',
+    '    # the delete comes after the hide state is back, and only for a verified file',
+    '    if exported and ' + (keepInBlender ? 'False' : 'True') + ':',
     '        for o in sel:',
     '            bpy.data.objects.remove(o, do_unlink=True)',
     '        print("PHX_CLEANED: yes")',
     '    else:',
     '        print("PHX_CLEANED: no")',
   ].join('\n');
+}
 
-  const r = await callBlender(py, { cfg, timeoutMs: 180000 });
+// Export the objects the brush just created, then remove them — in that order, and only if
+// the file is really on disk. Returns { glb, bytes, exported: [names] }.
+async function exportAndClean(beforeNames, glbPath, cfg, keepInBlender) {
+  const py = buildExportCode(beforeNames, glbPath, keepInBlender);
+
+  const r = await callBlender(py, { cfg, timeoutMs: 180000, label: 'export brush to Unreal' });
   const out = String(r.stdout || '').trim();
   if (r.status !== 'ok') throw new Error(`Blender export failed: ${r.message || out}`);
   if (out.includes('PHX_ERROR')) throw new Error(`Blender: ${out}`);
@@ -266,11 +283,39 @@ async function saveImportedAssets(assets, cfg) {
 
 // ─── Public entry points ──────────────────────────────────────────────────────
 
+function brushDefBlock(src, slug) {
+  if (!/^[a-z0-9_]+$/i.test(slug)) return '';
+  const re = new RegExp('^def add_' + slug + '\\(' , 'm');
+  const m = re.exec(src);
+  if (!m) return '';
+  const rest = src.slice(m.index), next = /\ndef /.exec(rest);
+  return next ? rest.slice(0, next.index + 1) : rest;
+}
+function brushKey(slug, opts) {
+  const strict = !!(opts && opts.strict), hard = (e) => { if (strict && !(e && e.code === 'ENOENT')) throw e; };   // strict (cache cleanup): only "not there" means no key
+  try {
+    const entry = JSON.parse(fs.readFileSync(registryFile(), 'utf8')).brushes[slug];
+    if (!entry) return null;
+    const sorted = Object.fromEntries(Object.keys(entry).sort().map(k => [k, entry[k]]));
+    let src = ''; try { src = fs.readFileSync(path.join(brushesDir(), 'phoenix_brushes.py'), 'utf8'); } catch (e) { hard(e); }
+    let stat = ''; try {
+      const rel = String(entry.lib || '').replace(/\\/g, '/').replace(/^.*brushes\/lib\//, '');
+      const st = fs.statSync(path.join(brushesDir(), 'lib', rel)); stat = st.size + ':' + st.mtimeMs;
+    } catch (e) { hard(e); }
+    return require('crypto').createHash('sha1').update(JSON.stringify(sorted) + brushDefBlock(src, slug).replace(/\r\n?/g, '\n').split('\n').map(line => line.trimEnd()).join('\n').trimEnd() + stat).digest('hex');
+  } catch (e) { hard(e); return null; }
+}
+function brushGlbFresh(slug) {
+  const key = brushKey(slug);
+  if (!key) return false;
+  try { return fs.statSync(path.join(cacheDir(), slug + '.glb')).size > 0 && fs.readFileSync(path.join(cacheDir(), slug + '.key'), 'utf8').trim() === key; } catch (_) { return false; }
+}
+
 function resolveBrush(name) {
   const slug = slugify(name);
   if (!slug) throw new Error('name required');
-  if (!fs.existsSync(REGISTRY_FILE)) throw new Error(`registry.json not found at ${REGISTRY_FILE}`);
-  const registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
+  if (!fs.existsSync(registryFile())) throw new Error(`registry.json not found at ${registryFile()}`);
+  const registry = JSON.parse(fs.readFileSync(registryFile(), 'utf8'));
   if (!registry.brushes || !registry.brushes[slug]) {
     const available = Object.keys(registry.brushes || {}).join(', ') || '(none)';
     throw new Error(`brush '${slug}' not found. Available: ${available}`);
@@ -290,16 +335,11 @@ function resolveBrush(name) {
 async function ensureBrushGlb(opts = {}) {
   const slug    = resolveBrush(opts.name);
   const cfg     = opts.cfg;
-  const glbPath = path.join(CACHE_DIR, slug + '.glb');
+  const glbPath = path.join(cacheDir(), slug + '.glb');
   const steps   = [];
 
-  // Invalidate the cache when the brush's source geometry is newer than it: overwriting, renaming
-  // or deleting a brush rewrites brushes/phoenix_brushes.py, so a GLB older than that file holds
-  // pre-overwrite geometry (found in the v1.7.0 function review). Rebuild when the source moved.
-  const brushSrc = path.join(BRUSHES_DIR, 'phoenix_brushes.py');
-  const srcMtime = fs.existsSync(brushSrc) ? fs.statSync(brushSrc).mtimeMs : 0;
-  const cached = fs.existsSync(glbPath) && fs.statSync(glbPath).size > 0
-                 && fs.statSync(glbPath).mtimeMs >= srcMtime && !opts.refresh;
+  const key = brushKey(slug);
+  const cached = brushGlbFresh(slug) && !opts.refresh;
   let blender  = null;
   // Sweep 1c: opts.beforeBlender (the caller's checkpoint hook) runs right before Blender is really used — never on a pure cache hit.
   const notes = [];
@@ -331,6 +371,7 @@ async function ensureBrushGlb(opts = {}) {
     const before = await sceneObjectNames(cfg);
     await placeBrush(slug, slug);
     blender = await exportAndClean(before, glbPath, cfg, !!opts.keepInBlender);
+    fs.writeFileSync(path.join(cacheDir(), slug + '.key'), key);
     steps.push(`placed in Blender (${blender.objects.length} objects)`);
     steps.push(`exported ${path.relative(__dirname, glbPath)} (${blender.bytes} bytes)`);
     steps.push(blender.cleaned ? 'removed from Blender scene' : 'left in Blender scene');
@@ -388,10 +429,11 @@ async function brushToUnreal(opts = {}) {
 }
 
 module.exports = {
+  brushDefBlock, brushKey, brushGlbFresh, cacheDir, brushesDir,
   brushToUnreal, ensureBrushGlb, saveImportedAssets,
   // Exported for character-to-unreal.js: the Unreal leg is not brush-specific and the
   // override_pipelines rule + the zero-parameter material guard must hold for every route
   // into Unreal, not just this one. A second copy would be a second place to forget them.
-  importIntoUnreal,
+  importIntoUnreal, buildExportCode,
   DEFAULT_UNREAL_PATH, CACHE_DIR,
 };

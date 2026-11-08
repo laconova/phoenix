@@ -68,3 +68,8 @@ workflows/custom/
 
 # tool-test results per model (providers/capabilities.js) — machine-local, never shipped
 capabilities.json
+
+# runtime caches + user levels (added for 1.10.1, from the dev tree)
+character-previews/
+poster-cache/
+levels/

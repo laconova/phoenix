@@ -42,7 +42,7 @@ function readSyncCfg() {
 async function syncOnce() {
   let raw;
   try {
-    const result = await callBlender(SCENE_QUERY);
+    const result = await callBlender(SCENE_QUERY, {readOnly:true});
     raw = result.stdout || result.output || '';
   } catch (e) {
     // Blender closed / IPC down → skip quietly, keep last-known cache + timestamp.

@@ -47,7 +47,8 @@ const { callBlender } = require('./blender-ipc');
 const { importIntoUnreal, saveImportedAssets } = require('./brush-to-unreal');
 const { inspectGlbMaterials } = require('./unreal-to-blender');
 
-const CACHE_DIR = path.join(__dirname, 'character-cache');
+// Test seam: PHOENIX_CHARACTER_CACHE_DIR moves the Unreal export cache. Default = today's folder.
+const CACHE_DIR = process.env.PHOENIX_CHARACTER_CACHE_DIR || path.join(__dirname, 'character-cache');
 const DEFAULT_UNREAL_PATH = '/Game/PhoenixCharacters';
 
 // The bone that defines "standard humanoid skeleton" — the same constant characters.js and
@@ -115,7 +116,7 @@ async function exportCharacterGlb(rigName, glbPath, cfg, opts = {}) {
     '    if not is_mixamo(rig):',
     '        names = [b.name for b in rig.data.bones]',
     '        print("PHX_ERROR: " + rig.name + " is not a " + root_bone + " skeleton (" + str(len(names)) +',
-    '              " bones). Custom rigs go through the Custom-Rig tab, not here.")',
+    '              " bones). Custom rigs go through Characters ▸ Custom rig, not here.")',
     '        return',
     '',
     '    # 🪤 Meshes are children of the rig, and a mesh alone would export skinning with no skeleton.',
@@ -130,7 +131,7 @@ async function exportCharacterGlb(rigName, glbPath, cfg, opts = {}) {
     '',
     '    # 🔴 A HIDDEN OBJECT CANNOT BE SELECTED, AND select_set() SAYS NOTHING ABOUT IT.',
     '    # make_human.js:157 builds every character with hide_viewport=True in an "MH Staged"',
-    '    # collection — that is the Human tab\'s preview mode, not a mistake — and place_human',
+    '    # collection — that is the MakeHuman preview mode, not a mistake — and place_human',
     '    # is what reveals it. So a freshly built character, which is the NORMAL case here, is',
     '    # invisible. select_set(True) then returns without error and select_get() stays False,',
     '    # use_selection exports nothing, and the result is a valid 132-byte GLB with no meshes.',
@@ -221,7 +222,7 @@ async function exportCharacterGlb(rigName, glbPath, cfg, opts = {}) {
     '_phx_export()',
   ].join('\n');
 
-  const r = await callBlender(py, { cfg, timeoutMs: 300000 });
+  const r = await callBlender(py, { cfg, timeoutMs: 300000, label: 'export character to Unreal' });
   const out = String(r.stdout || '').trim();
   if (r.status !== 'ok') throw new Error(`Blender: ${r.message || out}`);
   if (out.includes('PHX_ERROR')) {
@@ -560,5 +561,5 @@ async function characterToUnreal(opts = {}) {
            alphaFix, ...imported };
 }
 
-module.exports = { characterToUnreal, exportCharacterGlb, applyAlphaModes,
+module.exports = { characterToUnreal, exportCharacterGlb, applyAlphaModes, slugify,
                    DEFAULT_UNREAL_PATH, CACHE_DIR, ALPHA_CUTOFF, MASK_THRESHOLD_PCT };

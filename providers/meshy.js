@@ -32,7 +32,7 @@ function shortBody(text, key) {
 }
 
 function httpError(status, text, key) {
-  if (status === 401) return fail('Meshy rejected the API key — check it in Settings → Connections', 'auth');
+  if (status === 401) return fail('Meshy rejected the API key — check it in Settings → Cloud & keys', 'auth');
   if (status === 402) return fail('Meshy: not enough credits', 'credits');
   if (status === 429) return fail('Meshy is rate-limiting — try again in a minute', 'rate');
   return fail('Meshy HTTP ' + status + ': ' + shortBody(text, key), 'http');
@@ -69,7 +69,7 @@ async function remesh(glbAbsPath, o) {
   const maxMB = Number.isFinite(o.maxUploadMB) && o.maxUploadMB > 0 ? o.maxUploadMB : DEFAULT_MAX_MB;
   const signal = o.signal;
   if (!fetchImpl) return fail('no fetch available in this Node version', 'env');
-  if (!key || typeof key !== 'string') return fail('no Meshy API key — add it in Settings → Connections', 'nokey');
+  if (!key || typeof key !== 'string') return fail('no Meshy API key — add it in Settings → Cloud & keys', 'nokey');
 
   // ── validation, before anything is uploaded ──
   if (topology !== 'quad' && topology !== 'triangle') return fail('topology must be "quad" or "triangle"', 'input');
@@ -84,7 +84,7 @@ async function remesh(glbAbsPath, o) {
   if (!/\.glb$/i.test(fname)) return fail(fname + ' is not a .glb file', 'input');
   const mb = st.size / (1024 * 1024);
   if (mb > maxMB) {
-    return fail(fname + ' is ' + Number(mb.toFixed(mb < 1 ? 3 : 1)) + ' MB — larger than the remesh upload limit (' + maxMB + ' MB, Settings → Connections)', 'size');
+    return fail(fname + ' is ' + Number(mb.toFixed(mb < 1 ? 3 : 1)) + ' MB — larger than the remesh upload limit (' + maxMB + ' MB, Settings → Cloud & keys)', 'size');
   }
 
   const t0 = now();
@@ -97,7 +97,7 @@ async function remesh(glbAbsPath, o) {
     if (o.requireBytes && !Buffer.isBuffer(o.bytes)) return fail('Phoenix did not prepare the upload data, nothing was sent', 'input');
     if (Buffer.isBuffer(o.bytes)) {
       bytes = o.bytes;
-      if (bytes.length > maxMB * 1024 * 1024) return fail(fname + ' is larger than the remesh upload limit (' + maxMB + ' MB, Settings → Connections)', 'size');
+      if (bytes.length > maxMB * 1024 * 1024) return fail(fname + ' is larger than the remesh upload limit (' + maxMB + ' MB, Settings → Cloud & keys)', 'size');
     } else { try { bytes = fs.readFileSync(glbAbsPath); } catch (e) { return fail('could not read ' + fname + ': ' + shortBody(e && e.message, key), 'input'); } }
   }
 

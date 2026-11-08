@@ -200,7 +200,7 @@ async function runPreflight({ exitOnFail = false } = {}) {
     try {
       const r = await callBlender(
         "import bpy\nprint('BLENDER_VERSION:' + bpy.app.version_string)",
-        { timeoutMs: 8000 });
+        { timeoutMs: 8000, readOnly: true });
       if (r.status === 'error') {
         const last = (r.message || '').trim().split('\n').pop();
         console.log(`[FAIL] ${label} — addon responded with an error: ${last}`);
@@ -229,7 +229,10 @@ async function runPreflight({ exitOnFail = false } = {}) {
     const label = 'Claude CLI';
     try {
       // shell:true on Windows — `claude` is often a .cmd shim the OS loader can't exec directly (ENOENT otherwise). No-op on POSIX.
-      const r = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 8000, shell: process.platform === 'win32' });
+      // F7: a fixed command string through the shell, no args array - `shell: true` WITH an args array is what Node 24 flags (DEP0190) in the Troubleshooter output.
+      const r = process.platform === 'win32'
+        ? spawnSync('claude --version', { encoding: 'utf8', timeout: 8000, shell: true })
+        : spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 8000 });
       if (r.error) {
         console.log(`[FAIL] ${label} — NOT REACHABLE (${r.error.message})`);
         return false;

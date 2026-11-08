@@ -275,6 +275,16 @@ function buildChain(spec) {
       if (params[p.name] === undefined) {
         throw new Error(`Missing parameter '${p.name}' for effect '${id}'`);
       }
+      const v = params[p.name];
+      const okVal = p.unit === 'bool'
+        ? (v === true || v === false || v === 0 || v === 1)
+        : (typeof v === 'number' && Number.isFinite(v) && v >= p.min && v <= p.max);
+      if (!okVal) {
+        throw new Error(`Invalid value for '${p.name}' of effect '${id}': ${JSON.stringify(v)}` + (p.unit === 'bool' ? '' : ` (allowed ${p.min}..${p.max})`));
+      }
+    }
+    for (const k of Object.keys(params)) {
+      if (!def.parameter.some((p) => p.name === k)) throw new Error(`Unknown parameter '${k}' for effect '${id}'`);
     }
   }
 

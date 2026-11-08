@@ -28,10 +28,11 @@ const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 const soundFx = require('./sound-fx');
 const voice = require('./voice');
 
-const ROOT       = path.join(__dirname, 'sounds');
+const ROOT       = process.env.PHOENIX_SOUNDS_DIR || path.join(__dirname, 'sounds');
 const BENCH_DIR  = path.join(ROOT, 'workbench');     // source + preview, transient
 const TAKES_DIR  = path.join(BENCH_DIR, 'takes');    // generated candidates
 const CLIPS_DIR  = path.join(ROOT, 'sfx');           // saved soundclips
@@ -41,6 +42,37 @@ const CLIPS_DIR  = path.join(ROOT, 'sfx');           // saved soundclips
 let bench = null;   // {source, kind, text, meta, chain, preview, warnings}
 
 const BENCH_STATE = path.join(BENCH_DIR, 'bench.json');
+
+// R5b r4: the bench REVISION. One counter, raised on every change of the bench's source or preview (adopt, load, render, reset) and
+// persisted in bench.json with the rest. The page keys its one bench desk entry on it (two different clips can share kind, length, size
+// and filter), and render() commits its result only if the bench is still the one it started from. Without a stored value it starts at
+// Date.now(), so it keeps rising across a wiped bench folder too.
+let rev = null;
+function curRev() {
+  if (rev === null) {
+    try { const n = Number(JSON.parse(fs.readFileSync(BENCH_STATE, 'utf8')).rev); if (Number.isFinite(n)) rev = n; } catch (_) { /* no bench yet */ }
+    if (rev === null) rev = Date.now();
+  }
+  return rev;
+}
+function bumpRev() { rev = curRev() + 1; return rev; }
+// R5b r5: every bench operation writes into its OWN temp file in BENCH_DIR (<op>.<rev>.<random>.tmp.wav) and replaces the live file only
+// when it is complete - the file, the state and the revision change in one step (commitSource / the preview commit in render). A failed
+// copy, conversion, ffmpeg run or rename leaves source, preview and rev exactly as they were and removes its temp file.
+const SOURCE_WAV = path.join(BENCH_DIR, 'source.wav');
+const PREVIEW_WAV = path.join(BENCH_DIR, 'preview.wav');
+function tmpName(op) { return path.join(BENCH_DIR, op + '.' + curRev() + '.' + crypto.randomBytes(4).toString('hex') + '.tmp.wav'); }
+function rmQuiet(p) { try { fs.rmSync(p, { force: true }); } catch (_) { /* best effort */ } }
+// a complete new source on the bench: rename over source.wav, drop the preview (it belonged to the old source), new state + rev, persist
+function commitSource(tmp, next) {
+  try { fs.renameSync(tmp, SOURCE_WAV); }
+  catch (e) { rmQuiet(tmp); return { error: 'could not put the clip on the bench (' + (e.code || e.message) + ') — the bench is unchanged' }; }
+  rmQuiet(PREVIEW_WAV);
+  bench = Object.assign({ source: SOURCE_WAV, chain: null, preview: null, previewRev: null, warnings: [] }, next);
+  bumpRev();
+  persist();
+  return null;
+}
 
 function ensureDirs() {
   for (const d of [BENCH_DIR, TAKES_DIR, CLIPS_DIR]) fs.mkdirSync(d, { recursive: true });
@@ -56,7 +88,8 @@ function persist() {
     if (!bench) { fs.rmSync(BENCH_STATE, { force: true }); return; }
     fs.writeFileSync(BENCH_STATE, JSON.stringify({
       kind: bench.kind, text: bench.text, meta: bench.meta,
-      chain: bench.chain, warnings: bench.warnings,
+      chain: bench.chain, warnings: bench.warnings, rev: curRev(),
+      previewRev: bench.preview ? bench.previewRev : null,   // r5: the revision the preview belongs to (rehydrate trusts preview.wav only then)
     }, null, 2), 'utf8');
   } catch (_) { /* persistence is a convenience, never a blocker */ }
 }
@@ -68,14 +101,19 @@ function rehydrate() {
   let saved = {};
   try { saved = JSON.parse(fs.readFileSync(BENCH_STATE, 'utf8')); } catch (_) {}
   const preview = path.join(BENCH_DIR, 'preview.wav');
+  // r5: preview.wav counts only when it was committed at the bench's current revision; a stray one (older build, a crash between the
+  // steps of a load) is removed, and the chain goes with it - the chain describes the preview, and without it the bench plays the source.
+  const okPreview = Number.isFinite(saved.previewRev) && saved.previewRev === saved.rev && fs.existsSync(preview);
+  if (!okPreview) rmQuiet(preview);
   bench = {
     source,
     kind: saved.kind || 'file',
     text: saved.text || null,
     meta: saved.meta || null,
-    chain: saved.chain || null,
-    preview: fs.existsSync(preview) ? preview : null,
-    warnings: saved.warnings || [],
+    chain: okPreview ? (saved.chain || null) : null,
+    preview: okPreview ? preview : null,
+    previewRev: okPreview ? saved.previewRev : null,
+    warnings: okPreview ? (saved.warnings || []) : [],
   };
 }
 
@@ -191,14 +229,39 @@ function adopt({ take, kind, text, meta } = {}) {
   const safe = path.basename(String(take || ''));
   const src = path.join(TAKES_DIR, safe);
   if (!safe.endsWith('.wav') || !fs.existsSync(src)) return { error: 'take not found: ' + safe };
-  const dst = path.join(BENCH_DIR, 'source.wav');
-  fs.copyFileSync(src, dst);
-  bench = {
-    source: dst, kind: kind || 'sfx', text: text || null, meta: meta || null,
-    chain: null, preview: null, warnings: [],
-  };
-  persist();
-  return benchView();
+  const tmp = tmpName('adopt');
+  try { fs.copyFileSync(src, tmp); }
+  catch (e) { rmQuiet(tmp); return { error: 'could not copy the take (' + (e.code || e.message) + ') — the bench is unchanged' }; }
+  const err = commitSource(tmp, { kind: kind || 'sfx', text: text || null, meta: meta || null });
+  return err || benchView();
+}
+
+// M1.3: a clip from the Library (sounds/vo or sounds/sfx) onto the bench. Only those two folders, the bare file name, a .wav that exists. Copies like loadFile;
+// the origin is kept (meta.origin) and meta.library marks where it came from.
+function adoptLibrary(dir, file) {
+  ensureDirs();
+  const base = dir === 'vo' ? voice.OUT_DIR : (dir === 'sfx' ? CLIPS_DIR : null);
+  if (!base) return { error: 'only the vo and sfx folders can go to the bench' };
+  const safe = path.basename(String(file || ''));
+  const src = path.join(base, safe);
+  if (!safe || safe !== String(file) || !/.wav$/i.test(safe)) return { error: 'not a wav clip: ' + safe };
+  let ok = false; try { ok = fs.statSync(src).isFile(); } catch (_) { ok = false; }
+  if (!ok) return { error: 'clip not found: ' + safe };
+  const tmp = tmpName('lib');
+  try { fs.copyFileSync(src, tmp); }
+  catch (e) { rmQuiet(tmp); return { error: 'could not copy the clip (' + (e.code || e.message) + ') — the bench is unchanged' }; }
+  const err = commitSource(tmp, { kind: 'file', text: null, meta: { origin: src, name: safe, library: true } });
+  return err || benchView();
+}
+
+// M1.3: take the clip off the bench: source + preview go, the bench is empty, the revision moves on (the page keys its desk entry on it)
+function clearBench() {
+  rehydrate();
+  rmQuiet(SOURCE_WAV); rmQuiet(PREVIEW_WAV);
+  bench = null;
+  bumpRev();
+  persist();   // no bench: bench.json is removed
+  return { bench: null };
 }
 
 // Load an existing clip from anywhere on disk. This is the third source, and the
@@ -209,29 +272,23 @@ function loadFile(p) {
   if (!src) return { error: 'no file given' };
   if (!fs.existsSync(src)) return { error: 'file not found: ' + src };
   if (!/\.(wav|mp3|flac|ogg|m4a)$/i.test(src)) return { error: 'not an audio file: ' + path.basename(src) };
-  const dst = path.join(BENCH_DIR, 'source.wav');
+  // r5: copy / convert into a temp file; the live source.wav changes only when the new one is complete
+  const tmp = tmpName('load');
+  const finishLoad = () => commitSource(tmp, { kind: 'file', text: null, meta: { origin: src } }) || benchView();
   if (/\.wav$/i.test(src)) {
-    fs.copyFileSync(src, dst);
-    return finishLoad(src);
+    try { fs.copyFileSync(src, tmp); }
+    catch (e) { rmQuiet(tmp); return { error: 'could not copy the clip (' + (e.code || e.message) + ') — the bench is unchanged' }; }
+    return finishLoad();
   }
   // Anything not already WAV goes through ffmpeg once, so the bench only ever
   // holds one format and the chain never has to care.
   return new Promise((resolve) => {
-    execFile(voice.ffmpegPath(), ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, dst],
+    execFile(voice.ffmpegPath(), ['-hide_banner', '-loglevel', 'error', '-y', '-i', src, tmp],
       { timeout: 120000 }, (err, _o, stderr) => {
-        if (err) { resolve({ error: 'could not convert to wav: ' + (stderr || err.message).trim().slice(0, 200) }); return; }
-        resolve(finishLoad(src));
+        if (err) { rmQuiet(tmp); resolve({ error: 'could not convert to wav: ' + (stderr || err.message).trim().slice(0, 200) }); return; }
+        resolve(finishLoad());
       });
   });
-
-  function finishLoad(origin) {
-    bench = {
-      source: dst, kind: 'file', text: null, meta: { origin },
-      chain: null, preview: null, warnings: [],
-    };
-    persist();
-    return benchView();
-  }
 }
 
 function runFfmpeg(inFile, outFile, filter) {
@@ -252,13 +309,30 @@ async function render(spec) {
   if (!bench) return { error: 'nothing on the bench — generate or load a clip first' };
   ensureDirs();
   const preview = path.join(BENCH_DIR, 'preview.wav');
+  // R5b r4: render into a temp file and commit only onto the bench we started from - a Load / Use that lands while ffmpeg runs must not
+  // get this render's chain and preview (the source file is overwritten in place, so the revision decides, not the path).
+  const mine = bench, startRev = curRev(), startSrc = bench.source;
+  const tmp = tmpName('render');   // r5: unique per render - two renders at once never share a file
+  const stale = () => bench !== mine || curRev() !== startRev || bench.source !== startSrc;
+  const dropTmp = () => rmQuiet(tmp);
+  const changed = () => { dropTmp(); return Object.assign(benchView(), { error: 'the bench changed while rendering — render again' }); };
+  // the preview commit: rename + state + rev in one step; a failed rename (Windows EPERM / EBUSY while the file is read) keeps the old
+  // preview and the old rev and answers with the reason instead of throwing
+  const commitPreview = (state) => {
+    if (stale()) return changed();
+    try { fs.renameSync(tmp, preview); }
+    catch (e) { dropTmp(); return Object.assign(benchView(), { error: 'could not replace the preview (' + (e.code || e.message) + ') — the bench is unchanged, render again' }); }
+    Object.assign(bench, state, { preview });
+    bench.previewRev = bumpRev();
+    persist();
+    return benchView();
+  };
 
   const leer = !spec || (!spec.effect && !(spec.order && spec.order.length));
   if (leer) {
-    fs.copyFileSync(bench.source, preview);
-    bench.chain = null; bench.preview = preview; bench.warnings = [];
-    persist();
-    return benchView();
+    try { fs.copyFileSync(bench.source, tmp); }
+    catch (e) { dropTmp(); return Object.assign(benchView(), { error: 'could not copy the source (' + (e.code || e.message) + ') — the bench is unchanged' }); }
+    return commitPreview({ chain: null, warnings: [] });
   }
 
   let chain;
@@ -268,16 +342,13 @@ async function render(spec) {
     return { error: e.message };   // sound-fx validates; surface its wording unchanged
   }
   try {
-    await runFfmpeg(bench.source, preview, chain.filter);
+    await runFfmpeg(startSrc, tmp, chain.filter);
   } catch (e) {
     // Keep whatever was on the bench rather than losing it to a filter problem.
+    dropTmp();
     return Object.assign(benchView(), { error: e.message });
   }
-  bench.chain = { spec, filter: chain.filter, steps: chain.steps };
-  bench.warnings = chain.warnings || [];
-  bench.preview = preview;
-  persist();
-  return benchView();
+  return commitPreview({ chain: { spec, filter: chain.filter, steps: chain.steps }, warnings: chain.warnings || [] });
 }
 
 function currentAudio() {
@@ -301,6 +372,7 @@ function benchView() {
       warnings: bench.warnings || [],
       // Cache-buster: the file name never changes, only its content.
       url: '/sfx-bench.wav?v=' + Date.now(),
+      rev: curRev(),   // R5b r4: the bench revision (see curRev)
       seconds: info.seconds, rate: info.rate, channels: info.channels, bytes: info.bytes,
     },
   };
@@ -401,16 +473,24 @@ function uploadWav(urlStr, buf) {
 
 // ── listings ─────────────────────────────────────────────────────────────────
 
-function listClips() {
+// `<name>_<YYYY-MM-DDTHH-MM-SS>.wav` -> the name with `_` and `-` as spaces; no stamp -> the file name without `.wav`, as it is.
+function clipLabel(file) {
+  const name = String(file || '');
+  const m = /^(.+)_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.wav$/.exec(name);
+  return m ? m[1].replace(/[_-]/g, ' ') : name.replace(/\.wav$/, '');
+}
+
+// Newest first, no cap unless `limit` is a number (sfx.state() asks for 40). `_raw.wav` is never listed.
+function listClips(limit) {
   try {
-    return fs.readdirSync(CLIPS_DIR)
-      .filter(f => f.endsWith('.wav'))
+    const all = fs.readdirSync(CLIPS_DIR)
+      .filter(f => f.endsWith('.wav') && !f.endsWith('_raw.wav'))
       .map(f => {
         const st = fs.statSync(path.join(CLIPS_DIR, f));
-        return { file: f, url: '/sfx-clip/' + encodeURIComponent(f), bytes: st.size, mtime: st.mtimeMs };
+        return { file: f, url: '/sfx-clip/' + encodeURIComponent(f), bytes: st.size, mtime: st.mtimeMs, label: clipLabel(f) };
       })
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 40);
+      .sort((a, b) => b.mtime - a.mtime);
+    return typeof limit === 'number' ? all.slice(0, limit) : all;
   } catch (_) { return []; }
 }
 
@@ -442,14 +522,14 @@ async function state() {
     // The FULL effect catalogue with every parameter — the advanced view is meant
     // to be dense. The Voice tab filters this down; this tab does not.
     effects: soundFx.listEffects(),
-    clips: listClips(),
+    clips: listClips(40),
     bench: benchView().bench,
   };
 }
 
 module.exports = {
   state, castStart, sfxStart, jobStatus,
-  adopt, loadFile, render, benchView, readBenchAudio, readTake,
-  saveClip, saveCharacter, listClips, readClip, openFolder,
+  adopt, adoptLibrary, clearBench, loadFile, render, benchView, readBenchAudio, readTake,
+  saveClip, saveCharacter, listClips, clipLabel, readClip, openFolder,
   BENCH_DIR, CLIPS_DIR, TAKES_DIR,
 };

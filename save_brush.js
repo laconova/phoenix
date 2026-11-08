@@ -19,12 +19,21 @@ const fs   = require('fs');
 const path = require('path');
 const { callBlender } = require('./blender-ipc');
 const { ensureBrushScaffold } = require('./brush-scaffold');
+// F2.5: one brush save at a time (the server's trash / restore / rename take the same lock). Taken FIRST, before the scaffold is
+// looked at and before the registry is read, so no other writer can slip in between a read and the commit; it holds through
+// commit / rollback and is released on every exit (process.exit included).
+const _lock = require('./brush-lock').acquire();
+if (!_lock.ok) {
+  console.error('REFUSED: another brush save is running (pid ' + (_lock.holder ? _lock.holder.pid : '?') + '). Nothing was written.');
+  process.exit(1);
+}
+process.on('exit', () => _lock.release());
 // brushes/ is gitignored — seed the .py base + registry on first use.
 // Ist die Laufzeitdatei in einem kaputten Zustand (abgeschnitten / ohne Marker), wird
 // NICHT gespeichert: ein angehaengtes add_() unter einem zerstoerten Kopf faellt sonst
 // erst viel spaeter beim Platzieren als unverstaendlicher Python-Fehler auf.
 {
-  const _st = ensureBrushScaffold().scaffold || {};
+  const _st = process.env.PHOENIX_BRUSHES_DIR ? {} : ensureBrushScaffold({ locked: true }).scaffold || {};
   if (_st.reason === 'version-current-but-truncated' || _st.reason === 'marker-missing') {
     console.error(
       'ABORT: brushes/phoenix_brushes.py is in a broken state (' + _st.reason + '). Nothing was written.\n' +
@@ -34,7 +43,7 @@ const { ensureBrushScaffold } = require('./brush-scaffold');
   }
 }
 
-const BRUSHES_DIR   = path.join(__dirname, 'brushes');
+const BRUSHES_DIR   = process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
 const PHOENIX_PY    = path.join(BRUSHES_DIR, 'phoenix_brushes.py');
 const LIB_DIR       = path.join(BRUSHES_DIR, 'lib');
@@ -51,8 +60,8 @@ const colName     = get('--collection') || '';
 // unchecked value ('../..') writes the library outside the tree and records the escaped path
 // in registry.json. Anything unexpected falls back to 'item' rather than failing the save.
 const rawCategory = (get('--category') || 'item').toLowerCase();
-const category    = /^[a-z0-9_]{1,32}$/.test(rawCategory) ? rawCategory : 'item';
-const displayName = get('--display') || rawName;
+let   category    = /^[a-z0-9_]{1,32}$/.test(rawCategory) ? rawCategory : 'item';
+let   displayName = get('--display') || rawName;
 
 if (!rawName) {
   console.error('Usage: node save_brush.js --name <name> [--object <obj>] [--collection <col>] [--category <cat>] [--display <label>]');
@@ -60,8 +69,8 @@ if (!rawName) {
 }
 
 const slug    = rawName.toLowerCase().replace(/[^a-z0-9]+/g, '_');
-const libPath = path.join(LIB_DIR, category, `${slug}.blend`);
-const libFwd  = libPath.replace(/\\/g, '/');
+let   libPath = path.join(LIB_DIR, category, `${slug}.blend`);
+let   libFwd  = libPath.replace(/\\/g, '/');
 const force   = args.includes('--force');
 
 // ─── Collision guard ──────────────────────────────────────────────────────────
@@ -110,6 +119,30 @@ if (fs.existsSync(REGISTRY_FILE)) {
     console.error('ABORT: brushes/registry.json does not contain an object. Nothing was written.');
     process.exit(1);
   }
+}
+
+// A replace (--force over a registered brush) ALWAYS goes to the brush's registered library path, keeps its
+// registered category and (unless --display is given) its name. Refused before the snapshot / Blender when that
+// library is shared with another brush or does not lie inside the brush library.
+let replaceEntry = null, keptCategory = null;
+if (force && registry.brushes && registry.brushes[slug]) {
+  const LT0 = require('./library-trash');
+  const entry = registry.brushes[slug], regLib = LT0.libPathOf(entry);
+  if (!regLib) {
+    console.error('REFUSED: the registered library of "' + slug + '" is not inside the brush library (' + entry.lib + '), so Phoenix cannot replace it safely. Nothing was written.');
+    process.exit(1);
+  }
+  const other = LT0.libUsers(regLib, slug)[0];
+  if (other) {
+    console.error('REFUSED: the library file of "' + slug + '" is also used by "' + other + '" — replacing it would change that brush too. Nothing was written.');
+    process.exit(1);
+  }
+  replaceEntry = entry;
+  libPath = regLib; libFwd = libPath.replace(/\\/g, '/');
+  // F2.7a: a --category that differs from the registered one is ignored on a replace; the result says so
+  if (get('--category') && entry.category && category !== entry.category) keptCategory = entry.category;
+  category = entry.category || category;
+  displayName = get('--display') || entry.display || rawName;
 }
 
 if (!force) {
@@ -199,13 +232,103 @@ function injectPaletteEntries(out) {
   const _pyTmp = PHOENIX_PY + '.tmp-' + process.pid;
   fs.writeFileSync(_pyTmp, src, 'utf8');
   fs.renameSync(_pyTmp, PHOENIX_PY);
+  pyWritten = true;
   console.log(`  palette += ${added.length}: ${added.join(', ')}`);
+}
+
+// ─── Snapshot + rollback state (R4e) ──────────────────────────────────────────
+// An overwrite (--force over an existing brush) first COPIES the old version into the brush trash.
+// Every failure after that goes through rollback(): lib / py / registry are put back exactly as they
+// were, then the snapshot is removed again. If the rollback itself fails the snapshot is KEPT.
+let snap = null;              // { id, dir } of the snapshot of the old version, when there is one
+let libTmp = null;            // Blender writes the library here first; node renames it over libPath
+let libTouched = false, pyWritten = false, regWritten = false;
+let libExistedBefore = false, origPy = null, origRegBytes = null;
+
+function atomicWrite(file, data) {
+  const tmp = file + '.tmp-rb-' + process.pid;
+  fs.writeFileSync(tmp, data);
+  try { fs.renameSync(tmp, file); } catch (e) { try { fs.unlinkSync(tmp); } catch (_) {} throw e; }
+}
+
+// M1: palette material files Blender newly wrote in THIS run (LIBMATS) must not outlive a failed save.
+let blenderOut = '';
+function dropNewPalette() {
+  try {
+    const l = blenderOut.split(/\r?\n/).find(x => x.startsWith('LIBMATS:'));
+    const names = l ? JSON.parse(l.slice('LIBMATS:'.length)) : [];
+    for (const n of names) {
+      if (typeof n !== 'string' || !n || n !== path.basename(n)) continue;
+      try { fs.unlinkSync(path.join(BRUSHES_DIR, 'palette_materials', n + '.blend')); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+function rollback(reason) {
+  const base = String(reason || 'ERROR').replace(/\s+$/, '');
+  if (libTmp) { try { fs.unlinkSync(libTmp); } catch (_) {} }
+  for (const t of [PHOENIX_PY + '.tmp', PHOENIX_PY + '.tmp-' + process.pid, REGISTRY_FILE + '.tmp-' + process.pid]) { try { fs.unlinkSync(t); } catch (_) {} }
+  dropNewPalette();
+  const failed = [];
+  // F2.7d: a library file this run created is removed even when there is no snapshot (a failed NEW save leaves no orphan file)
+  if (libTouched) {
+    try {
+      const snapLib = snap ? path.join(snap.dir, path.basename(libPath)) : null;
+      if (replaceEntry && snap && fs.existsSync(snapLib)) {
+        const st = fs.statSync(snapLib), tmp = libPath + '.tmp-rb-' + process.pid;
+        fs.copyFileSync(snapLib, tmp);
+        try { fs.utimesSync(tmp, st.atime, st.mtime); } catch (_) {}
+        try { fs.renameSync(tmp, libPath); } catch (e) { try { fs.unlinkSync(libPath); } catch (_) {} fs.renameSync(tmp, libPath); }
+      } else if (!libExistedBefore) {
+        try { fs.unlinkSync(libPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      }
+    } catch (e) { failed.push('library file: ' + e.message); }
+  }
+  // G5: restore phoenix_brushes.py (add_ function + injected palette entries) and registry.json for EVERY save, not only an overwrite with a snapshot
+  if (pyWritten && origPy !== null) { try { atomicWrite(PHOENIX_PY, origPy); } catch (e) { failed.push('phoenix_brushes.py: ' + e.message); } }
+  if (regWritten && origRegBytes !== null) { try { atomicWrite(REGISTRY_FILE, origRegBytes); } catch (e) { failed.push('registry.json: ' + e.message); } }
+  if (!snap) { console.error(base + (failed.length ? ' Rollback incomplete (' + failed.join('; ') + ').' : '')); process.exit(1); }
+  if (!failed.length) {
+    const r = require('./library-trash').removeSnapshot(snap.id);
+    if (!r.ok) failed.push('could not remove the snapshot: ' + r.error);
+  }
+  if (failed.length) console.error(base + '\nRollback incomplete (' + failed.join('; ') + '). The old version is kept in the trash (Library › Trash).');
+  else console.error(base + ' The brush is unchanged; nothing was kept in the trash.');
+  process.exit(1);
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  fs.mkdirSync(path.join(LIB_DIR, category), { recursive: true });
+  // Step 0: keep the old version before anything can overwrite it. Fails closed — no snapshot, no overwrite.
+  if (force) {
+    const entry = (registry.brushes || {})[slug];
+    if (entry) {
+      const LT = require('./library-trash');
+      const r = LT.snapshotBrush(slug);
+      if (!r.ok) {
+        console.error('REFUSED: could not keep the old version of "' + slug + '" in the trash (' + r.error + '). Nothing was overwritten — ' +
+          'check that the brushes folder is writable and not locked, then try again.');
+        process.exit(1);
+      }
+      snap = r;
+    } else if (fs.existsSync(libPath)) {
+      console.error('REFUSED: lib/' + category + '/' + slug + '.blend exists but no brush "' + slug + '" is registered, so Phoenix cannot keep it in the trash. ' +
+        'Move that file away or pick another name.');
+      process.exit(1);
+    }
+  }
+  // The original py / registry bytes are captured for every save (new brush or overwrite) so a failed run can put them back.
+  if (force && snap) {
+    origPy = fs.readFileSync(PHOENIX_PY, 'utf8');
+    origRegBytes = fs.readFileSync(REGISTRY_FILE);
+  } else {
+    try { origPy = fs.readFileSync(PHOENIX_PY, 'utf8'); } catch (_) { origPy = null; }
+    try { origRegBytes = fs.readFileSync(REGISTRY_FILE); } catch (_) { origRegBytes = null; }
+  }
+  libExistedBefore = fs.existsSync(libPath);
+  fs.mkdirSync(path.dirname(libPath), { recursive: true });
+  libTmp = libPath + '.tmp-' + process.pid;
 
   // Step 1: Save .blend from Blender via IPC.
   // Collection > object > selection; ALWAYS a list — a brush may be many meshes
@@ -216,6 +339,8 @@ async function main() {
   const saveCode = `
 import bpy, os
 lib_path = ${JSON.stringify(libFwd)}
+lib_tmp = ${JSON.stringify(libFwd + '.tmp-' + process.pid)}
+skipped = 0
 col_name = ${pyStr(colName)}
 obj_name = ${pyStr(objName)}
 if col_name:
@@ -228,6 +353,7 @@ elif obj_name:
     err = 'ERROR: object %r not found or not a mesh' % obj_name
 else:
     objs = [o for o in bpy.context.selected_objects if o.type == 'MESH']
+    skipped = len([o for o in bpy.context.selected_objects if o.type != 'MESH'])
     err = 'ERROR: no meshes selected — select them, or pass --object/--collection'
 if not objs:
     print(err)
@@ -239,9 +365,10 @@ else:
         if obj.data: blocks.add(obj.data)
         for slot in obj.material_slots:
             if slot.material: blocks.add(slot.material)
-    bpy.data.libraries.write(lib_path, blocks, fake_user=True, compress=True)
+    bpy.data.libraries.write(lib_tmp, blocks, fake_user=True, compress=True)
     print('SAVED_BRUSH:' + lib_path + ' (' + str(len(objs)) + ' mesh(es))')
     import re, json
+    print('SAVE_COUNTS:' + json.dumps({'meshes': len(objs), 'skipped': skipped}))
     pal_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(lib_path))), 'palette_materials')
     os.makedirs(pal_dir, exist_ok=True)
     def _phx_solid(m, r, g, b, metallic, rough, kind, strength):
@@ -323,18 +450,33 @@ else:
   process.stdout.write(`  Saving .blend → ${libPath} ... `);
   let result;
   try {
-    result = await callBlender(saveCode);
+    result = await callBlender(saveCode, { label: 'save as brush ' + slug });
   } catch (e) {
-    console.error(`\nERROR: ${e.message}`);
-    process.exit(1);
+    rollback(`\nERROR: ${e.message}`);
   }
 
   const out = (result.stdout || result.output || '').trim();
+  blenderOut = out;
   if (!out.includes('SAVED_BRUSH')) {
-    console.error(`\nBLENDER ERROR: ${out || JSON.stringify(result)}`);
-    process.exit(1);
+    rollback(`\nBLENDER ERROR: ${out || JSON.stringify(result)}`);
   }
+  // Blender wrote the library next to its final name; make it the real one (atomic rename).
+  let tmpStat = null;
+  try { tmpStat = fs.statSync(libTmp); } catch (_) { tmpStat = null; }
+  if (!tmpStat || tmpStat.size === 0) rollback('\nERROR: Blender reported the save but wrote no library file.');
+  libTouched = true;
+  try {
+    try { fs.renameSync(libTmp, libPath); }
+    catch (e) {
+      if (e.code !== 'EEXIST' && e.code !== 'EPERM') throw e;
+      fs.unlinkSync(libPath);
+      fs.renameSync(libTmp, libPath);
+    }
+  } catch (e) { rollback(`\nERROR: could not put the new library in place (${e.message}).`); }
+  libTmp = null;
   console.log('done');
+  const cnt = (() => { const l = out.split(/\r?\n/).find(x => x.startsWith('SAVE_COUNTS:')); try { return JSON.parse(l.slice('SAVE_COUNTS:'.length)); } catch (_) { return {}; } })();
+  const meshes = Number.isFinite(cnt.meshes) ? cnt.meshes : 0, skipped = Number.isFinite(cnt.skipped) ? cnt.skipped : 0;
 
   // Step 2: Append / update add_() in phoenix_brushes.py
   const relPath = path.relative(LIB_DIR, libPath);
@@ -354,6 +496,7 @@ else:
   const _pyTmpAdd = PHOENIX_PY + '.tmp';
   fs.writeFileSync(_pyTmpAdd, src, 'utf8');
   fs.renameSync(_pyTmpAdd, PHOENIX_PY);
+  pyWritten = true;
   console.log(`  add_${slug}() → phoenix_brushes.py`);
 
   // Step 2b: solid materials → palette lambdas; procedural materials → real material library.
@@ -377,14 +520,17 @@ else:
     display:  displayName || slug,
     category,
     fn:       `add_${slug}`,
-    lib:      fwd(path.relative(LIB_DIR, libPath)),
+    lib:      replaceEntry ? replaceEntry.lib : fwd(path.relative(LIB_DIR, libPath)),
     added:    new Date().toISOString().slice(0, 10),
   };
   const _regTmp = REGISTRY_FILE + '.tmp-' + process.pid;
   fs.writeFileSync(_regTmp, JSON.stringify(registry, null, 2), 'utf8');
   fs.renameSync(_regTmp, REGISTRY_FILE);
+  regWritten = true;
   console.log(`  '${slug}' → registry.json`);
+
   console.log(`\n  Done. Say "use brush ${slug}" to place it.`);
+  console.log('PHX_BRUSH_SAVED:' + JSON.stringify({ slug, display: displayName || slug, meshes, skipped, replaced: !!snap, snapshot: snap ? snap.id : null, ...(keptCategory ? { keptCategory } : {}) }));
 }
 
-main().catch(e => { console.error(e.message); process.exit(1); });
+main().catch(e => rollback(e && e.message));

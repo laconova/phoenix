@@ -1,0 +1,73 @@
+    /* <r5a-characters> v1.10.1 R5a Characters workspace: cast list 220 px | centre (preview + one sequencer) | inspector ~340 px. Tokens only. */
+    #panel-characters [hidden] { display: none !important; }
+    #panel-characters.visible { flex-direction: row; align-items: stretch; justify-content: flex-start; padding: 0; gap: 0; overflow: hidden; background: var(--ground); color: var(--text); }
+    #panel-characters .ch-col { min-height: 0; min-width: 0; overflow-y: auto; padding: var(--g-14) var(--g-12); display: flex; flex-direction: column; gap: var(--g-10); }
+    #panel-characters .ch-cast { flex: 0 0 220px; width: 220px; background: var(--surface); border-right: 1px solid var(--line); }
+    #panel-characters .ch-centre { flex: 1 1 auto; background: var(--ground); }
+    #panel-characters .ch-inspector { flex: 0 0 340px; width: 340px; background: var(--surface); border-left: 1px solid var(--line); }
+    #panel-characters .ch-label { font-size: var(--fs-11); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin: var(--g-4) 0 0; }
+    #char-steps { flex: none; }
+    #char-steps[hidden] { display: none !important; }
+    #char-steps > button { min-height: 32px; font-size: var(--fs-13); text-decoration: none; }
+    #char-steps > button[aria-pressed="true"] { background: var(--inverse-bg); color: var(--inverse-text); }
+
+    /* cast list */
+    #panel-characters .ch-cast-list { display: flex; flex-direction: column; gap: var(--g-4); }
+    #panel-characters .ch-cast-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--g-8); padding: var(--g-8); border: 1px solid transparent; border-left: 3px solid transparent; border-radius: var(--r-10); cursor: pointer; }
+    #panel-characters .ch-cast-row:hover { background: var(--raised); }
+    #panel-characters .ch-cast-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #panel-characters .ch-cast-row.active { background: var(--raised); border-color: var(--line); border-left-color: var(--accent); }
+    #panel-characters .ch-cast-row[data-removed="true"] { cursor: default; border-style: dashed; border-color: var(--line); }
+    #panel-characters .ch-cast-poster { flex: none; width: 40px; height: 40px; border-radius: var(--r-8); overflow: hidden; background: var(--ground); display: flex; align-items: center; justify-content: center; }
+    #panel-characters .ch-cast-poster img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #panel-characters .ch-avatar { font-size: var(--fs-15); font-weight: 700; color: var(--text); }
+    #panel-characters .ch-cast-text { flex: 1 1 0; min-width: 0; }
+    #panel-characters .ch-cast-name { font-size: var(--fs-13); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #panel-characters .ch-cast-src { font-size: var(--fs-11); color: var(--muted); }
+    #panel-characters .ch-cast-actions, #panel-characters .ch-cast-result, #panel-characters .ch-row-edit { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: var(--g-6); font-size: var(--fs-12); }
+    #panel-characters .ch-confirm { flex: 1 1 100%; font-size: var(--fs-12); color: var(--text); }
+    #panel-characters .ch-row-input { flex: 1 1 120px; min-width: 0; }
+    #panel-characters .ch-bad { color: var(--bad); }
+    #panel-characters .ch-new-wrap { display: flex; flex-direction: column; gap: var(--g-8); margin-top: var(--g-4); }
+    #panel-characters .ch-choice { display: flex; flex-direction: column; gap: var(--g-8); padding: var(--g-10); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-10); }   /* M1.4: the two ways to start a character */
+    #panel-characters .ch-choice-opt { display: flex; flex-direction: column; align-items: flex-start; gap: var(--g-4); }
+    #panel-characters .ch-choice-line { font-size: var(--fs-12); color: var(--muted); overflow-wrap: anywhere; }
+
+    /* centre: preview + sequencer */
+    #panel-characters .ch-preview { flex: 1 1 auto; min-height: 220px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-12); }
+    #panel-characters .ch-preview-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--r-8); }
+    #panel-characters .ch-preview-ph { padding: var(--g-16); font-size: var(--fs-12); color: var(--muted); text-align: center; }
+    #panel-characters .ch-seq { flex: none; display: flex; flex-direction: column; gap: var(--g-10); padding: var(--g-12); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-12); }
+    #panel-characters .ch-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--g-6); min-height: 36px; }
+    #panel-characters .ch-chip { display: inline-flex; align-items: center; gap: var(--g-4); padding: var(--g-4) var(--g-6) var(--g-4) var(--g-10); background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-pill); font-size: var(--fs-12); }
+    #panel-characters .ch-chip-name { font-weight: 600; }
+    #panel-characters .ch-blend-mark { font-family: var(--font-mono); font-size: var(--fs-11); color: var(--muted); }
+    #panel-characters .ch-param { display: inline-flex; align-items: center; gap: var(--g-6); font-size: var(--fs-12); }
+    #panel-characters .ch-param .ch-num { width: 72px; }
+    #panel-characters .ch-unit { font-size: var(--fs-11); color: var(--muted); }
+
+    /* inspector */
+    #panel-characters .ch-secs { display: flex; flex-direction: column; gap: var(--g-10); }
+    #panel-characters .ch-sec, #panel-characters .ch-block { display: flex; flex-direction: column; gap: var(--g-8); }
+    #panel-characters .ch-row { display: flex; align-items: center; gap: var(--g-8); }
+    #panel-characters .ch-row > .ch-lab { flex: 0 0 92px; font-size: var(--fs-12); color: var(--text); }
+    #panel-characters .ch-slider { display: grid; grid-template-columns: 92px 28px 1fr 28px 48px; align-items: center; gap: var(--g-6); font-size: var(--fs-12); }
+    #panel-characters .ch-slider > .ch-lab { color: var(--text); }
+    #panel-characters .ch-end { color: var(--muted); font-size: var(--fs-11); text-align: center; }
+    #panel-characters .ch-out { font-family: var(--font-mono); font-size: var(--fs-11); color: var(--muted); text-align: right; }
+    #panel-characters .ch-range { width: 100%; accent-color: var(--accent); }
+    #panel-characters .ch-text, #panel-characters .ch-select, #panel-characters .ch-num, #panel-characters .ch-row-input {
+      flex: 1; min-width: 0; min-height: 32px; padding: var(--g-4) var(--g-8); font: inherit; font-size: var(--fs-13); color: var(--text);
+      background: var(--ground); border: 1px solid var(--line); border-radius: var(--r-8); text-overflow: ellipsis;
+    }
+    #panel-characters .ch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--g-8); }
+    #panel-characters .ch-inline { display: flex; flex-direction: column; gap: var(--g-8); padding: var(--g-8); background: var(--ground); border: 1px solid var(--line); border-radius: var(--r-8); }
+    #panel-characters .ch-note, #panel-characters .ch-hint { margin: 0; font-size: var(--fs-11); line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+    #panel-characters .ch-info { font-size: var(--fs-12); padding: var(--g-8) var(--g-10); background: var(--ground); border: 1px solid var(--line); border-radius: var(--r-8); }
+    #panel-characters .ch-card { display: flex; flex-direction: column; gap: var(--g-8); padding: var(--g-12); background: var(--raised); border: 1px solid var(--line); border-radius: var(--r-12); }
+    #panel-characters .ch-card .btn { align-self: stretch; }
+    #panel-characters .ch-card .ch-actions .btn { align-self: auto; }
+    #panel-characters .ch-status { min-height: 36px; font-size: var(--fs-12); color: var(--muted); overflow-wrap: anywhere; }
+    #panel-characters .ch-status.ch-bad { color: var(--bad); }
+    #panel-characters .ch-row-edit .ch-row-input { flex: 1 1 100%; width: 100%; box-sizing: border-box; }
+    #panel-characters .ch-row-edit .ch-hint { flex: 1 1 100%; }

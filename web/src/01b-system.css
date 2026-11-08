@@ -1,0 +1,67 @@
+
+    /* R0b button primitives. Existing controls migrate panel by panel in R1-R6. */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--g-8);
+      height: 44px;
+      padding: 0 var(--g-16);
+      border: 1px solid transparent;
+      border-radius: var(--r-10);
+      background: transparent;
+      color: var(--text);
+      font-family: var(--font-ui);
+      font-size: var(--fs-13);
+      line-height: 1;
+      cursor: pointer;
+    }
+    .btn-primary { background: var(--accent); color: var(--button-text); font-weight: 700; }
+    .btn-secondary { border-color: var(--text); }
+    .btn-ghost { border: none; text-decoration: underline; text-underline-offset: 3px; }
+    .btn-danger { border-color: var(--bad); color: var(--bad); }
+    .btn.btn-sm { height: 32px; min-height: 32px; border-radius: var(--r-8); padding: 0 var(--g-12); }
+    .btn:focus-visible, .seg > button:focus-visible, .tabs-u > button:focus-visible, .toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .btn:disabled {
+      border: 1px dashed var(--muted);
+      background: transparent;
+      color: var(--muted);
+      opacity: 1;
+      text-decoration: none;
+      cursor: not-allowed;
+    }
+
+    .seg { display: inline-flex; gap: var(--g-4); padding: var(--g-4); border: 1px solid var(--line); border-radius: var(--r-12); background: var(--raised); }
+    .seg > button, .tabs-u > button {
+      min-height: 44px;
+      padding: 0 var(--g-12);
+      border: none;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+    }
+    .seg > button { border-radius: var(--r-8); }
+    .seg > button[aria-selected="true"], .seg > button[aria-pressed="true"] { background: var(--inverse-bg); color: var(--inverse-text); }
+    .tabs-u { display: flex; gap: var(--g-8); border-bottom: 1px solid var(--line); }
+    .tabs-u > button { border-bottom: 2px solid transparent; }
+    .tabs-u > button[aria-selected="true"] { border-bottom-color: var(--accent); font-weight: 700; }
+    .toggle {
+      appearance: none;
+      display: inline-block;
+      position: relative;
+      vertical-align: middle;
+      width: 44px;
+      height: 26px;
+      border: 1px solid var(--muted);
+      border-radius: var(--r-pill);
+      background: var(--raised);
+      cursor: pointer;
+    }
+    .toggle::before { content: ''; position: absolute; width: 18px; height: 18px; top: 3px; left: 3px; border-radius: var(--r-pill); background: var(--muted); }
+    .toggle:checked, .toggle[aria-checked="true"] { background: var(--accent); }
+    .toggle:checked::before, .toggle[aria-checked="true"]::before { left: 21px; background: var(--button-text); }
+    .seg > button:disabled, .tabs-u > button:disabled, .toggle:disabled { border: 1px dashed var(--muted); color: var(--muted); cursor: not-allowed; }

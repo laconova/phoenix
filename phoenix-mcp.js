@@ -13,7 +13,7 @@
 const http = require('http');
 const readline = require('readline');
 
-const VERSION = '1.10.0';
+const VERSION = require('./version');
 const PHOENIX_URL = process.env.PHOENIX_URL || 'http://127.0.0.1:7777';
 const SUPPORTED = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const NOT_RUNNING = 'Phoenix is not running — start it (server.bat on Windows, or node server.js) and try again.';
@@ -115,12 +115,13 @@ const TOOLS = [
     { name: str('brush slug'), collection: str('save ALL meshes of this collection (optional)'), object: str('save this single object (optional)'), category: str('item | sci_fi | ... (optional)'), display: str('human label (optional)'), overwrite: bool('replace an existing brush of that name (default false)') }, ['name']),
   tool('rename_asset', 'Set (or clear, with an empty label) the display label of a staged asset in the library. The file itself is not renamed.',
     { category: str('palette category of the asset'), name: str('file name from list_assets, e.g. barrel.glb'), label: str('new display label; empty string clears it') }, ['category', 'name']),
-  tool('remesh_asset', 'Rebuild the topology of a STAGED GLB through Meshy (PAID cloud service): it UPLOADS the mesh to Meshy and spends Meshy credits (about 5 per remesh). Writes the result as a NEW staged file next to the original (the original stays; textures are re-baked; Meshy normalises the size, so check the scale after import). Takes about 1.5 minutes. Only works when the user enabled it in Phoenix Settings → Connections and stored a Meshy API key; does not hold the GPU or the Blender lock, one remesh at a time. Not in the scene — call import_asset next.',
+  tool('remesh_asset', 'Rebuild the topology of a STAGED GLB through Meshy (PAID cloud service): it UPLOADS the mesh to Meshy and spends Meshy credits (about 5 per remesh). Writes the result as a NEW staged file next to the original (the original stays; textures are re-baked; Meshy normalises the size, so check the scale after import). Takes about 1.5 minutes. Only works when the user enabled it in Phoenix Settings → Cloud & keys and stored a Meshy API key; does not hold the GPU or the Blender lock, one remesh at a time. Not in the scene — call import_asset next.',
     { name: str('file name from list_assets, e.g. barrel.glb'), category: str('palette category of the asset (optional — needed only when the name exists in several)'), topology: { enum: ['quad', 'triangle'], description: '"quad" (default: your last choice in the Library dialog) or "triangle"' }, target_polycount: num('target face count, 100-300000 (default: your last choice in the Library dialog, 20000)') }, ['name']),
   tool('rename_brush', 'Change the display name of a brush (slug from list_brushes). The slug stays the same.',
     { slug: str('brush slug from list_brushes'), display: str('new display name') }, ['slug', 'display']),
 
   // ── Unreal (U) ──
+  tool('asset_to_unreal', 'Send a staged asset to Unreal. Imported asset packages are saved; the level is not saved.' + UNREAL, { category: str('Asset category'), name: str('Asset filename') }, ['category', 'name']),
   tool('brush_to_unreal', 'Carry a brush (slug from list_brushes) into Unreal as a placed actor tree with hierarchy and transforms intact. Blender is only needed the first time per brush; afterwards a cached GLB is used. Fails rather than shipping a material that would render black.' + UNREAL,
     { name: str('brush slug from list_brushes'), unreal_path: str('content folder, default /Game/PhoenixBrushes'), refresh: bool('rebuild the cached GLB'), keep_in_blender: bool('leave the placed objects in the Blender scene') }, ['name']),
   tool('unreal_to_blender', 'Pull an existing Unreal asset (StaticMesh, SkeletalMesh or AnimSequence) into the Blender scene; a SkeletalMesh arrives with its armature and weights. A material named WorldGridMaterial means the source had an empty material slot.' + UNREAL,
@@ -137,9 +138,9 @@ const TOOLS = [
     { code: str('Python source as one string') }, ['code']),
   tool('unreal_run', 'Run arbitrary Python in a running Unreal Editor (it does not touch the Blender scene). Only listed when the user enabled it in Phoenix Settings → Connections. Unreal writes screenshots at the END of the frame: take the shot in one call and collect the file in the next. Needs a running Unreal Editor with the Phoenix bridge.',
     { code: str('Python source as one string') }, ['code']),
-  tool('delete_asset', 'Delete a staged GLB file from the library.' + PERMANENT,
+  tool('delete_asset', 'Move a staged GLB file to the library trash; it can be restored.',
     { category: str('palette category of the asset'), name: str('file name from list_assets, e.g. barrel.glb') }, ['category', 'name']),
-  tool('delete_brush', 'Delete a brush (slug from list_brushes) with its library file.' + PERMANENT,
+  tool('delete_brush', 'Move a brush (slug from list_brushes) and its library file to trash; it can be restored.',
     { slug: str('brush slug from list_brushes') }, ['slug']),
   tool('delete_material', 'Remove a material (name from list_materials) from the shared material palette; the open Blender scene is untouched.' + PERMANENT,
     { name: str('material name from list_materials') }, ['name']),

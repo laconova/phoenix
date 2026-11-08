@@ -18,7 +18,7 @@ const { ensureBrushScaffold } = require('./brush-scaffold');
 // kaputt (abgeschnitten / ohne Marker), sofort und verstaendlich abbrechen: sonst
 // scheitert erst Blender mit einem Python-Fehler weit weg von der Ursache.
 {
-  const _st = ensureBrushScaffold().scaffold || {};
+  const _st = process.env.PHOENIX_BRUSHES_DIR ? {} : ensureBrushScaffold().scaffold || {};
   if (_st.reason === 'version-current-but-truncated' || _st.reason === 'marker-missing') {
     console.error(
       'ABORT: brushes/phoenix_brushes.py is in a broken state (' + _st.reason + ').\n' +
@@ -28,7 +28,7 @@ const { ensureBrushScaffold } = require('./brush-scaffold');
   }
 }
 
-const BRUSHES_DIR   = path.join(__dirname, 'brushes');
+const BRUSHES_DIR   = process.env.PHOENIX_BRUSHES_DIR || path.join(__dirname, 'brushes');
 const REGISTRY_FILE = path.join(BRUSHES_DIR, 'registry.json');
 
 // ─── Args ─────────────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ async function main() {
     console.error(`ERROR: brush '${slug}' has type '${brush.type}' but the registry lists no source for it.`);
     process.exit(1);
   }
-  const srcPath = path.resolve(__dirname, srcRaw);
+  const srcPath = process.env.PHOENIX_BRUSHES_DIR && brush.type === 'phoenix' ? path.join(BRUSHES_DIR, 'phoenix_brushes.py') : path.resolve(__dirname, srcRaw);
 
   const srcFwd  = srcPath.replace(/\\/g, '/');
   const fnName  = brush.fn;
@@ -108,7 +108,7 @@ ${fnName}(${args_py})
 
   let result;
   try {
-    result = await callBlender(code);
+    result = await callBlender(code, { label: 'use brush ' + slug });
   } catch (e) {
     console.error(`ERROR: ${e.message}`);
     process.exit(1);

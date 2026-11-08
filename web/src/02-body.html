@@ -1,0 +1,739 @@
+  </style>
+</head>
+<body>
+
+  <!-- <r1-shell> rail | column( top bar, panels, log drawer, status bar ). The rail's workspaces drive the existing tabs through switchTab; js-05-shell.js owns the behaviour. -->
+  <div id="shell">
+  <nav id="rail" aria-label="Workspaces">
+    <span id="logo-badge"><img src="/vendor/logo.png" alt="Phoenix"></span>
+    <button type="button" class="btn btn-ghost" data-rail="create"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg><span>Create</span></button>
+    <button type="button" class="btn btn-ghost" data-rail="characters"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="6" r="3"/><path d="M12 9v7M8 21l4-5 4 5M7 12h10"/></svg><span>Characters</span></button>
+    <button type="button" class="btn btn-ghost" data-rail="audio"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 7v10M21 12h0"/></svg><span>Audio</span></button>
+    <button type="button" class="btn btn-ghost" data-rail="story"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M7 5v4M12 5v4M17 5v4"/></svg><span>Story</span></button>
+    <button type="button" class="btn btn-ghost" data-rail="library"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h6v16H4zM14 4l6 1.5-3.5 15L10.5 19z"/></svg><span>Library</span></button>
+    <span class="rail-spacer"></span>
+    <button type="button" class="btn btn-ghost" data-rail="settings"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Settings</span></button>
+    <button type="button" class="btn btn-ghost" data-rail="help" aria-haspopup="menu" aria-expanded="false"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6M12 17h0"/></svg><span>Help</span></button>
+  </nav>
+  <div id="help-menu" role="menu" aria-label="Help" hidden>
+    <button type="button" class="btn btn-ghost btn-sm" role="menuitem" data-help="troubleshooter">Troubleshooter</button>
+    <button type="button" class="btn btn-ghost btn-sm" role="menuitem" data-help="feedback">Feedback / bug report</button>
+    <button type="button" class="btn btn-ghost btn-sm" role="menuitem" data-help="onboarding">Setup</button>
+  </div>
+  <div id="shell-col">
+  <div id="shell-top">
+    <button type="button" class="btn btn-secondary" id="copilot-toggle" aria-label="Show / hide Copilot" aria-pressed="true" title="Show / hide Copilot"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
+    <span id="shell-crumb"><b>Create</b> <span>/ Prompt</span></span>
+    <div id="char-steps" class="seg" role="group" aria-label="Step" hidden></div>
+    <div id="shell-modes" class="seg" role="group" aria-label="Mode"></div>
+    <button type="button" class="btn btn-secondary" id="shell-search" aria-haspopup="dialog" title="Search or run (Ctrl K)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><span class="shell-search-text">Search or run…</span><span class="kbd">Ctrl K</span></button>
+    <button type="button" class="btn btn-secondary" id="quick-switches" aria-label="Quick switches" aria-haspopup="true" aria-expanded="false" title="Quick switches"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></button>
+  </div>
+  <div id="shell-palette" hidden>
+    <div class="pal-box" role="dialog" aria-modal="true" aria-label="Search or run">
+      <input id="shell-palette-input" type="text" role="combobox" aria-expanded="true" aria-controls="shell-palette-list" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search or run…" aria-label="Search or run">
+      <div id="shell-palette-list" role="listbox" aria-label="Results"></div>
+      <div class="pal-foot">↑ ↓ move · Enter run · Esc close</div>
+    </div>
+  </div>
+  <!-- <r2-quick> Quick switches: only what you flip while working. Everything else lives in the Settings window (one home per setting). -->
+  <div id="settings-panel" hidden>
+        <div id="qs-stage-row" hidden><span id="qs-stage-label">Level stage</span><div id="qs-stage" class="seg" role="group" aria-labelledby="qs-stage-label"></div><div id="qs-stage-msg" role="status"></div></div>
+        <div id="qs-rack-row"><span id="qs-rack-label">Effect controls</span><div id="qs-rack" class="seg" role="group" aria-labelledby="qs-rack-label"><button type="button" class="btn btn-ghost btn-sm" data-rack-control="fader" aria-pressed="true">Faders</button><button type="button" class="btn btn-ghost btn-sm" data-rack-control="knob" aria-pressed="false">Knobs</button></div></div>
+    <div class="settings-title">
+      <span>Approval gates</span>
+      <!-- One bubble for all three: the explanation is about the gate CONCEPT, not about any one
+           of them, so three identical buttons would be noise. -->
+      <button type="button" class="gate-info" data-pop="pop-gates" title="What these do" aria-label="What these do">i</button>
+      <span id="qs-saved" class="set-saved" role="status" aria-live="polite"></span>
+    </div>
+    <label class="gate-row"><input type="checkbox" id="gate-prompt" data-setting="gates.prompt"> Prompt gate</label>
+    <label class="gate-row"><input type="checkbox" id="gate-image" data-setting="gates.image"> Image gate</label>
+    <label class="gate-row"><input type="checkbox" id="gate-mesh" data-setting="gates.mesh"> Mesh gate</label>
+
+    <div class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0;"><input type="checkbox" id="gate-notool" data-setting="page.blenderOnly"> Blender-only mode</label>
+      <button type="button" class="gate-info" data-pop="pop-notool" title="What this does" aria-label="What this does">i</button>
+    </div>
+
+    <div class="gate-row">
+      <label for="gate-vision">Render vision</label>
+      <button type="button" class="gate-info" data-pop="pop-vision" title="What this does" aria-label="What this does">i</button>
+      <select id="gate-vision" data-setting="gates.vision" style="margin-left:auto;">
+        <option value="off">off</option>
+        <option value="focused">focused</option>
+        <option value="full">full</option>
+      </select>
+    </div>
+
+    <div class="gate-pop" id="pop-gates" hidden>
+      <b>On</b> = stop for your approval after this stage.<br>
+      <b>Off</b> = auto-continue with no LLM between steps.
+    </div>
+    <div class="gate-pop" id="pop-notool" hidden>
+      <b>On</b> = model directly in Blender (bpy); the image and 3D generation tools are disabled.
+      Same as <b>/notool</b>.
+    </div>
+    <div class="gate-pop" id="pop-vision" hidden>
+      The assistant looks at a render of the scene before it claims anything visual.<br><br>
+      <b>focused</b> — after animation, rig/mesh binding, brush placement and spawns (plus whenever
+      you ask).<br>
+      <b>full</b> — after every step that changes the look, including raw bpy.<br><br>
+      Each check costs one extra vision call (~10&ndash;15&nbsp;s).
+    </div>
+
+    <!-- Unreal sits LAST on purpose: the individual gates above are the ones reached for every
+         session, this group is set once and left alone. -->
+    <div class="settings-title" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">Unreal</div>
+    <div class="gate-row">
+      <label for="gate-brush-target">Brush lands in</label>
+      <button type="button" class="gate-info" data-pop="pop-brush-target" title="What this does" aria-label="What this does">i</button>
+      <select id="gate-brush-target" data-setting="unreal.brushTarget" style="margin-left:auto;">
+        <option value="blender">Blender</option>
+        <option value="unreal">Unreal</option>
+        <option value="both">both</option>
+      </select>
+    </div>
+    <div class="gate-row">
+      <label for="gate-unreal-vision">Unreal vision</label>
+      <button type="button" class="gate-info" data-pop="pop-unreal-vision" title="What this does" aria-label="What this does">i</button>
+      <select id="gate-unreal-vision" data-setting="unreal.visionMode" style="margin-left:auto;">
+        <option value="off">off</option>
+        <option value="camera">camera</option>
+        <option value="viewport">viewport</option>
+      </select>
+    </div>
+
+    <div class="gate-pop" id="pop-brush-target" hidden>
+      Where a <b>double-clicked</b> brush goes.<br><br>
+      <b>Blender</b> — places it in the open Blender scene, as before.<br>
+      <b>Unreal</b> — carries it into Unreal as a placed actor tree and removes it from Blender again.
+      Blender is only needed the first time per brush; after that a cached GLB is used, so this works
+      with Blender closed.<br>
+      <b>both</b> — lands in Unreal <i>and</i> stays in Blender.
+    </div>
+    <div class="gate-pop" id="pop-unreal-vision" hidden>
+      How the assistant <b>looks</b> at the Unreal level.<br><br>
+      <b>off</b> — no rendering at all. The assistant is then told it cannot see Unreal and must say
+      so instead of guessing. This wins over any request: off means off.<br>
+      <b>camera</b> — renders from a camera inside the level, so it works no matter which window you
+      are using. It carries no post-processing, so emissive materials do not glow in it. Good for
+      checking placement, materials and breakage — not for judging how something looks.<br>
+      <b>viewport</b> — the real editor view including bloom. ⚠️ Produces <b>no file and no error</b>
+      unless the Unreal window is in the foreground.
+    </div>
+    <div class="gate-row" style="border-top:1px solid var(--border-soft);padding-top:8px;margin-top:2px;">
+      <button type="button" class="btn btn-ghost btn-sm" id="qs-all-settings">Everything else → Settings</button>
+    </div>
+    <div id="qs-err" class="srow-err" role="status" aria-live="polite"></div>
+  </div>
+  <div id="tool-modal" hidden>
+    <div class="modal-box">
+      <div class="modal-head"><span id="tool-title">Title</span><button class="modal-close" id="tool-close" aria-label="Close">&times;</button></div>
+      <div class="modal-body" id="tool-body"></div>
+    </div>
+  </div>
+
+  <!-- <r2-settings> The Settings window: 7 sections, one save rule (rules §6: a change saves at once, text saves on Enter / leaving the field), one home per setting (every editable control carries data-setting = a SETTINGS_HOMES key). Behaviour: js-57-settings-form.js. -->
+  <div id="settings-win" hidden>
+    <section id="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="set-title">
+      <nav id="set-nav" aria-label="Settings sections">
+        <span id="set-title" class="set-nav-title">Settings</span>
+        <div class="set-find"><label for="set-search" class="sr-only">Find a setting</label><input type="search" id="set-search" placeholder="Find a setting…" autocomplete="off" spellcheck="false"></div>
+        <button type="button" class="btn btn-ghost" data-sec="general"><span class="set-nav-label">General</span><span class="set-nav-count" hidden></span></button>
+        <button type="button" class="btn btn-ghost" data-sec="brains"><span class="set-nav-label">Brains</span><span class="set-nav-sub">· seats</span><span class="set-nav-count" hidden></span></button>
+        <button type="button" class="btn btn-ghost" data-sec="connections"><span class="set-nav-label">Connections</span><span class="set-nav-sub">· ComfyUI, Blender, Unreal, MCP</span><span class="set-nav-count" hidden></span></button>
+        <button type="button" class="btn btn-ghost" data-sec="voice"><span class="set-nav-label">Voice engines</span><span class="set-nav-count" hidden></span></button>
+        <button type="button" class="btn btn-ghost" data-sec="keys"><span class="set-nav-label">Cloud &amp; keys</span><span id="set-badge-keys" class="set-badge" hidden></span><span class="set-nav-count" hidden></span></button>
+        <button type="button" class="btn btn-ghost" data-sec="storage"><span class="set-nav-label">Storage &amp; checkpoints</span><span class="set-nav-count" hidden></span></button>
+        <span class="set-nav-spacer"></span>
+        <button type="button" class="btn btn-ghost" id="set-run-setup">Run setup again</button>
+      </nav>
+      <div id="set-page">
+        <header id="set-head">
+          <div><h2 id="set-sec-title">General</h2><p id="set-sec-desc"></p></div>
+          <div id="set-head-right">
+            <span id="set-saved" class="set-saved" role="status" aria-live="polite"></span>
+            <button type="button" class="btn btn-secondary" id="set-close" aria-label="Close settings">&times;</button>
+          </div>
+        </header>
+        <div id="set-body">
+          <div id="set-phone" hidden>
+            <p class="modal-note" id="remote-settings-note">Settings can only be changed on the laptop.</p>
+            <button type="button" class="btn btn-secondary" id="remote-quick-open">Open the quick switches</button>
+          </div>
+          <p id="set-nohits" role="status" hidden>No setting matches that. Try a shorter word.</p>
+
+          <div class="set-pane" id="set-sec-general" hidden>
+            <div class="srow srow-theme">
+              <span class="srow-label">Theme</span>
+              <div class="srow-ctl"><div id="set-theme-host" data-setting="ui.theme"></div></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="set-feedback-url">Feedback endpoint</label>
+              <div class="srow-ctl"><input type="text" id="set-feedback-url" data-setting="feedback.endpointUrl" placeholder="https://yourdomain/feedback.php (optional)" autocomplete="off" spellcheck="false"></div>
+              <div class="srow-hint">Where Help → Feedback sends your report. Empty turns sending off.</div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow">
+              <span class="srow-label">Version</span>
+              <div class="srow-ctl"><span id="set-version"></span></div>
+            </div>
+            <p class="snote">Ask | Auto lives in the Copilot panel. Gates, Blender-only, render vision and where brushes land are the Quick switches (the sliders button in the top bar). Changes take effect on your next message.</p>
+          </div>
+
+          <div class="set-pane" id="set-sec-brains" hidden>
+            <div class="seats-head" aria-hidden="true"><span>Job</span><span>Provider</span><span>Model</span><span>Check</span></div>
+            <div id="set-seats-host"></div>
+            <p class="snote" id="set-vision-hint"></p>
+            <p class="snote" id="set-check-hint">Changes take effect on your next message. A changed model is checked with its provider and an endpoint is pinged before it is saved — this takes a few seconds.</p>
+            <details class="set-adv" id="set-adv">
+              <summary>Advanced · history length, tool steps, local metaprompter</summary>
+              <div class="srow">
+                <label class="srow-label" for="set-step-timeout">Step timeout (seconds)</label>
+                <div class="srow-ctl"><input type="number" id="set-step-timeout" data-setting="orchestrator.stepTimeoutS" min="60" max="1800" step="60"></div>
+                <div class="srow-hint">How long one model step may take. Raise it for slow, thinking-heavy models.</div>
+                <div class="srow-err" role="status" aria-live="polite"></div>
+              </div>
+              <div class="srow">
+                <label class="srow-label" for="set-history">History length</label>
+                <div class="srow-ctl"><input type="number" id="set-history" data-setting="orchestrator.historyMessages" min="1" max="50" step="1"></div>
+                <div class="srow-hint">How many earlier messages the assistant sees (1–50).</div>
+                <div class="srow-err" role="status" aria-live="polite"></div>
+              </div>
+              <div class="srow">
+                <label class="srow-label" for="gate-steps-ask">Tool steps per turn (Ask)</label>
+                <div class="srow-ctl"><input type="number" id="gate-steps-ask" data-setting="orchestrator.maxToolCalls" min="1" max="50" step="1" value="3"></div>
+                <div class="srow-err" role="status" aria-live="polite"></div>
+              </div>
+              <div class="srow">
+                <label class="srow-label" for="gate-steps-auto">Tool steps per turn (Auto)</label>
+                <div class="srow-ctl"><input type="number" id="gate-steps-auto" data-setting="orchestrator.maxToolCallsAuto" min="1" max="50" step="1" value="8"></div>
+                <div class="srow-err" role="status" aria-live="polite"></div>
+              </div>
+              <div class="srow srow-toggle">
+                <label class="srow-label" for="set-meta-eject">Unload local metaprompter after use</label>
+                <div class="srow-ctl"><input type="checkbox" class="toggle" id="set-meta-eject" data-setting="metaprompter.ejectAfterUse"></div>
+                <div class="srow-hint">Frees VRAM after each use. Only applies when a local model is the metaprompter.</div>
+                <div class="srow-err" role="status" aria-live="polite"></div>
+              </div>
+            </details>
+          </div>
+
+          <div class="set-pane" id="set-sec-connections" hidden>
+            <h3 class="sgroup-title">Endpoints</h3>
+            <div class="srow">
+              <label class="srow-label" for="set-local">Local server</label>
+              <div class="srow-ctl" id="ep-local-host"></div>
+              <div class="srow-hint">LM Studio / llama.cpp, for seats set to Local server.</div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="set-comfyui">ComfyUI</label>
+              <div class="srow-ctl" id="ep-comfyui-host"></div>
+              <div class="srow-hint">The address of your ComfyUI.</div>
+            </div>
+            <h3 class="sgroup-title">Apps</h3>
+            <div class="srow">
+              <label class="srow-label" for="set-blender">Blender path</label>
+              <div class="srow-ctl"><input type="text" id="set-blender" data-setting="apps.blender" placeholder="path to blender.exe (optional)" autocomplete="off" spellcheck="false"></div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="set-comfy-output">ComfyUI output folder</label>
+              <div class="srow-ctl"><input type="text" id="set-comfy-output" data-setting="apps.comfyOutput" placeholder="ComfyUI output folder (optional)" autocomplete="off" spellcheck="false"></div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="set-vision-w">Unreal render size</label>
+              <div class="srow-ctl"><input type="number" id="set-vision-w" data-setting="unreal.visionWidth" min="256" max="3840" step="1"><span aria-hidden="true">×</span><input type="number" id="set-vision-h" data-setting="unreal.visionHeight" min="144" max="2160" step="1" aria-label="Unreal render height"></div>
+              <div class="srow-hint">Width × height of the Unreal vision render (the Quick switches pick the route).</div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <h3 class="sgroup-title">MCP (use Phoenix from Claude Code / Codex / Cursor)</h3>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="mcp-allow-blender-run">Allow blender_run (arbitrary Python) over MCP</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="mcp-allow-blender-run" data-setting="mcp.allowBlenderRun"></div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="mcp-allow-unreal-run">Allow unreal_run (arbitrary Python in Unreal) over MCP</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="mcp-allow-unreal-run" data-setting="mcp.allowUnrealRun"></div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="mcp-allow-delete">Allow deleting library files over MCP (delete_asset / delete_brush / delete_material — permanent)</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="mcp-allow-delete" data-setting="mcp.allowDelete"></div>
+              <div class="srow-err" role="status" aria-live="polite" id="mcp-settings-err"></div>
+            </div>
+            <p class="snote">Off by default. Phoenix must be running for the tools to work. Add it once:</p>
+            <div class="srow"><span class="srow-label">Claude Code</span><div class="srow-ctl"><code id="mcp-line-claude"></code></div></div>
+            <div class="srow"><span class="srow-label">Codex</span><div class="srow-ctl"><code id="mcp-line-codex"></code></div></div>
+            <div class="srow"><span class="srow-label">Cursor — .cursor/mcp.json</span><div class="srow-ctl"><code id="mcp-line-cursor"></code></div></div>
+            <p class="snote">Long generations: set <code>MCP_TOOL_TIMEOUT</code> (milliseconds) in Claude Code's environment; for Codex add <code>[mcp_servers.phoenix]</code> with <code>tool_timeout_sec = 3600</code> to <code>~/.codex/config.toml</code>. If a client times out, Phoenix keeps working — use job_status / list_assets.</p>
+            <h3 class="sgroup-title">Phones</h3>
+            <!-- Remote access (v1.10 R1): use Phoenix from the phone over Tailscale. Filled by makeRemoteUi (<remote-ui>). Laptop only - a phone sees the note instead. -->
+            <div id="remote-block">
+              <label class="gate-row"><input type="checkbox" id="remote-enabled" data-setting="remote.enabled"> Allow paired phones to use Phoenix over Tailscale</label>
+              <div id="remote-state" class="settings-hint">off</div>
+              <div class="settings-hint">Phone and laptop need Tailscale signed in to the same account. Phoenix adds a private Tailscale Serve route (tailnet only, never public). A paired phone can do everything you can do in Phoenix's chat — including running Blender Python on this laptop. Pair only your own devices; Disconnect removes access at once.</div>
+              <div class="gate-row"><button type="button" id="remote-pair" class="modal-btn" disabled>Pair a phone</button></div>
+              <div id="remote-pairbox" hidden>
+                <img id="remote-qr" alt="Pairing QR code" hidden>
+                <div>
+                  <div class="settings-hint">Open this on the phone (Tailscale on), or type the code on the page that opens at the address below:</div>
+                  <code id="remote-link"></code>
+                  <div class="settings-hint">8-digit code: <b id="remote-code"></b> &nbsp; <span id="remote-count"></span></div>
+                </div>
+              </div>
+              <div id="remote-pending"></div>
+              <div id="remote-devices"></div>
+              <div id="remote-err" class="settings-hint" style="color:var(--bad);" hidden></div>
+            </div>
+            <div id="remote-phone-note" class="settings-hint" hidden>Settings can only be changed on the laptop.</div>
+          </div>
+
+          <!-- Voice (v1.10 VO1b): run the voice engines on this PC, no JSON editing. Saves immediately. Filled by makeVoiceSettings (<vo1b-ui>). -->
+          <div class="set-pane" id="set-sec-voice" hidden>
+            <p id="vs-save-hint" class="snote">Changes here save immediately.</p>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="vs-local" id="vs-local-label">Run voice engines on this PC</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="vs-local" data-setting="voice.dispatcherLocal"></div>
+              <div id="vs-locked" class="srow-hint" hidden></div><!-- <lc2d-locked> T8-4: why the switch is read-only while the rig dispatcher runs the voice -->
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="vs-root">Install folder</label>
+              <div class="srow-ctl"><input type="text" id="vs-root" data-setting="voice.installRoot" autocomplete="off" spellcheck="false"></div>
+              <div id="vs-disk" class="srow-hint"></div>
+              <div id="vs-root-warn" class="srow-hint" hidden></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="vs-port">Port</label>
+              <div class="srow-ctl"><input type="number" id="vs-port" data-setting="voice.port" min="1024" max="65535" step="1" value="8091"></div>
+            </div>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="vs-watermark">Mark generated speech as AI (Perth watermark)</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="vs-watermark" data-setting="voice.watermark" checked></div>
+              <div class="srow-hint">Recommended. Turn off only for your own private use.</div>
+            </div>
+            <p class="snote">Cloning: your own voice, your characters &mdash; or a voice you have the person's consent for.</p>
+            <div id="vs-err" class="srow-err" role="status" aria-live="polite" hidden></div>
+          </div>
+
+          <div class="set-pane" id="set-sec-keys" hidden>
+            <h3 class="sgroup-title">OpenAI</h3>
+            <div class="srow">
+              <label class="srow-label" for="set-key-openai">OpenAI API key</label>
+              <div class="srow-ctl" id="key-openai-host"></div>
+              <div class="srow-hint">For seats set to OpenAI (API key). Stored in .secrets/, never in the config.</div>
+            </div>
+            <!-- Remesh (v1.9 M9): Meshy, paid cloud, opt-in. The key is write-only: it is never rendered back into the page. -->
+            <div id="remesh-block">
+            <h3 class="sgroup-title">Remesh (Meshy — paid cloud)</h3>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="remesh-enabled">Allow uploading meshes to Meshy for remeshing (uses your Meshy credits)</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="remesh-enabled" data-setting="remesh.enabled"></div>
+              <div class="srow-err" role="status" aria-live="polite" id="remesh-settings-err"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="remesh-key">Meshy API key</label>
+              <div class="srow-ctl" id="key-meshy-host"></div>
+              <div class="srow-hint">Stored in .secrets/, never in the config.</div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="remesh-maxmb">Max upload (MB)</label>
+              <div class="srow-ctl"><input type="number" id="remesh-maxmb" data-setting="remesh.maxUploadMB" min="1" max="500" step="1" value="60"></div>
+              <div class="srow-hint">Pro plan: 1000 credits/month · remesh = 5 credits</div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow"><span class="srow-label">Meshy balance</span><div class="srow-ctl"><span id="remesh-balance">Meshy balance: …</span></div></div>
+            </div>
+
+            <!-- Video (v1.10 V3): fal.ai Kling 3 Pro, paid cloud, opt-in. The key is write-only: it is never rendered back into the page. -->
+            <div id="video-fal-block">
+            <h3 class="sgroup-title">Video (fal.ai)</h3>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="video-fal-enabled">Allow making videos through fal.ai (uses your fal credit)</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="video-fal-enabled" data-setting="video.fal.enabled"></div>
+              <div class="srow-err" role="status" aria-live="polite" id="video-fal-settings-err"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="video-fal-key">fal.ai API key</label>
+              <div class="srow-ctl" id="key-fal-host"></div>
+              <div id="video-fal-key-hint" class="srow-hint">Create it on fal.ai → Dashboard → Keys → Add key, preset "API" (not Full access). Paste the whole key (id:secret).</div><!-- <lc2a-fal-keyhint> -->
+            </div>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="video-fal-audio">Generate sound with the video</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="video-fal-audio" data-setting="video.fal.audio" checked></div><!-- <lc2a-fal-audio> the default; each video can still switch it in its confirm row -->
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <p class="snote">Uploads the shot's keyframe and reference images to fal.ai and spends fal credit. Phoenix shows an estimate before every call.</p>
+            </div>
+          </div>
+
+          <div class="set-pane" id="set-sec-storage" hidden>
+            <div class="srow srow-toggle">
+              <label class="srow-label" for="cp-enabled">Save a checkpoint before scene changes</label>
+              <div class="srow-ctl"><input type="checkbox" class="toggle" id="cp-enabled" data-setting="checkpoints.enabled" checked></div>
+              <div class="srow-hint">A copy of the Blender scene before each step that changes it. Rewind from the Checkpoints list under the chat.</div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="cp-keep">Checkpoints to keep</label>
+              <div class="srow-ctl"><input type="number" id="cp-keep" data-setting="checkpoints.keep" min="1" max="100" step="1" value="10"></div>
+              <div class="srow-err" role="status" aria-live="polite" id="cp-settings-err"></div>
+            </div>
+            <div class="srow">
+              <label class="srow-label" for="cp-maxgb">Max disk (GB)</label>
+              <div class="srow-ctl"><input type="number" id="cp-maxgb" data-setting="checkpoints.maxGB" min="0.1" max="100" step="0.1" value="2"></div>
+              <div class="srow-err" role="status" aria-live="polite"></div>
+            </div>
+            <div class="srow">
+              <span class="srow-label">Cached previews</span>
+              <div class="srow-ctl"><button type="button" class="btn btn-secondary btn-sm" id="set-clean-caches">Nothing to clean</button></div>
+              <div class="srow-hint">Preview pictures and 3D previews that no brush, character or asset uses any more. Phoenix rebuilds what it needs.</div>
+              <div id="set-clean-ask" class="lib-inline" role="group" hidden>
+                <span data-clean="text"></span>
+                <button type="button" class="btn btn-danger btn-sm" data-clean="go">Delete</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-clean="cancel">Cancel</button>
+              </div>
+              <div class="srow-err" role="status" aria-live="polite" id="set-clean-result"></div>
+            </div>
+          </div>
+
+        </div>
+        <div id="set-foot">One save rule everywhere: changes save at once; a typed value saves on Enter or when you leave the field. API keys live only in Cloud &amp; keys (Setup links there).</div>
+      </div>
+    </section>
+  </div>
+
+  <div id="main-area">
+
+    <!-- Left: Chat -->
+    <div id="chat-wrap">
+      <button type="button" class="panel-strip" id="chat-strip" title="Expand the assistant"><span>&raquo;</span><span class="strip-label">Assistant</span></button>
+      <div id="chat-head"><span>Assistant</span><span class="chat-head-btns"><button type="button" class="panel-collapse-btn chat-new-btn" id="chat-new" title="Start a new chat (clears the conversation memory; scene, checkpoints and storyboards stay)" aria-label="New chat">New chat</button><button type="button" class="panel-collapse-btn" id="chat-collapse" title="Collapse the assistant" aria-label="Collapse the assistant">&laquo;</button></span></div>
+      <div id="messages"></div>
+      <div id="cp-panel">
+        <div id="cp-banner" role="status" hidden>You are in a checkpoint copy — Save As in Blender to keep it.</div>
+        <details id="cp-details">
+          <summary id="cp-summary">Checkpoints</summary>
+          <div id="cp-empty" hidden>No checkpoints yet — one is saved before each step that changes the scene.</div>
+          <ul id="cp-list"></ul>
+        </details>
+      </div>
+      <dialog id="cp-dialog" aria-labelledby="cp-dialog-title">
+        <div id="cp-dialog-title"><b>Rewind the scene</b></div>
+        <div id="cp-dialog-what" class="cp-hint"></div>
+        <button type="button" id="cp-choice-stay" class="cp-choice">Stay in the checkpoint copy</button>
+        <span id="cp-hint-stay" class="cp-hint">Ctrl+S saves into Phoenix's checkpoint folder — use Save As to keep it</span>
+        <button type="button" id="cp-choice-overwrite" class="cp-choice">Overwrite my project file</button>
+        <span id="cp-hint-overwrite" class="cp-hint">the current state is kept as a checkpoint first</span>
+        <span id="cp-noproject" class="cp-hint" hidden>This scene was never saved</span>
+        <div style="text-align:right;margin-top:8px;"><button type="button" id="cp-choice-cancel">Cancel</button></div>
+      </dialog>
+      <div id="run-mode-wrap">
+        <div id="run-mode" role="group" aria-label="Run mode" data-setting="gates.mode">
+          <button type="button" id="mode-ask" aria-pressed="true" title="Ask: the gates stop and wait for you">Ask</button>
+          <button type="button" id="mode-auto" aria-pressed="false" title="Auto: run to the end without stopping at the prompt/image/mesh gates">Auto</button>
+        </div>
+        <span id="auto-warn" hidden>⚠ Auto with render vision off — nothing stops a bad result</span>
+        <span id="run-mode-err" class="srow-err" role="status" aria-live="polite"></span>
+      </div>
+      <div id="input-row">
+        <textarea
+          id="user-input"
+          placeholder="Message Phoenix…   (Enter sends · Shift+Enter = new line)"
+          rows="1"
+          autocomplete="off"
+        ></textarea>
+        <button id="send-btn">Send</button>
+      </div>
+      <div id="ctx-meter" title="Estimated tokens sent with your next message / the orchestrator seat's context" hidden></div>
+    </div>
+
+    <div class="panel-handle" id="handle-chat" title="Drag to resize · double-click resets" role="separator" aria-orientation="vertical"></div>
+
+    <!-- Middle: Artifacts -->
+    <div id="artifacts-wrap">
+      <div id="art-tabs" hidden>
+        <button class="art-tab-btn active" data-tab="prompt">Prompt</button>
+        <button class="art-tab-btn"        data-tab="image">Image</button>
+        <button class="art-tab-btn"        data-tab="mesh">Mesh</button>
+        <button class="art-tab-btn"        data-tab="human">Human</button>
+        <button class="art-tab-btn"        data-tab="customrig">Custom Rig</button>
+        <button class="art-tab-btn"        data-tab="speak">Speak</button>
+        <button class="art-tab-btn"        data-tab="cast">Cast</button>
+        <button class="art-tab-btn"        data-tab="sfx">SFX</button>
+        <button class="art-tab-btn"        data-tab="storyboard">Storyboard</button>
+        <button class="art-tab-btn"        data-tab="video">Video</button>
+      </div>
+      <nav id="create-pipeline" aria-label="Pipeline"></nav>
+      <div id="art-panels">
+
+        <!-- Prompt panel -->
+        <div class="art-panel visible" id="panel-prompt">
+          <span class="art-placeholder" id="prompt-placeholder">no artifact yet</span>
+          <pre id="artPrompt"></pre>
+        </div>
+
+        <!-- Image panel -->
+        <div class="art-panel" id="panel-image">
+          <!-- Sub-tabs inside the image window: the generated image (view) and the i2i edit
+               workspace. Deliberately NOT a new top-level tab (spec 2026-08-04): the edit is an
+               optional branch OFF the image, so it lives with the image. The direct
+               Image → Make 3D path is untouched in the view sub-panel. -->
+          <div id="image-subtabs" class="seg">
+            <button class="img-subtab-btn active" data-subtab="view" aria-pressed="true">Generate</button>
+            <button class="img-subtab-btn"        data-subtab="edit" aria-pressed="false">Edit · i2i</button>
+          </div>
+
+          <div class="img-subpanel visible" id="imgsub-view">
+            <span class="art-placeholder" id="image-placeholder">no artifact yet</span>
+            <img id="artImage" alt="Generated image" />
+          </div>
+
+          <!-- i2i / Edit workspace (v1.8): two columns — reference + options (left),
+               result tiles (right). Tiles are additive (never replace) — each edit is a new
+               variant. A tile can become the new reference (refine) or go to Trellis. -->
+          <div class="img-subpanel" id="imgsub-edit">
+            <div id="i2i-workspace">
+              <div id="i2i-left">
+                <div class="insp-label">Source</div>
+                <div class="i2i-ref-wrap">
+                  <span class="art-placeholder" id="i2i-ref-ph">no reference — generate or load an image in the Image sub-tab first</span>
+                  <img id="i2i-ref-img" alt="i2i reference" />
+                </div>
+                <span id="i2i-src-from">From: —</span>
+                <button type="button" class="btn btn-ghost btn-sm" id="i2i-src-replace">replace</button>
+              </div>
+              <div id="i2i-right">
+                <div class="insp-label">Results · <span id="i2i-count">0</span></div>
+                <span class="art-placeholder" id="i2i-gallery-ph">edits appear here as tiles</span>
+                <div id="i2i-gallery"></div>
+                <div id="i2i-result-actions" class="i2i-result-actions">
+                  <button type="button" class="btn btn-primary" id="i2i-act-mesh" disabled title="Pick a result first">Mesh it →</button>
+                  <button type="button" class="btn btn-secondary" id="i2i-act-source" disabled title="Pick a result first">Use as source</button>
+                  <button type="button" class="btn btn-secondary" id="i2i-act-storyboard" disabled title="Pick a result first">To storyboard</button>
+                  <span id="i2i-result-status" class="i2i-status" role="status" aria-live="polite"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mesh panel -->
+        <div class="art-panel" id="panel-mesh">
+          <span class="art-placeholder" id="mesh-placeholder">no artifact yet</span>
+          <model-viewer
+            id="artMesh"
+            camera-controls
+            auto-rotate
+            interaction-prompt="none"
+            style="width:100%;height:100%"
+          ></model-viewer>
+        </div>
+
+        <div class="art-panel" id="panel-scene">
+          <div class="insp-label">Send to Blender</div>
+          <div class="art-actions">
+            <button class="art-btn btn btn-secondary" data-action="import-raw">Import raw</button>
+            <button class="art-btn btn btn-primary" data-action="import-cleaned">Import cleaned</button>
+          </div>
+          <!-- The way BACK from Unreal. One entry with a target selector, deliberately mirroring
+               the brush target in the gates panel rather than adding a second set of buttons:
+               "fetch it" and "where does it land" is one decision, not two. -->
+          <div class="art-actions" id="mesh-unreal-row">
+            <label class="face-label" style="flex:1;min-width:0;">from Unreal:
+              <input type="text" id="mesh-unreal-path" class="face-input" style="width:100%;"
+                     placeholder="/Game/Props/SM_Crate" />
+            </label>
+            <select id="mesh-unreal-target" title="Where the fetched asset lands">
+              <option value="blender">→ Blender</option>
+              <option value="brush">→ Brush library</option>
+            </select>
+            <button class="art-btn" data-action="from-unreal">Fetch</button>
+          </div>
+        </div>
+
+        <!-- R5b: the Audio panel - Speak a line, Cast a new voice and Sound effects are three modes of ONE panel; the module (js-45, makeAudioWs) builds the rest.
+             Only the static default-engine line is here: js-35 binds it at load, the module moves it into the Speak section. -->
+        <div class="art-panel" id="panel-audio">
+          <div class="au-engine" id="voice-engine-line"><span class="au-label">Default engine</span> <span id="voice-engine-label">…</span> <button type="button" class="btn btn-ghost btn-sm" id="voice-engine-change">change in Library</button></div>
+        </div>
+
+        <!-- The shared row rules (.cr-wrap ...) below are used by Characters / Voice / SFX / Storyboard (Characters has its own part, 01d-characters.css). -->
+        <style>
+          .cr-wrap { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+          .cr-row { display: flex; align-items: center; gap: 8px; }
+          .cr-row > label { flex: 0 0 56px; font-size: 12px; color: var(--text); }
+          .cr-row select { flex: 1; min-width: 0; text-overflow: ellipsis; padding: 6px 8px; font-size: 13px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--panel); color: var(--text); }
+          .cr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+          .cr-note { font-size: 11px; color: var(--muted); line-height: 1.45; margin: 2px 0; }
+          .cr-listhead { justify-content: space-between; }
+          .cr-listtitle { font-size: 12px; color: var(--muted); }
+          .cr-folderlist { display: flex; flex-direction: column; gap: 4px; max-height: 190px; overflow-y: auto; }
+        </style>
+        <!-- v1.10 VP1 + R6: the Video . cut mode - the Export board as video bar (makeAnimaticExport, js-20) above the player that makeVideoTab builds into #vt-root. The CSS is 01f-story.css. -->
+        <div class="art-panel" id="panel-video">
+          <div class="vt-exportbar"><button type="button" class="btn btn-primary" id="vt-export">Export board as video</button>
+            <button type="button" class="btn btn-secondary" id="vt-export-stop" data-export-stop hidden>Stop</button>
+            <span class="vt-export-status" id="vt-export-status" data-export-status role="status"></span></div>
+          <div class="vt-export-warn" id="vt-export-warn" hidden></div><div class="vt-export-result" id="vt-export-result" hidden></div>
+          <div id="vt-root" class="vt-root"></div>
+        </div>
+
+        <!-- v1.10 V1 + R6: the Storyboard workbench - built by makeStoryboardTab into #sb-root. The CSS is 01f-story.css. -->
+        <div class="art-panel" id="panel-storyboard">
+          <div class="cr-wrap" id="sb-root"></div>
+        </div>
+
+        <div class="art-panel" id="panel-characters"></div>
+
+      </div>
+      <div id="library-page" hidden>
+
+        <nav id="lib-sections" aria-label="Library sections"></nav>
+        <div id="lib-page-view">
+          <div id="lib-wf-split" hidden>
+            <div id="lib-wf-list">
+              <div class="lib-wf-head">
+                <label for="wf-filter" class="lib-wf-filter-label">Filter</label>
+                <input type="search" id="wf-filter" placeholder="Filter workflows…">
+                <button type="button" class="btn btn-secondary btn-sm" data-wf-add>+ Add</button>
+              </div>
+            </div>
+            <div id="lib-wf-resize" role="separator" aria-orientation="vertical" aria-label="Resize the workflow list" tabindex="0"></div>
+            <section id="wf-page" aria-label="Workflow"><p class="wf-page-empty">Pick a workflow from the list to see its details.</p></section>
+          </div>
+          <div class="lib-panel" id="lib-trash-body"></div>
+        </div>
+          <section id="lib-preview" hidden>
+            <h2 id="lib-preview-name"></h2>
+            <model-viewer id="lib-preview-mv" camera-controls></model-viewer>
+            <div id="lib-preview-actions"></div>
+            <button class="btn btn-secondary btn-sm" id="lib-preview-open-mesh">Open in Create ▸ Mesh</button>
+            <button class="btn btn-secondary btn-sm" id="lib-preview-close" aria-label="Close preview">Close</button>
+          </section>
+      </div>
+    </div>
+
+    <div class="panel-handle" id="handle-lib" title="Drag to resize · double-click resets" role="separator" aria-orientation="vertical"></div>
+
+    <!-- Right rail: Asset library -->
+    <div id="library-wrap">
+      <button type="button" class="panel-strip" id="lib-strip" title="Expand the library"><span>&laquo;</span><span class="strip-label">Library</span></button>
+      <div id="library-header">
+        <div id="right-switch" class="seg" role="group" aria-label="Right panel"></div>
+        <div id="lib-tabs-strip"><div id="lib-tabs"><!-- <l1-library> built from LIB_GROUPS: Media · 3D · Tools --></div></div>
+        <div id="library-header-btns"><button id="library-refresh" title="Refresh">&#x21bb;</button><button type="button" class="panel-collapse-btn" id="lib-collapse" title="Collapse the library" aria-label="Collapse the library">&raquo;</button></div>
+      </div>
+      <div id="inspector" aria-label="Inspector">
+        <div class="insp-panel" data-insp="prompt">
+          <label class="insp-label" for="prompt-edit">Prompt</label>
+          <textarea id="prompt-edit" class="img-prompt-edit" placeholder="Prompt (editable) — Approve uses this"></textarea>
+          <div class="art-actions" id="prompt-actions">
+            <button class="art-btn btn btn-primary" data-action="approve-prompt">Approve &amp; Generate image</button>
+            <button class="art-btn btn btn-secondary" data-action="regen-prompt">Regenerate prompt</button>
+          </div>
+        </div>
+        <div class="insp-panel" data-insp="image-generate">
+          <label class="insp-label" for="image-prompt-edit">Prompt</label>
+          <textarea id="image-prompt-edit" class="img-prompt-edit" placeholder="Prompt (editable) — Regenerate uses this"></textarea>
+            <!-- v1.10 I1: reference images (Flux Klein 2 slots · Z-Image Turbo 1 slot + Change slider) -->
+            <div id="ref-row" class="ref-row">
+              <span class="ref-title">References</span>
+              <span id="ref-slots" class="ref-slots"></span>
+              <span id="ref-with" class="ref-with"></span><!-- <lc2c-ref-with> lives on the reference row, NOT in #image-actions: the note appearing must not move the action buttons -->
+              <span id="ref-muted" class="ref-muted" hidden>References: Flux Klein or Z-Image Turbo only</span>
+              <div id="ref-change" class="ref-change" hidden>
+                <label for="ref-change-input">Change</label>
+                <input type="range" id="ref-change-input" min="0.05" max="1" step="0.05" value="0.6" />
+                <span id="ref-change-val" class="ref-change-val">0.60</span>
+                <div class="ref-hint">low = stay close to the reference · high = follow the prompt</div>
+              </div>
+            </div>
+          <label class="insp-label" for="insp-engine-image">Engine</label><select class="insp-engine" id="insp-engine-image" data-setting="workflows.image"></select>
+          <span class="insp-saved" role="status" aria-live="polite"></span>
+          <div class="insp-err" role="status"></div>
+          <div class="insp-adv"><button type="button" class="btn btn-ghost btn-sm" data-adv="image">Advanced · steps, CFG, seed →</button></div>
+            <div class="art-actions" id="image-actions">
+              <button class="art-btn btn btn-secondary" data-action="load-image">Load image…</button>
+              <button class="art-btn btn btn-secondary" data-action="regen-image">Regenerate</button>
+              <button class="art-btn btn btn-primary" data-action="make-3d">Make 3D →</button>
+            </div>
+            <input type="file" id="image-file" accept="image/png,image/jpeg,image/webp" style="display:none;" />
+        </div>
+        <div class="insp-panel" data-insp="image-edit">
+          <label class="insp-label" for="insp-engine-i2i">Engine</label><select class="insp-engine" id="insp-engine-i2i" data-setting="workflows.i2i"></select>
+          <span class="insp-saved" role="status" aria-live="polite"></span>
+          <div class="insp-err" role="status"></div>
+          <div id="i2i-kind" class="seg" role="group" aria-label="Edit kind"></div>
+          <div class="i2i-presets" id="i2i-presets"><!-- filled by JS per engine mode --></div>
+                <label class="insp-label" for="i2i-freetext">Or say it</label>
+                <textarea id="i2i-freetext" class="img-prompt-edit"></textarea>
+                <label class="i2i-cfg-row">strength (CFG)
+                  <input type="range" id="i2i-cfg" min="1" max="8" step="0.5" value="2.5" />
+                  <span id="i2i-cfg-val">2.5</span>
+                </label>
+                <div class="insp-adv"><button type="button" class="btn btn-ghost btn-sm" data-adv="i2i">Advanced · steps, CFG, seed →</button></div>
+                <div class="art-actions">
+                  <button class="art-btn btn btn-primary" id="i2i-apply">Apply edit</button>
+                </div>
+                <div id="i2i-status" class="i2i-status"></div>
+        </div>
+        <div class="insp-panel" data-insp="mesh">
+          <label class="insp-label" for="insp-engine-mesh">Engine</label><select class="insp-engine" id="insp-engine-mesh" data-setting="workflows.mesh"></select>
+          <span class="insp-saved" role="status" aria-live="polite"></span>
+          <div class="insp-err" role="status"></div>
+          <div class="art-actions" id="mesh-actions">
+            <label class="face-label">faces:
+              <input type="number" id="mesh-faces" class="face-input" min="200" max="300000" step="500" placeholder="auto" />
+            </label>
+            <button class="art-btn btn btn-secondary" data-action="regen-mesh">Regenerate mesh</button>
+            <button class="art-btn btn btn-secondary" data-action="save-brush">Save as brush</button>
+          </div>
+          <div class="insp-adv"><button type="button" class="btn btn-ghost btn-sm" data-adv="mesh">Advanced · steps, CFG, seed →</button></div>
+        </div>
+        <div class="insp-panel" data-insp="scene">Pick where the mesh goes — the actions are in the view.</div>
+      </div><!-- /#inspector -->
+      <div id="library-list">
+        <div class="lib-panel visible" id="lib-assets-body"></div>
+        <div class="lib-panel"         id="lib-images-body"></div>
+        <div class="lib-panel"         id="lib-videos-body"></div>
+        <div class="lib-panel"         id="lib-sound-body"></div>
+        <div class="lib-panel"         id="lib-sfx-body"></div>
+        <div class="lib-panel"         id="lib-brushes-body"></div>
+        <div class="lib-panel"         id="lib-materials-body"></div>
+        <div class="lib-panel"         id="lib-characters-body"></div>
+        <div class="lib-panel"         id="lib-palette-body"></div>
+        <div class="lib-panel"         id="lib-workflows-body"></div>
+        <div class="lib-panel"         id="lib-storyboards-body"></div>
+        <div class="lib-panel" id="lib-levels-body"></div>
+      </div>
+    </div>
+
+  </div><!-- /#main-area -->
+
+  <div id="console-wrap" class="collapsed">
+    <div id="console-title"><span id="console-caret">▸</span> debug console</div>
+    <div id="console-log"></div>
+  </div>
+
+  <footer id="status-bar">
+    <div id="status-items"></div>
+    <span id="status-saved" role="status" aria-live="polite"></span>
+    <button type="button" class="btn btn-ghost btn-sm" id="status-log" aria-expanded="false" title="Show / hide the debug log">log</button>
+    <button type="button" class="btn btn-ghost btn-sm" id="status-customize" aria-label="Customize status bar" aria-haspopup="true" aria-expanded="false" title="Customize status bar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></button>
+    <div id="status-custom" role="group" aria-label="Customize status bar" hidden></div>
+    <div id="status-tip" role="status" hidden></div>
+  </footer>
+  </div><!-- /#shell-col -->
+  </div><!-- /#shell -->
+
+  <script>
+    (function () {
+      const messagesEl  = document.getElementById('messages');
+      const inputEl     = document.getElementById('user-input');
+      const sendBtn     = document.getElementById('send-btn');
+      const consoleEl   = document.getElementById('console-log');
+

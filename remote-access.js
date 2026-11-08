@@ -30,6 +30,10 @@ const SYM = Symbol('phoenix.remote.request');   // module-private: the only way 
 const REVOKED = new Set();
 
 const PAIR_TTL_MS    = 5 * 60 * 1000;
+const TOMBSTONE_MS   = 10 * 60 * 1000;   // how long a timed-out request is still recognised
+const TOMBSTONE_MAX  = 32;
+const TIMED_OUT_PHONE  = 'This request timed out - start again from the laptop.';
+const TIMED_OUT_LAPTOP = 'This request timed out - press Pair a phone to start again.';
 const DEVICE_TTL_MS  = 180 * 24 * 3600 * 1000;
 const SEEN_EVERY_MS  = 10 * 60 * 1000;
 const MAX_DEVICES    = 8;
@@ -99,6 +103,9 @@ function create(opts) {
   const claimBucket = bucket(CLAIM_LIMIT), claimGlobal = bucket(CLAIM_GLOBAL_LIMIT), statusBucket = bucket(STATUS_LIMIT), floodBucket = bucket(FLOOD_LIMIT);
   let pairing = null;            // { token, tokenHash, code, codeHash, expires }   (memory only)
   const pending = [];            // { id, name, confirm, claimHash, expires, status, credential, deviceId }
+  const tombstones = new Map();  // id -> { claimHash, at } of a request that timed out
+  let sweepTimer = null;
+  const pairTtl = Number(opts.pairTtlMs) > 0 ? Number(opts.pairTtlMs) : PAIR_TTL_MS;   // opts.pairTtlMs: tests only
   const streams = new Set();     // { req, res, deviceId }
   const sockets = new Set();
   const active = new Set();      // remote requests that passed the pipeline (ctx); those whose body is still arriving die with their device
@@ -147,15 +154,31 @@ function create(opts) {
   }
   function prunePending() {
     const t = now();
+    let removed = false;
     for (let i = pending.length - 1; i >= 0; i--) {
       const p = pending[i];
       if (p.expires <= t) {
         // an approved request that was never picked up: its device would be an orphan nobody holds
         if (p.status === 'approved' && p.credential && p.deviceId) { data.devices = data.devices.filter(d => d.id !== p.deviceId); save(); }
+        tombstones.set(p.id, { claimHash: p.claimHash, at: t });   // the phone must still learn "timed out", not "unknown"
         pending.splice(i, 1);
+        removed = true;
       }
     }
-    if (pairing && pairing.expires <= t) pairing = null;
+    if (pairing && pairing.expires <= t) { pairing = null; removed = true; }
+    for (const [id, tb] of tombstones) if (t - tb.at > TOMBSTONE_MS) tombstones.delete(id);
+    while (tombstones.size > TOMBSTONE_MAX) tombstones.delete(tombstones.keys().next().value);
+    armSweep();
+    if (removed) emit();   // emit -> view() -> prunePending() finds nothing: no recursion
+  }
+  // one timer for the earliest open request: the laptop row goes without a click or a reload (unref: never keeps Phoenix alive)
+  function armSweep() {
+    if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
+    let first = Infinity;
+    for (const p of pending) if (p.status === 'pending' && p.expires < first) first = p.expires;
+    if (first === Infinity) return;
+    sweepTimer = setTimeout(() => { sweepTimer = null; prunePending(); }, Math.max(0, first - now()) + 250);
+    if (sweepTimer.unref) sweepTimer.unref();
   }
 
   const emit = () => { try { onChange(view()); } catch (_) {} };
@@ -252,7 +275,7 @@ function create(opts) {
       if (f !== false) { pairing = null; emit(); return { ok: false, status: 409, error: f === null ? 'Phoenix could not check Tailscale Funnel - pairing is off until it can.' : 'Tailscale Funnel (public internet) is on for this PC - turn it off before pairing a phone.' }; }
       if (st.state !== 'on') return { ok: false, status: 409, error: 'Switch Remote access on first.' };
     }
-    pairing = { token: rnd(24), code: digits(8), expires: now() + PAIR_TTL_MS };
+    pairing = { token: rnd(24), code: digits(8), expires: now() + pairTtl };
     pairing.tokenHash = sha(pairing.token); pairing.codeHash = sha(pairing.code);
     emit();
     return { ok: true, pairing: pairingView() };
@@ -264,6 +287,7 @@ function create(opts) {
   function approve(id) {
     load(); prunePending();
     const p = pending.find(x => x.id === id);
+    if (!p && tombstones.has(id)) return { ok: false, status: 410, error: TIMED_OUT_LAPTOP };
     if (!p) return { ok: false, status: 404, error: 'That request is gone - ask the phone to try again.' };
     if (p.status === 'approved') return { ok: true, duplicate: true, device: deviceView(data.devices.find(d => d.id === p.deviceId)) };   // lesson 3: idempotent
     if (p.status !== 'pending') return { ok: false, status: 409, error: 'That request was already answered.' };
@@ -286,7 +310,9 @@ function create(opts) {
   function reject(id) {
     prunePending();
     const p = pending.find(x => x.id === id);
+    if (!p && tombstones.has(id)) return { ok: false, status: 410, error: TIMED_OUT_LAPTOP };
     if (!p) return { ok: false, status: 404, error: 'That request is gone.' };
+    if (p.status === 'approved') return { ok: false, status: 409, error: 'That request was already answered.' };
     if (p.status === 'pending') p.status = 'rejected';
     emit();
     return { ok: true };
@@ -350,10 +376,11 @@ function create(opts) {
     if (pending.filter(p => p.status === 'pending').length >= MAX_PENDING) return json(res, 409, { error: 'Too many open requests - answer or reject them on the laptop first.' });
     pairing = null;   // one-time: consumed
     const claimSecret = rnd(24);
-    const p = { id: crypto.randomBytes(6).toString('hex'), name: cleanName(b.name), confirm: digits(6), claimHash: sha(claimSecret), expires: t + PAIR_TTL_MS, status: 'pending', credential: null, deviceId: null };
+    const p = { id: crypto.randomBytes(6).toString('hex'), name: cleanName(b.name), confirm: digits(6), claimHash: sha(claimSecret), expires: t + pairTtl, status: 'pending', credential: null, deviceId: null };
     pending.push(p);
+    armSweep();
     emit();
-    return json(res, 200, { id: p.id, claim: claimSecret, confirm: group6(p.confirm), expiresIn: Math.round(PAIR_TTL_MS / 1000) });
+    return json(res, 200, { id: p.id, claim: claimSecret, confirm: group6(p.confirm), expiresIn: Math.round(pairTtl / 1000) });
   }
   async function claimStatus(req, res) {
     const t = now();
@@ -363,12 +390,14 @@ function create(opts) {
     prunePending();
     const p = b && typeof b.id === 'string' ? pending.find(x => x.id === b.id) : null;
     const valid = !!(p && typeof b.claim === 'string' && eqHash(sha(b.claim), p.claimHash));
+    const tb = !p && b && typeof b.id === 'string' ? tombstones.get(b.id) : null;
+    if (tb && typeof b.claim === 'string' && eqHash(sha(b.claim), tb.claimHash)) return json(res, 410, { status: 'expired', error: TIMED_OUT_PHONE });
     // lesson 4: a poll that carries the right claim secret never counts; only wrong guesses fill this (separate) bucket
     if (!valid) {
       if (!statusBucket.hit(clientKey(req), t)) return json(res, 429, { error: 'Too many attempts - wait a minute and try again.' });
       return json(res, 403, { status: 'unknown', error: 'Unknown or expired request.' });
     }
-    if (p.expires <= t) return json(res, 410, { status: 'expired', error: 'The request timed out - start again.' });
+    if (p.expires <= t) return json(res, 410, { status: 'expired', error: TIMED_OUT_PHONE });
     if (p.status === 'rejected') return json(res, 200, { status: 'rejected' });
     if (p.status === 'pending') return json(res, 200, { status: 'pending', confirm: group6(p.confirm) });
     // approved: hand the credential over exactly once, as an HttpOnly cookie
@@ -405,6 +434,7 @@ function create(opts) {
     if (p === '/onboarding/complete') return 'the first-run setup';
     if (p === '/images/trash/empty') return 'emptying the trash';
     if (p === '/secrets') return 'API keys';
+    if (p === '/status/layout') return 'the status bar layout';
     if (p === '/mcp' || p.startsWith('/mcp/')) return 'the MCP connection';
     if (p === '/workflows/uninstall') return 'uninstalling a workflow';
     if (p === '/seat-probe' || p === '/seat-bench') return 'testing a model seat';
@@ -477,10 +507,17 @@ function create(opts) {
       if (pairNav) return servePairPage(req, res);
       if (isClaim) return claim(req, res);
       if (isStatus) return claimStatus(req, res);
+      // a reload of any page by an unpaired phone lands on the pair page, not on raw JSON (fetches and non-GET keep the 401)
+      const mode = h['sec-fetch-mode'], dest = h['sec-fetch-dest'];
+      const nav = method === 'GET' && (mode !== undefined || dest !== undefined
+        ? String(mode).toLowerCase() === 'navigate' || String(dest).toLowerCase() === 'document'
+        : /text\/html/i.test(String(h.accept || '')));
+      if (nav) { res.writeHead(302, { Location: '/remote', 'Cache-Control': 'no-store', 'Content-Length': 0 }); return res.end(); }
       return json(res, 401, { error: 'Not paired - open the pairing link from Phoenix on the laptop.' });
     }
-    if (pairNav) return servePairPage(req, res);
-    if (isClaim || isStatus) return json(res, 409, { error: 'This phone is already paired.' });
+    // a paired phone that lands on the pair page again (QR scanned twice, an old tab) goes home; no-store so a revoked phone sees the pair page again
+    if (pairNav) { res.writeHead(302, { Location: '/', 'Cache-Control': 'no-store', 'Content-Length': 0 }); return res.end(); }
+    if (isClaim || isStatus) return json(res, 409, { error: 'This phone is already paired.', paired: true });
     // 5
     const what = laptopOnlyWhat(method, String(req.url).split(/[?#]/)[0]) || laptopOnlyWhat(method, p);   // the RAW path too: "//workflows//acquire" parses to a host in URL() but is still a spelling to refuse
     if (what) return json(res, 403, { error: 'Only on the laptop: ' + what + '.' });
@@ -564,7 +601,8 @@ function create(opts) {
     originHost = null;
     setState({ state: 'off', origin: null, error: errText || '', port: null });
     invalidateAll();
-    pairing = null; pending.length = 0;
+    pairing = null; pending.length = 0; tombstones.clear();
+    if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
     if (route) {
       let d = null;
       try { d = await transport.disable(route); } catch (_) {}
@@ -606,7 +644,7 @@ function create(opts) {
     // tests
     _limits: limits, _port: () => listenerPort, _sockets: () => sockets.size, _streams: () => streams.size, _reserved: () => reserved,
     _reset() { claimBucket.reset(); claimGlobal.reset(); statusBucket.reset(); floodBucket.reset(); },
-    _data: () => data, _pending: () => pending, _pairing: () => pairing,
+    _data: () => data, _pending: () => pending, _pairing: () => pairing, _tombstones: () => tombstones.size,
     QUICK_FIELDS, isQuickConfigBody, cleanName,
   };
 }

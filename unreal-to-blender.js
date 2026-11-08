@@ -429,7 +429,7 @@ async function importIntoBlender(glbPath, cfg, fixMetallic = []) {
     'print("PHX_RESULT:" + json.dumps(out))',
   ].join('\n');
 
-  const r = await callBlender(py, { cfg, timeoutMs: 300000 });
+  const r = await callBlender(py, { cfg, timeoutMs: 300000, label: 'import from Unreal' });
   const out = String(r.stdout || '').trim();
   if (r.status !== 'ok') throw new Error(`Blender import failed: ${r.message || out}`);
   const m = out.match(/^PHX_RESULT:(.*)$/m);
@@ -658,7 +658,7 @@ async function unrealToBrush(opts = {}) {
       '    o = bpy.data.objects.get(n)',
       '    if o: bpy.data.objects.remove(o, do_unlink=True)',
       'print("PHX_CLEANED")',
-    ].join('\n'), { cfg, timeoutMs: 60000 });
+    ].join('\n'), { cfg, timeoutMs: 60000, label: 'remove imported meshes' });
   };
 
   if (arms.length) {
@@ -666,7 +666,7 @@ async function unrealToBrush(opts = {}) {
     throw new Error(
       `${asset} is rigged (${arms.length} armature: ${arms.map(a => a.name).join(', ')}). ` +
       `A brush holds meshes only — save_brush drops armatures, so the rig would be lost ` +
-      `silently. Rigged characters go through the Human tab (mixamorig) or the Custom-Rig tab. ` +
+      `silently. Rigged characters go through Characters ▸ MakeHuman (mixamorig) or Characters ▸ Custom rig. ` +
       `The imported objects were removed again.`
     );
   }
@@ -698,7 +698,7 @@ async function unrealToBrush(opts = {}) {
     'if picked:',
     '    bpy.context.view_layer.objects.active = bpy.data.objects[picked[0]]',
     'print("PHX_PICKED:" + json.dumps(picked))',
-  ].join('\n'), { cfg, timeoutMs: 60000 });
+  ].join('\n'), { cfg, timeoutMs: 60000, label: 'select imported meshes for brush' });
 
   const pickedMatch = String(selOut.stdout || '').match(/^PHX_PICKED:(.*)$/m);
   const picked = pickedMatch ? JSON.parse(pickedMatch[1]) : [];

@@ -1,8 +1,8 @@
-# Animate says there is no rigged character (Human tab)
+# Animate says there is no rigged character (Characters ▸ MakeHuman)
 
 **Symptoms:** `ANIM_ERR:no mixamo-rigged character in scene` · "Animate" does nothing although a
-figure is clearly standing in Blender · "Describe a new motion…" generates for minutes and then
-cannot apply the result · **Save character** is refused with *"that skeleton has no mixamorig:Hips
+figure is clearly standing in Blender · "Describe a motion…" generates for minutes and then
+cannot apply the result · **Save to saved characters** is refused with *"that skeleton has no mixamorig:Hips
 bone"*.
 **Applies to:** human-tab · runtime
 **Root cause:** the animation path finds its target by looking for the bone **`mixamorig:Hips`**. A
@@ -10,12 +10,12 @@ figure built with **Rig = None** or **Rig = Standard** does not have it, so ther
 animate onto — the character is geometry without the expected skeleton.
 
 ## Fix — do it for me
-1. In the Human tab, set the **Rig** dropdown to **Mixamo (animatable)** *before* pressing Generate.
-2. **Generate** → **Place in scene**.
+1. In Characters (MakeHuman), open the **Rig** step and set **Rig** to **Mixamo (animatable)** *before* pressing Rebuild preview.
+2. **Rebuild preview** → **Place in scene**.
 3. Animate again — the clip now finds its target.
 
 An existing figure cannot be upgraded in place: rebuild it with the Mixamo rig (your slider settings
-stay as they are, so this costs one Generate).
+stay as they are, so this costs one Rebuild preview).
 
 ## Fix — explain it
 Every clip Phoenix applies — uploaded Mixamo FBX, generated text→motion, saved custom clips — is
@@ -30,7 +30,7 @@ Select the figure in Blender, open the armature in the outliner: the bones are n
 
 ## Notes
 Creature and machine rigs (deer, monsters, robots) legitimately have **no** `mixamorig:` bones —
-they belong in the **Custom Rig** tab, where clips are bound to that folder's own skeleton instead.
-The refusal message is the routing: if Save character rejects it, the Custom Rig tab is where it goes.
+they belong in the **Custom rig** source (Characters ▸ + New character ▸ Custom rig), where clips are bound to that folder's own skeleton instead.
+The refusal message is the routing: if Save to saved characters rejects it, the Custom rig source is where it goes.
 A Mixamo rig **without fingers** (an option in Mixamo's auto-rigger) is fine — the retarget skips
 bones the source lacks, and the fingers simply stay still.

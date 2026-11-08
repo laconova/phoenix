@@ -21,9 +21,10 @@ const { callBlender } = require('./blender-ipc');
 // The seam machinery (yaw match, rotation continuity, position offset, NLA stacking) lives in
 // animate_human.js and is skeleton-agnostic — it only needs to be told which bone carries the
 // root motion. sequenceClips() below drives that same builder with this library's values.
-const { buildSequenceAnimationsCode } = require('./animate_human');
+const { buildSequenceAnimationsCode, HIDE_HELPERS_PY } = require('./animate_human');
 
-const CUSTOM_DIR = path.join(__dirname, 'custom-rigs');
+// Test seam: PHOENIX_CUSTOM_RIGS_DIR moves the library (suites never touch the real folder). Default = today's folder.
+const CUSTOM_DIR = process.env.PHOENIX_CUSTOM_RIGS_DIR || path.join(__dirname, 'custom-rigs');
 
 function ensureDir() {
   try { fs.mkdirSync(CUSTOM_DIR, { recursive: true }); } catch (_) { /* ignore */ }
@@ -102,7 +103,7 @@ function listFolders() {
   let names = [];
   try {
     names = fs.readdirSync(CUSTOM_DIR, { withFileTypes: true })
-      .filter(d => d.isDirectory()).map(d => d.name).sort();
+      .filter(d => d.isDirectory() && !d.name.startsWith('.')).map(d => d.name).sort();   // the trash lives in custom-rigs/.trash
   } catch (_) { /* ignore */ }
   return names.map(describeFolder).filter(Boolean);
 }
@@ -133,31 +134,75 @@ function renameFolder(oldName, newName) {
   return { folder: describeFolder(newName) };
 }
 
-// Delete a folder and everything in it. Containment-checked via folderPath.
+// Delete a folder: the whole folder moves into custom-rigs/.trash (library-trash). Containment-checked via folderPath.
 function deleteFolder(name) {
   const abs = folderPath(name);
   if (!abs) return { error: 'invalid folder name.' };
   if (!fs.existsSync(abs)) return { error: 'folder does not exist.' };
-  try { fs.rmSync(abs, { recursive: true, force: true }); } catch (e) { return { error: e.message }; }
-  return { ok: true };
+  // R5a: delete = move to the Library trash (Undo restores it); no hard delete any more
+  const r = require('./library-trash').trashCustomRig(safeFolder(name));
+  return r.ok ? { ok: true, id: r.id } : { error: r.error };
 }
 
 // Skeleton picker for CUSTOM rigs — deliberately NOT the Mixamo-specific one: a deer/
-// creature rig has none of the mixamorig: bones. Take the active object's armature root,
-// else the first armature in the scene.
-const CUSTOM_TARGET_PY = [
-  'def _rootof(o):',
-  '    while o.parent is not None: o = o.parent',
-  '    return o',
-  '_arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]',
+// creature rig has none of the mixamorig: bones. CUSTOM_PICK_PY looks ONLY at the selected objects
+// of the current scene (a visible active object that is not selected counts for nothing - Alt+A leaves
+// one active; the single exception, only when nothing is selected, is a Phoenix STAGED preview -
+// hidden and tagged mh_staged - which cannot be selected at all in Blender), takes each one's
+// nearest ARMATURE (itself or the closest armature parent; an Empty above the rig is skipped) and
+// uses it when exactly one distinct armature results. None -> src stays None; two or more -> src
+// stays None and _amb is True (Assign/Re-assign overwrite, so they refuse instead of guessing).
+// CUSTOM_TARGET_PY adds a scene-only fallback for the clip users: the only armature in the
+// current scene when nothing was selected, never one from bpy.data.
+const _ind = (lines, n) => lines.map(l => ' '.repeat(n) + l);
+
+const CUSTOM_PICK_PY = [
+  'import bpy',   // self-contained: the picker also runs on its own (tests)
   'src = None',
+  '_amb = False',
+  // A candidate counts only when it is in the current scene (a mesh can have a parent rig that lives outside it).
+  '_insc = set(bpy.context.scene.objects)',
+  // The armature of an object: itself; for a mesh the in-scene target of its Armature modifier first, then the nearest armature up the parent chain.
+  'def _armof(o):',
+  '    if o.type == "MESH":',
+  '        for _md in o.modifiers:',
+  '            if _md.type == "ARMATURE" and _md.object is not None and _md.object in _insc: return _md.object',
+  '    while o is not None and o.type != "ARMATURE": o = o.parent',
+  '    return o',
+  '_selrigs = {}',
+  '_anysel = False',
   '_act = bpy.context.view_layer.objects.active',
-  'if _act is not None:',
-  '    _r = _rootof(_act)',
-  '    if _r.type == "ARMATURE": src = _r',
-  'if src is None and _act is not None and _act.type == "ARMATURE": src = _act',
-  'if src is None and _arms: src = _arms[0]',
+  'for _o in bpy.context.view_layer.objects:',
+  '    if _o in _insc and _o.select_get():',
+  '        _anysel = True',
+  '        _r = _armof(_o)',
+  '        if _r is not None and _r in _insc: _selrigs[_r.name] = _r',
+  // NOTHING at all selected (not even an unrelated object): the only way in is a Phoenix STAGED preview (hidden and tagged mh_staged by the MakeHuman builder - it cannot be selected in Blender).
+  'if not _anysel and _act is not None:',
+  '    _r = _armof(_act)',
+  '    _staged = False',
+  '    try:',
+  '        if _r is not None and _r in _insc and bool(_r.hide_viewport or _r.hide_get()):',
+  '            _p = _r',
+  '            while _p is not None:',
+  '                if _p.get("mh_staged"): _staged = True',
+  '                _p = _p.parent',
+  '    except Exception: _staged = False',
+  '    if _staged: _selrigs[_r.name] = _r',
+  'if len(_selrigs) == 1: src = list(_selrigs.values())[0]',
+  'elif len(_selrigs) > 1: _amb = True',
 ];
+
+const CUSTOM_TARGET_PY = [
+  ...CUSTOM_PICK_PY,
+  '_arms = [o for o in bpy.context.scene.objects if o.type == "ARMATURE"]',
+  'if src is None and not _amb:',
+  '    if len(_arms) == 1: src = _arms[0]',
+  '    elif len(_arms) > 1: _amb = True',
+];
+
+// One message for the "several rigs" case, shared by every user of the pickers.
+const CUSTOM_AMBIGUOUS_MSG = 'Several rigs are in the scene — select the one to animate.';
 
 // Write the bare skeleton (rest pose) to rig.blend. Done on a DUPLICATE with its animation
 // cleared, so the user's live rig — pose, animation, everything — is untouched.
@@ -166,11 +211,12 @@ function buildAssignCode(rigBlendAbs, rigName) {
   const NAME = safeFolder(rigName) || 'custom_rig';
   return [
     'import bpy, os',
+    ...HIDE_HELPERS_PY,
     `OUT = ${JSON.stringify(OUT)}`,
     `RIGNAME = ${JSON.stringify(NAME)}`,
-    ...CUSTOM_TARGET_PY,
+    ...CUSTOM_PICK_PY,
     'if src is None:',
-    '    print("CRIG_ERR:no armature selected to assign")',
+    '    print("CRIG_ERR:" + ("Several rigs are selected — select just the one to assign, then press Assign again." if _amb else "select the rig in the scene first, then press Assign again."))',
     'else:',
     '    os.makedirs(os.path.dirname(OUT), exist_ok=True)',
     // Erst in den OBJECT-Modus — beide Geschwister (characters.js, buildSaveMeshCode) tun das,
@@ -179,39 +225,49 @@ function buildAssignCode(rigBlendAbs, rigName) {
     '    try: bpy.ops.object.mode_set(mode="OBJECT")',
     '    except Exception: pass',
     '    bpy.ops.object.select_all(action="DESELECT")',
-    '    src.select_set(True); bpy.context.view_layer.objects.active = src',
     // Die Kopie wird ueber den NAMENSVERGLEICH bestimmt, nicht ueber die Selektion:
     // "loesche im finally, was gerade selektiert ist" waere im Fall, dass duplicate()
     // nichts erzeugt und die Originale selektiert laesst, ein Loeschbefehl auf das
     // Rig des Users. Ueber die Differenz vorher/nachher kann nur Neues geloescht werden.
-    '    _before = set(o.name for o in bpy.data.objects)',
-    '    bpy.ops.object.duplicate()',
-    '    _dups = [o for o in bpy.data.objects if o.name not in _before]',
-    '    if not _dups:',
-    '        raise RuntimeError("duplicate() created nothing - aborting before touching the original")',
-    '    _dup = _dups[0]',
-    // Name it after the folder so it reads sensibly when spawned (Blender adds .001 on any
-    // clash in the target scene — normal, harmless).
-    // try/finally: a raising libraries.write (full disk, bad path, denied permission) would
-    // otherwise leave the duplicated rig standing in the user's scene — a failed save that
-    // litters the file it was protecting.
+    // Das Rig kann ein gestagtes (verstecktes) Preview sein: der aeussere try/finally stellt den Versteckt-Zustand exakt wieder her.
+    '    _prior = _phx_unhide([src])',
     '    try:',
-    '        _dup.name = RIGNAME',
-    '        if _dup.animation_data:',           // rest-pose template: no animation
-    '            _dup.animation_data_clear()',
-    '        for _pb in _dup.pose.bones:',       // clear any live pose offset
-    '            _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
-    '            _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
-    '        _sig = sorted(b.name for b in _dup.data.bones)',
-    '        bpy.data.libraries.write(OUT, {_dup}, fake_user=True)',
-    '        _rigname = src.name',
+    ..._ind([
+      '_phx_select([src], src)',
+      '_before = set(o.name for o in bpy.data.objects)',
+      'bpy.ops.object.duplicate()',
+      '_dups = [o for o in bpy.data.objects if o.name not in _before]',
+      'if not _dups:',
+      '    raise RuntimeError("duplicate() created nothing - aborting before touching the original")',
+      '_dup = _dups[0]',
+      // Name it after the folder so it reads sensibly when spawned (Blender adds .001 on any
+      // clash in the target scene — normal, harmless).
+      // try/finally: a raising libraries.write (full disk, bad path, denied permission) would
+      // otherwise leave the duplicated rig standing in the user's scene — a failed save that
+      // litters the file it was protecting.
+      'try:',
+      '    _dup.name = RIGNAME',
+      '    _phx_untag(_dups)',
+      '    if _dup.animation_data:',           // rest-pose template: no animation
+      '        _dup.animation_data_clear()',
+      '    for _pb in _dup.pose.bones:',       // clear any live pose offset
+      '        _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
+      '        _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
+      '    _sig = sorted(b.name for b in _dup.data.bones)',
+      '    bpy.data.libraries.write(OUT, {_dup}, fake_user=True)',
+      '    _rigname = src.name',
+      'finally:',
+      '    for _o in _dups:',
+      '        try: bpy.data.objects.remove(_o, do_unlink=True)',
+      '        except Exception: pass',
+      '_size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
+      'print("CRIG_ASSIGN:rig=" + _rigname + ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
+      'print("CRIG_SIG:" + ",".join(_sig))',
+    ], 8),
+    '    except _PhxNoSelect as _e:',
+    '        print("CRIG_ERR:" + str(_e))',
     '    finally:',
-    '        for _o in _dups:',
-    '            try: bpy.data.objects.remove(_o, do_unlink=True)',
-    '            except Exception: pass',
-    '    _size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
-    '    print("CRIG_ASSIGN:rig=" + _rigname + ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
-    '    print("CRIG_SIG:" + ",".join(_sig))',
+    '        _phx_restore(_prior)',
   ].join('\n');
 }
 
@@ -247,7 +303,7 @@ async function assignSkeleton(input = {}, cfg) {
   const _cleanTmp = () => { try { fs.unlinkSync(tmpBlend); } catch (_) { /* ignore */ } };
   let r;
   try {
-    r = await callBlender(buildAssignCode(tmpBlend, input.folder), { cfg, timeoutMs: 120000 });
+    r = await callBlender(buildAssignCode(tmpBlend, input.folder), { cfg, timeoutMs: 120000, label: 'assign custom rig' });
   } catch (e) { _cleanTmp(); return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') { _cleanTmp(); return 'ERROR: ' + (r.message || out); }
@@ -294,7 +350,7 @@ async function spawnRig(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildSpawnCode(blendAbs), { cfg, timeoutMs: 60000 });
+    r = await callBlender(buildSpawnCode(blendAbs), { cfg, timeoutMs: 60000, label: 'spawn custom rig' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -314,12 +370,13 @@ function buildCustomSaveCode(outAbs) {
   const OUT = outAbs.replace(/\\/g, '/');   // Blender takes forward slashes on every OS
   return [
     'import bpy, addon_utils, os',
+    ...HIDE_HELPERS_PY,
     `OUT = ${JSON.stringify(OUT)}`,
     'addon_utils.enable("io_scene_fbx", default_set=False, persistent=False)',
     ...CUSTOM_TARGET_PY,
     'dst = src',
     'if dst is None:',
-    '    print("CSAVE_ERR:no armature selected to save (select your rig in the scene)")',
+    '    print("CSAVE_ERR:" + (' + JSON.stringify(CUSTOM_AMBIGUOUS_MSG.replace('animate', 'save')) + ' if _amb else "no armature selected to save (select your rig in the scene)"))',
     'else:',
     '    _ad = dst.animation_data',
     '    _has_action = bool(_ad and _ad.action)',
@@ -344,13 +401,20 @@ function buildCustomSaveCode(outAbs) {
     '            _prev_mode = None',
     '        _dup = None',
     '        _err = None',
+    // A staged (hidden) rig cannot be selected, so duplicate() copied nothing and the ORIGINAL became the "copy" (renamed, then removed in the finally).
+    // Unhide for the copy, verify, find the copy by name difference, and rehide in the very last step of the finally.
+    '        _prior = _phx_unhide([dst])',
     '        try:',
     // Bake NLA into a single action on a DUPLICATE, then export the duplicate — one take with
     // the evaluated motion, live scene never touched (same reasoning as the Human-tab save).
     '            bpy.ops.object.select_all(action="DESELECT")',
-    '            dst.select_set(True); bpy.context.view_layer.objects.active = dst',
+    '            _phx_select([dst], dst)',
+    '            _before = set(o.name for o in bpy.data.objects)',
     '            bpy.ops.object.duplicate()',
-    '            _dup = bpy.context.view_layer.objects.active',
+    '            _new = [o for o in bpy.data.objects if o.name not in _before]',
+    '            if not _new:',
+    '                raise RuntimeError("duplicate() created nothing - nothing was saved, the rig was not touched")',
+    '            _dup = _new[0]',
     '            _dup.name = "__csave_tmp__"',
     '            bpy.ops.object.mode_set(mode="POSE")',
     '            bpy.ops.pose.select_all(action="SELECT")',
@@ -393,6 +457,7 @@ function buildCustomSaveCode(outAbs) {
     '                    _po.select_set(True)',
     '                    if _prev_mode: bpy.ops.object.mode_set(mode=_prev_mode)',
     '            except Exception: pass',
+    '            _phx_restore(_prior)',   // last: the mode restore above still needs the rig selectable
     '        if _err is not None:',
     '            _m = str(_err).replace(chr(10), " ").strip()',
     '            if "poll()" in _m or "context is incorrect" in _m:',
@@ -423,7 +488,7 @@ async function saveClip(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildCustomSaveCode(outAbs), { cfg, timeoutMs: 180000 });
+    r = await callBlender(buildCustomSaveCode(outAbs), { cfg, timeoutMs: 180000, label: 'save custom rig' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -467,7 +532,7 @@ function buildCustomAnimateCode(fbxAbs) {
     ...CUSTOM_TARGET_PY,
     'dst = src',
     'if dst is None:',
-    '    print("CANIM_ERR:no armature in the scene to animate (spawn this folder\'s rig first)")',
+    '    print("CANIM_ERR:" + (' + JSON.stringify(CUSTOM_AMBIGUOUS_MSG) + ' if _amb else "no armature in the scene to animate (spawn this folder\'s rig first)"))',
     'else:',
     '    _before = set(bpy.data.objects)',
     // The import brings its own action, with a fake user attached by Blender's FBX importer, so
@@ -590,7 +655,7 @@ async function animateClip(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildCustomAnimateCode(clipAbs), { cfg, timeoutMs: 300000 });
+    r = await callBlender(buildCustomAnimateCode(clipAbs), { cfg, timeoutMs: 300000, label: 'animate custom rig' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -667,6 +732,7 @@ const CUSTOM_CLIPPLACE_PY = [
 const CUSTOM_SEQ_OPTS = {
   targetPy: [...CUSTOM_TARGET_PY, 'dst = src'],
   errNoTarget: "no armature in the scene to animate (spawn this folder's rig first)",
+  errAmbiguous: CUSTOM_AMBIGUOUS_MSG,
   rootPy: CUSTOM_ROOT_PY,
   rootMatch: 'fc.data_path.startswith(_HIPPATH)',
   rootNoMatch: 'not fc.data_path.startswith(_HIPPATH)',
@@ -698,7 +764,7 @@ async function sequenceClips(input = {}, cfg) {
     // have no counterpart here, and the target is picked from the scene, not by name.
     r = await callBlender(
       buildSequenceAnimationsCode(resolved, input.blend, 0, '', append, CUSTOM_SEQ_OPTS),
-      { cfg, timeoutMs: 900000 });
+      { cfg, timeoutMs: 900000, label: 'apply animation sequence to custom rig' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -872,7 +938,7 @@ async function prepareMesh(input = {}, cfg) {
   let r;
   try {
     // A voxel remesh on a dense mesh is minutes of work, not seconds.
-    r = await callBlender(buildPrepareMeshCode(voxel, doRemesh), { cfg, timeoutMs: 600000 });
+    r = await callBlender(buildPrepareMeshCode(voxel, doRemesh), { cfg, timeoutMs: 600000, label: 'prepare mesh for rigging' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -903,7 +969,7 @@ async function bindMesh(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildBindMeshCode(sig.bones), { cfg, timeoutMs: 600000 });
+    r = await callBlender(buildBindMeshCode(sig.bones), { cfg, timeoutMs: 600000, label: 'bind mesh to rig' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -932,30 +998,17 @@ function buildSaveMeshCode(outAbs) {
   const OUT = outAbs.replace(/\\/g, '/');
   return [
     'import bpy, os',
+    ...HIDE_HELPERS_PY,
     `OUT = ${JSON.stringify(OUT)}`,
     // A creature is usually MANY meshes on one skeleton (body + head + eyes + teeth …). Find the
     // ARMATURE first, then grab EVERY mesh bound to it — not just the one selected. That is what
     // "save the whole creature as a variant" needs, and it fixes the earlier "only the head" bug.
-    '_act = bpy.context.view_layer.objects.active',
-    '_arm = _act if (_act is not None and _act.type == "ARMATURE") else None',
-    // If a mesh (not an armature) is active/selected, follow it to its armature.
+    // The creature is whatever is SELECTED in the current scene (its rig or any of its meshes): the same
+    // shared picker as Assign, no guess from the active object and none from the rest of the file.
+    ...CUSTOM_PICK_PY,
+    '_arm = src',
     'if _arm is None:',
-    '    _cm = _act if (_act is not None and _act.type == "MESH") else next((o for o in bpy.context.selected_objects if o.type == "MESH"), None)',
-    '    if _cm is not None:',
-    '        for _md in _cm.modifiers:',
-    '            if _md.type == "ARMATURE" and _md.object is not None:',
-    '                _arm = _md.object; break',
-    '        if _arm is None:',
-    '            _p = _cm.parent',
-    '            while _p is not None and _p.type != "ARMATURE":',
-    '                _p = _p.parent',
-    '            if _p is not None and _p.type == "ARMATURE": _arm = _p',
-    // Last resort: the only armature in the file.
-    'if _arm is None:',
-    '    _arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]',
-    '    if len(_arms) == 1: _arm = _arms[0]',
-    'if _arm is None:',
-    '    print("CMESH_ERR:could not find the armature — select the creature (its rig or any of its meshes) first")',
+    '    print("CMESH_ERR:" + ("several rigs are selected — select just one creature (its rig or any of its meshes)" if _amb else "could not find the armature — select the creature (its rig or any of its meshes) first"))',
     'else:',
     // Every mesh bound to _arm: an Armature-modifier target == _arm, OR parented (any depth) to _arm.
     '    def _bound(o):',
@@ -967,7 +1020,7 @@ function buildSaveMeshCode(outAbs) {
     '            if _p is _arm: return True',
     '            _p = _p.parent',
     '        return False',
-    '    _meshes = [o for o in bpy.data.objects if _bound(o)]',
+    '    _meshes = [o for o in bpy.context.scene.objects if _bound(o)]',
     '    if not _meshes:',
     '        print("CMESH_ERR:no meshes are bound to this armature")',
     '    else:',
@@ -985,36 +1038,44 @@ function buildSaveMeshCode(outAbs) {
     // armature-modifier/parent onto the duplicate armature automatically.
     '        try: bpy.ops.object.mode_set(mode="OBJECT")',
     '        except Exception: pass',
-    '        bpy.ops.object.select_all(action="DESELECT")',
-    '        for _o in _meshes: _o.select_set(True)',
-    '        _arm.select_set(True); bpy.context.view_layer.objects.active = _arm',
-    // Namensvergleich statt Selektion — siehe buildAssignCode: nur wirklich Neues darf
-    // im finally geloescht werden, sonst raeumt ein fehlgeschlagenes duplicate() die
-    // Originale des Users weg.
-    '        _before = set(o.name for o in bpy.data.objects)',
-    '        bpy.ops.object.duplicate()',
-    '        _dups = [o for o in bpy.data.objects if o.name not in _before]',
-    '        if not _dups:',
-    '            raise RuntimeError("duplicate() created nothing - aborting before touching the originals")',
-    // try/finally — same reason as the character save: a failed write must not leave the
-    // duplicated armature + mesh copies behind in the user's scene.
+    // The creature can be a staged (hidden) preview: unhide for the copy, put the hide state back exactly in the outer finally.
+    '        _prior = _phx_unhide([_arm] + _meshes)',
     '        try:',
-    '            _darm = next((o for o in _dups if o.type == "ARMATURE"), None)',
-    '            if _darm is not None:',
-    '                if _darm.animation_data:',
-    '                    _darm.animation_data_clear()',
-    '                for _pb in _darm.pose.bones:',
-    '                    _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
-    '                    _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
-    '            bpy.data.libraries.write(OUT, set(_dups), fake_user=True)',
-    '            _size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
+    ..._ind([
+      '_phx_select(_meshes + [_arm], _arm)',
+      // Namensvergleich statt Selektion — siehe buildAssignCode: nur wirklich Neues darf
+      // im finally geloescht werden, sonst raeumt ein fehlgeschlagenes duplicate() die
+      // Originale des Users weg.
+      '_before = set(o.name for o in bpy.data.objects)',
+      'bpy.ops.object.duplicate()',
+      '_dups = [o for o in bpy.data.objects if o.name not in _before]',
+      'if not _dups:',
+      '    raise RuntimeError("duplicate() created nothing - aborting before touching the originals")',
+      // try/finally — same reason as the character save: a failed write must not leave the
+      // duplicated armature + mesh copies behind in the user's scene.
+      'try:',
+      '    _phx_untag(_dups)',
+      '    _darm = next((o for o in _dups if o.type == "ARMATURE"), None)',
+      '    if _darm is not None:',
+      '        if _darm.animation_data:',
+      '            _darm.animation_data_clear()',
+      '        for _pb in _darm.pose.bones:',
+      '            _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
+      '            _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
+      '    bpy.data.libraries.write(OUT, set(_dups), fake_user=True)',
+      '    _size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
+      'finally:',
+      '    for _o in _dups:',
+      '        try: bpy.data.objects.remove(_o, do_unlink=True)',
+      '        except Exception: pass',
+      'print("CMESH_DONE:meshes=" + str(_nmesh) + ":arm=" + _arm.name +',
+      '      ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
+      'print("CMESH_SIG:" + ",".join(_sig))',
+    ], 12),
+    '        except _PhxNoSelect as _e:',
+    '            print("CMESH_ERR:" + str(_e))',
     '        finally:',
-    '            for _o in _dups:',
-    '                try: bpy.data.objects.remove(_o, do_unlink=True)',
-    '                except Exception: pass',
-    '        print("CMESH_DONE:meshes=" + str(_nmesh) + ":arm=" + _arm.name +',
-    '              ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
-    '        print("CMESH_SIG:" + ",".join(_sig))',
+    '            _phx_restore(_prior)',
   ].join('\n');
 }
 
@@ -1032,7 +1093,7 @@ async function saveMesh(input = {}, cfg) {
   if (fs.existsSync(outAbs)) return `ERROR: a variant named "${safe}" already exists in this folder.`;
   let r;
   try {
-    r = await callBlender(buildSaveMeshCode(outAbs), { cfg, timeoutMs: 180000 });
+    r = await callBlender(buildSaveMeshCode(outAbs), { cfg, timeoutMs: 180000, label: 'save rigged mesh' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);
@@ -1062,5 +1123,5 @@ module.exports = {
   listFolders, createFolder, renameFolder, deleteFolder, assignSkeleton, spawnRig,
   saveClip, animateClip, sequenceClips, saveMesh, prepareMesh, bindMesh,
   buildAssignCode, buildSpawnCode, buildCustomSaveCode, buildCustomAnimateCode, buildSaveMeshCode,
-  buildPrepareMeshCode, buildBindMeshCode,
+  buildPrepareMeshCode, buildBindMeshCode, CUSTOM_PICK_PY, CUSTOM_TARGET_PY,
 };

@@ -154,7 +154,7 @@ function parseTagged(r, tag) {
 }
 // Sweep 3 E: cfg is threaded through EVERY IPC call so cfg.apps.blenderIpcDir is honoured (it used to be ignored here).
 const call = (callBlender, code, timeoutMs, cfg) =>
-  (callBlender || ((c, o) => blenderIpc.callBlender(c, o)))(code, { cfg, timeoutMs });
+  (callBlender || ((c, o) => blenderIpc.callBlender(c, o)))(code, { cfg, timeoutMs, readOnly: true });
 
 // Which file Blender has open right now → string ('' = untitled) | null (Blender not reachable).
 async function currentFilepath({ callBlender, timeoutMs = 3000, cfg } = {}) {

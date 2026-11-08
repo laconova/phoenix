@@ -32,9 +32,11 @@ const soundFx = require('./sound-fx');
 // project-local requires itself, so no cycle).
 const wfLib = require('./workflows');
 
-const OUT_DIR = path.join(__dirname, 'sounds', 'vo');
+// R5b: PHOENIX_SOUNDS_DIR (evaluated at require time) lets tests/installs relocate the whole sounds tree.
+const SOUNDS_ROOT = process.env.PHOENIX_SOUNDS_DIR || path.join(__dirname, 'sounds');
+const OUT_DIR = path.join(SOUNDS_ROOT, 'vo');
 // Reference voices for cloning engines (Chatterbox): the user drops clean WAVs here. Created on demand.
-const REFS_DIR = path.join(__dirname, 'sounds', 'refs');
+const REFS_DIR = path.join(SOUNDS_ROOT, 'refs');
 let DISPATCHER_SCRIPT = path.join(__dirname, 'voice-dispatcher.js');
 const DEFAULT_DISPATCHER_PORT = 8091;
 
@@ -495,7 +497,7 @@ function dispatcherShutdown() {
   return lifecycle();
 }
 
-// ── Settings → Voice (VO1b) ───────────────────────────────────────────────────
+// ── Settings → Voice engines (VO1b) ───────────────────────────────────────────────────
 // A view + validated writes for voice.dispatcher / voiceInstall.voice / voice.watermark / voice.consentAck, so a
 // customer never edits phoenix-config.json by hand. server.js calls settingsView() (GET/POST /config) and
 // validateSettings()+applySettings() (POST /config); nothing here touches the disk but statfsSync.
@@ -603,14 +605,14 @@ function validateSettings(b) {
 function applySettings(fresh, st) {
   if (!fresh.voice || typeof fresh.voice !== 'object') fresh.voice = {};
   const v = fresh.voice;
-  if (v.dispatcher === true && ('dispatcherLocal' in st)) return { error: 'The rig dispatcher is set in phoenix-config.json and cannot be changed here.', field: 'dispatcherLocal' };
+  if (v.dispatcher === true && ('dispatcherLocal' in st)) return { error: 'The voice server is set in phoenix-config.json and cannot be changed here.', field: 'dispatcherLocal' };
   if (!plainObj(fresh.voiceInstall)) fresh.voiceInstall = {};
   const oldRoot = (plainObj(fresh.voiceInstall.voice) && fresh.voiceInstall.voice.root) || null;
   const cp0 = (v.dispatcher && typeof v.dispatcher === 'object') ? Number(v.dispatcher.port) : NaN;
   const curPort = Number.isInteger(cp0) ? cp0 : null;
   // the port lives in voice.dispatcher.port ONLY
   if ('port' in st) {
-    if (v.dispatcher === true) return { error: 'The port is set by the rig dispatcher (phoenix-config.json).', field: 'port' };
+    if (v.dispatcher === true) return { error: 'The port is set by the voice server (phoenix-config.json).', field: 'port' };
     if (!(v.dispatcher && typeof v.dispatcher === 'object') && st.dispatcherLocal !== true) return { error: 'Turn on "Run voice engines on this PC" first, then set the port.', field: 'port' };
   }
   if ('port' in st && v.dispatcher && typeof v.dispatcher === 'object') v.dispatcher.port = st.port;
@@ -634,8 +636,9 @@ function applySettings(fresh, st) {
   return out;
 }
 
-// speak({voice, text, effect, strength, engine, seed, reference}) -> { file, url, seconds, effect, filter, seed, seedIgnored }
-async function speak({ voice, text, effect, strength, engine, seed, reference } = {}) {
+// speak({voice, text, effect, strength, engine, seed, reference, chain}) -> { file, url, seconds, effect, filter, steps, chain, seed, seedIgnored }
+// R5b: `chain` (the effect-rack shape of sound-fx.buildChain) is optional; present = a non-null object with a non-empty `order`.
+async function speak({ voice, text, effect, strength, engine, seed, reference, chain: rackChain } = {}) {
   const base = apiBase();
   // VO1 local mode: a non-crispasr engine is served by the local dispatcher, so it needs neither voice.api
   // nor a voice pack (the reference WAV is the voice). crispasr and everything else is unchanged.
@@ -660,13 +663,27 @@ async function speak({ voice, text, effect, strength, engine, seed, reference } 
   const seedIgnored = eng.id === 'crispasr' && !seedInfo.none;
   const sendSeed = eng.id !== 'crispasr' && !seedInfo.none;
 
+  // R5b: a rack chain is validated before any network call; it replaces effect/strength.
+  // undefined / null = no rack; ANY other value must be a valid chain (refused before any network call)
+  const hasRack = rackChain !== undefined && rackChain !== null;
+  let rackBuilt = null;
+  if (hasRack) {
+    try {
+      if (typeof rackChain !== 'object' || Array.isArray(rackChain)) throw new Error('chain must be an object with advanced + order');
+      // the rack shape only: buildChain's legacy {effect, strength} branch is for the top-level effect/strength fields, never for a supplied chain
+      if ('effect' in rackChain || 'strength' in rackChain || !rackChain.advanced || typeof rackChain.advanced !== 'object' || Array.isArray(rackChain.advanced) || !Array.isArray(rackChain.order) || !rackChain.order.length) throw new Error('a rack chain is { advanced, order } with a non-empty order');
+      rackBuilt = soundFx.buildChain(rackChain);
+    } catch (e) { return { error: 'effect chain: ' + e.message }; }
+    effect = null;
+  }
+
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const base_name = (voice || eng.id) + '_' + slug(text) + '_' + stamp;
 
   const reqBody = { model: 'tada', voice, input: String(text), engine: eng.id };
   if (sendSeed) reqBody.params = { seed: seedInfo.value };
-  // VO1b: the Perth watermark is ON unless the user explicitly turned it off in Settings -> Voice.
+  // VO1b: the Perth watermark is ON unless the user explicitly turned it off in Settings -> Voice engines.
   if (eng.id !== 'crispasr' && cfg().watermark === false) reqBody.params = Object.assign(reqBody.params || {}, { watermark: false });
 
   // VO1 reference voice. Phoenix resolves the chosen NAME to an absolute path under sounds/refs/ (basename
@@ -678,7 +695,7 @@ async function speak({ voice, text, effect, strength, engine, seed, reference } 
     const wantRef = localRoute || (reference != null && String(reference).trim() !== '');
     if (wantRef) {
       // VO1b: cloning a voice needs the one-time consent ("your own voice, your characters"), stored server-side.
-      if (cfg().consentAck !== true) return { error: 'confirm the voice consent first (Settings → Voice)', status: 409, consentRequired: true };
+      if (cfg().consentAck !== true) return { error: 'confirm the voice consent first (Settings → Voice engines)', status: 409, consentRequired: true };
       const rr = resolveRef(reference);
       if (rr.error) return { error: rr.error };
       reqBody.reference = rr.path;
@@ -731,15 +748,18 @@ async function speak({ voice, text, effect, strength, engine, seed, reference } 
   const wmReason = (wm === 'failed' && r.headers['x-voice-watermark-reason']) ? String(r.headers['x-voice-watermark-reason']).slice(0, 200) : null;
   const seedSuffix = respSeed != null ? ('_s' + respSeed) : '';
   const named_base = base_name + seedSuffix;
-  const rawFile = path.join(OUT_DIR, named_base + (effect ? '_raw.wav' : '.wav'));
+  const rawFile = path.join(OUT_DIR, named_base + ((effect || hasRack) ? '_raw.wav' : '.wav'));
 
-  fs.writeFileSync(rawFile, r.buf);
+  // #24: the engine's metadata chunks (LIST/Lavf ...) are dropped before the write; fmt and data stay. A C2PA-signed take stays untouched: its hash covers LIST and the audio, so stripping would break the signature. Never fails a take.
+  let rawBuf = r.buf;
+  try { rawBuf = require('./wav-trim').stripWavMeta(r.buf); } catch (_) { /* stripping never fails a take */ }
+  fs.writeFileSync(rawFile, rawBuf);
 
   let finalFile = rawFile;
   let chain = null;
-  if (effect) {
+  if (effect || hasRack) {
     try {
-      chain = soundFx.buildChain({ effect, strength: typeof strength === 'number' ? strength : 0.5 });
+      chain = hasRack ? rackBuilt : soundFx.buildChain({ effect, strength: typeof strength === 'number' ? strength : 0.5 });
       finalFile = path.join(OUT_DIR, named_base + '.wav');
       await runFfmpeg(rawFile, finalFile, chain);
     } catch (e) {
@@ -749,6 +769,9 @@ async function speak({ voice, text, effect, strength, engine, seed, reference } 
     }
   }
 
+  // F1.4: the final take loses its trailing silence once (keeps ~0.2 s). `_raw` is never touched; a dry take has no `_raw`, its one file IS the final take.
+  try { require('./wav-trim').trimFile(finalFile); } catch (_) { /* trimming never fails a take */ }
+  try { require('./wav-trim').stripFile(finalFile); } catch (_) { /* stripping never fails a take (an ffmpeg-made file gets its LIST chunk back from the encoder) */ }
   const bytes = fs.statSync(finalFile).size;
   return {
     ok: true,
@@ -759,6 +782,7 @@ async function speak({ voice, text, effect, strength, engine, seed, reference } 
     effect: effect || null,
     filter: chain ? chain.filter : null,
     steps: chain ? chain.steps.map(s => s.id) : [],
+    chain: hasRack ? rackChain : null,
     // Voice seed (2026-09-26): the reproducible-take feature — see parseSeed()/hdrSeed above.
     seed: respSeed,
     ...(wm ? { watermark: wm } : {}),
@@ -775,14 +799,22 @@ function readOut(name) {
   return { path: p, buf: fs.readFileSync(p) };
 }
 
-function listTakes() {
+// `<voice>_<slug>_<YYYY-MM-DDTHH-MM-SS>[_s<seed>].wav` -> `<voice> · <slug as words>`. The voice may contain `_`, the slug never does.
+// Anything else keeps its own name without `.wav`.
+function takeLabel(file) {
+  const name = String(file || '');
+  const m = /^(.+)_([^_]+)_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:_s\d+)?\.wav$/.exec(name);
+  return m ? m[1] + ' · ' + m[2].replace(/-/g, ' ') : name.replace(/\.wav$/, '');
+}
+
+// Newest first, no cap unless `limit` is a number (the polled /voice-state asks for 40). `_raw.wav` (the engine bytes under an effect) is never a take.
+function listTakes(limit) {
   try {
-    return fs.readdirSync(OUT_DIR)
-      .filter(f => f.endsWith('.wav'))
-      .map(f => ({ file: f, url: '/vo/' + f, bytes: fs.statSync(path.join(OUT_DIR, f)).size,
-                   mtime: fs.statSync(path.join(OUT_DIR, f)).mtimeMs }))
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 40);
+    const all = fs.readdirSync(OUT_DIR)
+      .filter(f => f.endsWith('.wav') && !f.endsWith('_raw.wav'))
+      .map(f => { const st = fs.statSync(path.join(OUT_DIR, f)); return { file: f, url: '/vo/' + f, bytes: st.size, mtime: st.mtimeMs, label: takeLabel(f) }; })
+      .sort((a, b) => b.mtime - a.mtime);
+    return typeof limit === 'number' ? all.slice(0, limit) : all;
   } catch (_) { return []; }
 }
 
@@ -804,7 +836,7 @@ function openFolder() {
 // `request`, `ffmpegPath` and `cfg` are shared with the SFX workbench (sfx.js) on
 // purpose. They resolve the same speech service and the same ffmpeg binary, and a
 // second copy would drift — the same reason sound-fx.js is one module for both tabs.
-module.exports = { health, listVoices, listVoice, listEffects, speak, readOut, listTakes, openFolder, OUT_DIR,
+module.exports = { health, listVoices, listVoice, listEffects, speak, readOut, listTakes, takeLabel, openFolder, OUT_DIR, SOUNDS_ROOT,
                    request, ffmpegPath, cfg, apiBase, slug,
                    // VO1
                    REFS_DIR, listRefs, resolveRef, openRefsFolder,

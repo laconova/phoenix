@@ -116,7 +116,7 @@ default) the metaprompt runs through the **Claude CLI** and LM Studio is never t
 legacy inference from the model name: `claude*` = CLI, anything else = local server.) The default config
 uses `claude-cli` with `claude-haiku-4-5-20251001`, so:
 - `[FAIL] Local LLM` in `preflight.js` is **harmless** here — nothing uses `:1234`.
-- LM Studio only matters if you switch the metaprompter seat to a local model (e.g. a Gemma; Settings → General → Seats). Then
+- LM Studio only matters if you switch the metaprompter seat to a local model (e.g. a Gemma; Settings → Brains). Then
   start LM Studio, load that model (or enable JIT), and point `endpoints.local` at its `/v1`.
 
 ---

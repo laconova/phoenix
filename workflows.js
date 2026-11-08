@@ -46,7 +46,7 @@ const DEFAULT_WORKFLOWS = {
         models: ['flux-2-klein-base-4b.safetensors', 'qwen_3_4b.safetensors', 'flux2-vae.safetensors'],
       },
       builtin: true,
-      example: { kind: 'image', file: 'flux_klein.png' },   // <b2r-example> picked with the user later; a missing file → "No example yet"
+      example: { kind: 'image', file: 'flux_klein.jpg' },   // Shipped example in web/examples/.
       description: 'Default text-to-image. Good detail and prompt following — the standard choice for props.',
       faq:     'comfyui-port-8188',
       install: {
@@ -95,7 +95,7 @@ const DEFAULT_WORKFLOWS = {
       ],
       deps:    { custom_nodes: [], models: ['z_image_turbo_bf16.safetensors', 'qwen_3_4b.safetensors', 'ae.safetensors'] },
       builtin: true,
-      example: { kind: 'image', file: 'z_image_turbo.png' },   // no file shipped yet → "No example yet"
+      example: { kind: 'image', file: 'z_image_turbo.jpg' },   // Shipped example in web/examples/.
       description: 'Fast 8-step text-to-image with strong photo realism. Needs more VRAM than Flux Klein; shares its text encoder.',
       faq:     'comfyui-port-8188',
       install: {
@@ -128,7 +128,7 @@ const DEFAULT_WORKFLOWS = {
       ],
       deps:    { custom_nodes: [], models: ['v1-5-pruned-emaonly-fp16.safetensors'] },
       builtin: true,
-      example: { kind: 'image', file: 'sd15.png' },   // <b2r-example> picked with the user later; a missing file → "No example yet"
+      example: { kind: 'image', file: 'sd15.jpg' },   // Shipped example in web/examples/.
       description: 'Small, fast text-to-image for low-VRAM cards. Lower quality than Flux Klein.',
       faq:     'phoenix-workflow-stale-path',
       install: {
@@ -166,7 +166,7 @@ const DEFAULT_WORKFLOWS = {
         models: [],
       },
       builtin: true,
-      example: { kind: 'mesh', file: 'trellis2.glb' },   // <b2r-example> picked with the user later; a missing file → "No example yet"
+      example: { kind: 'mesh', file: 'trellis2.glb' },   // Shipped example in web/examples/.
       description: 'Image to textured 3D mesh (GLB). Downloads its weights on the first run.',
       faq:     'trellis-first-mesh-timeout',
       install: {
@@ -208,7 +208,7 @@ const DEFAULT_WORKFLOWS = {
         { key: 'sampler', label: 'Sampler', type: 'enum',  targets: [{ node: '9', field: 'sampler_name' }] },
       ],
       deps:     {
-        // trimmed 2026-09-17 (shipmitnull-workflow-manifests): CLIPLoader/TextEncodeQwenImageEdit/
+        // trimmed 2026-09-17 (shipmitnull-workflow-manifests): CLIPLoader/TextEncodeQwenImageEditPlus/
         // ImageScaleToTotalPixels are core ComfyUI nodes, not plugins — only UnetLoaderGGUF (ComfyUI-GGUF)
         // is a real installable dep. Leaving the core names declared with no install source would make
         // plan()/status() report "manual" forever.
@@ -216,7 +216,7 @@ const DEFAULT_WORKFLOWS = {
         models: ['Qwen-Image-Edit-2509-Q3_K_M.gguf', 'qwen_2.5_vl_7b_fp8_scaled.safetensors', 'qwen_image_vae.safetensors'],
       },
       builtin: true,
-      example: { kind: 'image', file: 'qwen_edit.png' },   // <b2r-example> picked with the user later; a missing file → "No example yet"
+      example: { kind: 'image', file: 'qwen_edit.jpg' },   // Shipped example in web/examples/.
       description: 'Edit an image by instruction — material, colour, style. Keeps the shape.',
       faq:     'i2i-material-edit-black-or-unchanged',
       install: {
@@ -244,7 +244,7 @@ const DEFAULT_WORKFLOWS = {
     sam3_isolate: {
       label:    'SAM3 Isolate',
       stage:    'i2i',
-      instance: 'trellis',              // the ComfyUI that hosts the ComfyUI-RMBG suite (dev rig: :8000)
+      instance: 'trellis',              // the ComfyUI that hosts the ComfyUI-RMBG suite
       mode:     'segment',              // text-guided isolation — the reliable "cut a part out" engine (measured 2026-08-06)
       file:     path.join(__dirname, 'workflows', 'sam3_segment.json'),
       nodes:    { input_image: '1', prompt: '2', output: '3' },   // no cfg/seed: SAM3 is deterministic
@@ -253,7 +253,7 @@ const DEFAULT_WORKFLOWS = {
         models: [],
       },
       builtin: true,
-      example: { kind: 'image', file: 'sam3_isolate.png' },   // <b2r-example> picked with the user later; a missing file → "No example yet"
+      example: { kind: 'image', file: 'sam3_isolate.jpg' },   // Shipped example in web/examples/.
       description: 'Cut one object out of an image by naming it.',
       faq:     'i2i-sam3-isolate-fails',
       install: {
@@ -324,7 +324,7 @@ const DEFAULT_WORKFLOWS = {
       label:   'Chatterbox',
       stage:   'voice',
       builtin: true,
-      description: 'Expressive voice with cloning from a short sample. Runs on this PC (Settings → Voice); use your own voice or your characters.',
+      description: 'Expressive voice with cloning from a short sample. Runs on this PC (Settings → Voice engines); use your own voice or your characters.',
       // Config-capability gate: engine=<id> is understood only by a /speak dispatcher. Since 1.10 one ships
       // (voice-dispatcher.js, started by Phoenix when voice.dispatcher = { local: true }); voice.dispatcher = true
       // means an external dispatcher already answers behind voice.api. Without either, a plain CrispASR speech
@@ -340,7 +340,7 @@ const DEFAULT_WORKFLOWS = {
           // NO engine.root here (release-blocker fix, 2026-09-17): the real install root is
           // voiceInstall.<instance>.root from the CUSTOMER's phoenix-config.json (downloader.js
           // resolveVoiceTarget) — same rule as comfyInstall. DEFAULT_WORKFLOWS must never hardcode an
-          // absolute per-user path; our own rig's path lives ONLY in our gitignored phoenix-config.json.
+          // absolute per-user path; the maintainer's own path lives ONLY in a gitignored phoenix-config.json.
           // VO1: torch MUST be the CUDA build — Acquire installs torch/torchaudio 2.6.0 from this index BEFORE
           // chatterbox-tts (on Windows plain pip would otherwise pick a CPU-only torch).
           venv: { path: 'venv', python: '3.12', torch: '2.6.0', index_url: 'https://download.pytorch.org/whl/cu124', size_gb: 5.4,
@@ -369,7 +369,7 @@ const DEFAULT_WORKFLOWS = {
       description: 'Multilingual voice engine. Runs through a voice dispatcher; not yet run end-to-end.',
       // Same dispatcher gate as chatterbox (greyed until a dispatcher is configured). See engineAvailability() below.
       requiresDispatcher: true,
-      // Secondary reason (applies once the dispatcher IS present, e.g. on our rig): engine=cosyvoice
+      // Secondary reason (applies once the dispatcher IS present, e.g. on a second machine): engine=cosyvoice
       // fails in its own venv (venv-cosy) — a native pyworld build wall after the requirements surgery
       // below, which is not a strip/pin fix. `blocked` is UI-only (the picker renders a disabled
       // <option>); it does NOT gate acquire/dep-check, which stay honest to the manifest.
@@ -400,7 +400,7 @@ const DEFAULT_WORKFLOWS = {
           weights: {
             source:  { modelscope: 'iic/CosyVoice2-0.5B' },
             // Relative — joined onto the resolved engineRoot by resolveVoiceTarget (was previously the
-            // literal absolute path to OUR rig's bench install; now resolves per-customer).
+            // literal absolute path of one specific install; now resolves per-customer).
             dir:     'cosyvoice/pretrained_models/CosyVoice2-0.5B',
             size_gb: 4.0,
             lazy:    true,
@@ -628,7 +628,7 @@ function hasDispatcher(cfg) { return dispatcherMode(cfg && cfg.voice) !== 'off';
  * config-capability gate with the pre-existing per-engine block. Two gates, DISPATCHER FIRST (the
  * governing PUBLIC gate):
  *   1. requiresDispatcher && !hasDispatcher → unavailable. The engine=<id> the picker sends is
- *      understood only by a voice dispatcher (local: Settings → Voice, or a rig-side service), so on a
+ *      understood only by a voice dispatcher (local: Settings → Voice engines, or a rig-side service), so on a
  *      plain CrispASR server it is inert. The reason tells the user which switch to turn on.
  *   2. entry.blocked (e.g. cosyvoice's venv wall — applies even WITH the dispatcher) → unavailable,
  *      "voice engine not installed".
@@ -640,7 +640,7 @@ function hasDispatcher(cfg) { return dispatcherMode(cfg && cfg.voice) !== 'off';
 function engineAvailability(entry, hasDispatcher) {
   if (!entry) return { available: false, reason: 'unknown engine' };
   if (entry.requiresDispatcher && !hasDispatcher) {
-    return { available: false, reason: 'turn on "Run voice engines on this PC" in Settings → Voice' };
+    return { available: false, reason: 'turn on "Run voice engines on this PC" in Settings → Voice engines' };
   }
   if (entry.blocked) {
     return { available: false, reason: 'voice engine not installed' };

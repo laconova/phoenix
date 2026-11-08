@@ -50,9 +50,18 @@
   var guess = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android phone' : 'Phone';
   $('name').value = guess;
   if (!token) $('code-row').hidden = false;
+  // Every request is bounded: a request that never answers is aborted after REQUEST_MS and counts like a lost connection.
+  var REQUEST_MS = 15000;
   function post(path, body) {
-    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store' })
+    var ac = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = null;
+    var limit = new Promise(function (resolve, reject) {
+      timer = setTimeout(function () { try { if (ac) ac.abort(); } catch (e) {} reject(new Error('timeout')); }, REQUEST_MS);
+    });
+    var req = fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), credentials: 'same-origin', cache: 'no-store', signal: ac ? ac.signal : undefined })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, json: j }; }); });
+    var done = function () { if (typeof clearTimeout === 'function') clearTimeout(timer); };
+    return Promise.race([req, limit]).then(function (v) { done(); return v; }, function (e) { done(); throw e; });
   }
   function fail(t) { $('err').textContent = t; $('go').disabled = false; }
   $('go').addEventListener('click', function () {
@@ -60,23 +69,57 @@
     var body = { name: $('name').value };
     if (token) body.token = token; else body.code = $('code').value;
     post('/remote/api/claim', body).then(function (r) {
+      if (r.status === 409 && r.json && r.json.paired) { location.replace('/'); return; }   // already paired in another tab of this phone: go home like approved
       if (r.status !== 200) return fail((r.json && r.json.error) || 'That did not work.');
       $('step-claim').hidden = true; $('step-wait').hidden = false;
       $('confirm').textContent = r.json.confirm;
+      armDeadline();
       poll(r.json.id, r.json.claim);
     }, function () { fail('Could not reach Phoenix. Is Tailscale on?'); });
   });
-  function poll(id, claim) {
-    post('/remote/api/claim-status', { id: id, claim: claim }).then(function (r) {
-      var s = r.json && r.json.status;
-      if (s === 'approved') { $('wait-note').textContent = 'Connected.'; location.replace('/'); return; }
-      if (s === 'rejected') { $('wait-note').textContent = 'The laptop rejected this phone.'; return; }
-      if (r.status === 410 || s === 'expired') { $('wait-note').textContent = (r.json && r.json.error) || 'The request timed out - start again from the laptop.'; return; }
-      if (r.status === 429) { setTimeout(function () { poll(id, claim); }, 8000); return; }
-      if (r.status !== 200) { $('wait-note').textContent = (r.json && r.json.error) || 'Lost the request - start again from the laptop.'; return; }
-      setTimeout(function () { poll(id, claim); }, 2000);
-    }, function () { setTimeout(function () { poll(id, claim); }, 4000); });
+  var LOST_AFTER_MS = 10 * 60 * 1000, deadline = 0, parked = null, deadlineTimer = null, over = false;
+  // The offline deadline runs on its own timer (not only when a request fails): 10 minutes without any answer ends the wait, even if a request hangs.
+  function armDeadline() {
+    deadline = Date.now() + LOST_AFTER_MS;
+    if (typeof clearTimeout === 'function' && deadlineTimer !== null) clearTimeout(deadlineTimer);
+    deadlineTimer = setTimeout(giveUp, LOST_AFTER_MS);
   }
+  // ONE way to end the wait: stops polling, clears the deadline timer, shows the final text. A later giveUp() can never overwrite it.
+  function finalize(text) {
+    over = true;
+    if (typeof clearTimeout === 'function' && deadlineTimer !== null) clearTimeout(deadlineTimer);
+    deadlineTimer = null; parked = null;
+    if (text) $('wait-note').textContent = text;
+  }
+  function giveUp() {
+    if (over || parked) return;   // a tab parked in the background asks again when it is shown; its next failure checks the deadline
+    finalize('Lost the connection - start again from the laptop.');
+  }
+  // One pairing wait: ends at approved / rejected / expired, pauses while the page is hidden, and gives up on a dead network after 10 minutes.
+  function poll(id, claim) {
+    if (document.hidden) { parked = { id: id, claim: claim }; return; }
+    if (over) return;
+    post('/remote/api/claim-status', { id: id, claim: claim }).then(function (r) {
+      if (over) return;
+      var s = r.json && r.json.status;
+      if (s === 'approved') { finalize('Connected.'); location.replace('/'); return; }
+      if (r.status === 409 && r.json && r.json.paired) { finalize(''); location.replace('/'); return; }   // already paired (lost reception after the approval): go home like approved
+      if (s === 'rejected') { finalize('The laptop rejected this phone.'); return; }
+      if (r.status === 410 || s === 'expired') { finalize((r.json && r.json.error) || 'This request timed out - start again from the laptop.'); return; }
+      if (r.status === 429) { armDeadline(); setTimeout(function () { poll(id, claim); }, 8000); return; }   // an answer came: the connection is alive
+      if (r.status !== 200) { finalize((r.json && r.json.error) || 'Lost the request - start again from the laptop.'); return; }
+      armDeadline();
+      setTimeout(function () { poll(id, claim); }, 2000);
+    }, function () {
+      if (over) return;
+      if (Date.now() > deadline) { finalize('Lost the connection - start again from the laptop.'); return; }
+      setTimeout(function () { poll(id, claim); }, 4000);
+    });
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden || !parked) return;
+    var p = parked; parked = null; poll(p.id, p.claim);
+  });
 })();
 </script>
 </body>

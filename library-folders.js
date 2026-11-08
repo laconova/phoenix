@@ -33,12 +33,14 @@ const FILE = path.join(__dirname, 'library-folders.json');
 // test seam: PHOENIX_LIBRARY_FOLDERS_FILE points the module at a temp file (read at call time)
 const fileNow = () => process.env.PHOENIX_LIBRARY_FOLDERS_FILE || FILE;
 
-// v1.10 LIB2: a folder may carry scope:'video' (the Videos tab tree). No scope = the asset/brush tree, unchanged.
-const SCOPES = ['video'];
-const scopeOf = (f) => (f && f.scope === 'video') ? 'video' : null;
-const keyScope = (key) => (/^video:/.test(key) ? 'video' : null);
+// v1.10 LIB2: a folder may carry scope:'video' (the Videos tab tree). v1.10.1 R4: scope:'brush' (the Brushes tree).
+// No scope = the asset tree. Three trees, never mixed: keys only into folders of their own tree.
+const SCOPES = ['video', 'brush', 'image'];
+const scopeOf = (f) => (f && SCOPES.indexOf(f.scope) >= 0) ? f.scope : null;
+const keyScope = (key) => (/^image:/.test(key) ? 'image' : /^video:/.test(key) ? 'video' : /^brush:/.test(key) ? 'brush' : null);
+const VERSION = 2;
 
-const EMPTY = () => ({ version: 1, folders: [], assignments: {}, collapsed: [] });
+const EMPTY = () => ({ version: VERSION, folders: [], assignments: {}, collapsed: [] });
 
 // strict=false (reads): any error → EMPTY(), so the rail still renders on a transient hiccup.
 // strict=true  (mutations): only a genuinely ABSENT file (ENOENT) is EMPTY; a locked or corrupt file
@@ -46,25 +48,44 @@ const EMPTY = () => ({ version: 1, folders: [], assignments: {}, collapsed: [] }
 // a transient read must never cost the user every folder + assignment.
 function readTree(strict) {
   let raw;
-  try { raw = fs.readFileSync(fileNow(), 'utf8'); }
+  try { raw = fs.readFileSync(fileNow()); }
   catch (e) {
     if (e && e.code === 'ENOENT') return EMPTY();
     if (strict) throw e;
     return EMPTY();
   }
   let o;
-  try { o = JSON.parse(raw); }
+  try { o = JSON.parse(raw.toString('utf8')); }
   catch (e) { if (strict) throw e; return EMPTY(); }
   if (!o || typeof o !== 'object') {
     if (strict) throw new Error('library-folders.json is not a valid object');
     return EMPTY();
   }
-  return {
-    version:     1,
+  const tree = {
+    version:     Number(o.version) || 1,
     folders:     Array.isArray(o.folders) ? o.folders.filter(f => f && f.id && typeof f.name === 'string') : [],
     assignments: (o.assignments && typeof o.assignments === 'object') ? o.assignments : {},
     collapsed:   Array.isArray(o.collapsed) ? o.collapsed.filter(x => typeof x === 'string') : [],
   };
+  if (tree.version >= VERSION) return tree;
+  // v1.10.1 R4: a version-1 file is migrated once - the ORIGINAL bytes go to <file>.bak-r4 first, then the
+  // migrated tree is written. A second read finds version 2 and writes nothing. (Only a file that exists and
+  // parses gets here; a missing or corrupt file never reaches this line.)
+  const m = migrateFolders(tree);
+  try {
+    // backup via temp + rename: a crash must never leave a partial .bak-r4 that a later load would trust
+    const bak = fileNow() + '.bak-r4';
+    if (!fs.existsSync(bak)) {                                  // keep the FIRST original if a backup is already there
+      const btmp = bak + '.tmp-' + process.pid;
+      fs.writeFileSync(btmp, raw);
+      fs.renameSync(btmp, bak);
+    }
+    save(m.tree);
+  } catch (e) {
+    if (strict) throw e;           // a mutation must not go on if the backup / rewrite failed
+    return tree;                   // never serve ids that are not on disk: the unmigrated tree now, a retry next load
+  }
+  return m.tree;
 }
 
 function load() { return readTree(false); }
@@ -81,6 +102,48 @@ let _seq = 0;
 function newId() {
   _seq += 1;
   return 'f' + Date.now().toString(36) + _seq.toString(36);
+}
+
+/**
+ * v1.10.1 R4 - pure (no fs): split the shared asset/brush tree into two trees. Version >= 2 -> unchanged.
+ * For every scope-less ROOT folder take its whole subtree and the assignments pointing into it:
+ *   only brush: keys (>= 1)  -> every folder of the subtree becomes scope:'brush'
+ *   no brush keys            -> stays an asset folder
+ *   mixed                    -> stays an asset folder; ALL its brush: assignments move to ONE new brush root
+ *                               folder of the same name, mirroring the folder path of each brush (no mirror
+ *                               for a folder without brushes; a mirror is collapsed when its original is)
+ * Video folders, collapsed ids and every other assignment are untouched. The input is never mutated.
+ */
+function migrateFolders(tree) {
+  const t = JSON.parse(JSON.stringify(tree || {}));
+  if (Number(t.version) >= VERSION) return { tree: t, changed: false };
+  t.folders = Array.isArray(t.folders) ? t.folders : [];
+  t.assignments = (t.assignments && typeof t.assignments === 'object') ? t.assignments : {};
+  t.collapsed = Array.isArray(t.collapsed) ? t.collapsed : [];
+  const kids = (id) => t.folders.filter(f => f.parent === id);
+  const subtree = (root) => { const out = [root]; for (let i = 0; i < out.length; i++) kids(out[i].id).forEach(c => out.push(c)); return out; };
+  const byIdLocal = (id) => t.folders.find(f => f.id === id) || null;
+  const roots = t.folders.filter(f => !f.parent && !scopeOf(f));
+  for (const root of roots) {
+    const sub = subtree(root);
+    const ids = new Set(sub.map(f => f.id));
+    const keys = Object.keys(t.assignments).filter(k => ids.has(t.assignments[k]));
+    const brushKeys = keys.filter(k => /^brush:/.test(k));
+    if (!brushKeys.length) continue;
+    if (brushKeys.length === keys.length) { sub.forEach(f => { f.scope = 'brush'; }); continue; }
+    const mirror = new Map();
+    const mirrorOf = (f) => {
+      if (mirror.has(f.id)) return mirror.get(f.id);
+      const nf = { id: newId(), name: f.name, parent: f === root ? null : mirrorOf(byIdLocal(f.parent)).id, scope: 'brush' };
+      t.folders.push(nf);
+      mirror.set(f.id, nf);
+      if (t.collapsed.indexOf(f.id) >= 0 && t.collapsed.indexOf(nf.id) < 0) t.collapsed.push(nf.id);
+      return nf;
+    };
+    brushKeys.forEach(k => { t.assignments[k] = mirrorOf(byIdLocal(t.assignments[k])).id; });
+  }
+  t.version = VERSION;
+  return { tree: t, changed: true };
 }
 
 const byId = (o, id) => o.folders.find(f => f.id === id) || null;
@@ -104,7 +167,7 @@ function isDescendant(o, id, ancestorId) {
  * Apply one mutation. Returns { ok, error, data } — never throws for user error, because every
  * caller is a UI click and a stack trace is not an answer.
  *
- * ops: create | rename | delete | moveFolder | assign | collapse
+ * ops: create | rename | delete | moveFolder | assign | moveKey | collapse
  */
 function apply(op) {
   let o;
@@ -169,7 +232,7 @@ function apply(op) {
       if (target) {
         if (!byId(o, target))          return { ok: false, error: 'Target folder no longer exists.' };
         if (target === f.id)           return { ok: false, error: 'A folder cannot contain itself.' };
-        if (scopeOf(byId(o, target)) !== scopeOf(f)) return { ok: false, error: 'A folder cannot move between the video tree and the asset tree.' };
+        if (scopeOf(byId(o, target)) !== scopeOf(f)) return { ok: false, error: 'A folder cannot move between the asset, brush and video trees.' };
         if (isDescendant(o, target, f.id)) return { ok: false, error: 'Cannot move a folder into its own subfolder.' };
       }
       f.parent = target;
@@ -179,16 +242,27 @@ function apply(op) {
 
     case 'assign': {
       const key = typeof op.key === 'string' ? op.key : '';
-      if (!/^(asset|brush|video):.+/.test(key) || (keyScope(key) && key.indexOf('..') >= 0)) return { ok: false, error: 'Bad item key.' };
+      if (!/^(asset|brush|video|image|character):.+/.test(key) || (keyScope(key) && key.indexOf('..') >= 0)) return { ok: false, error: 'Bad item key.' };
       if (op.folder) {
         const tf = byId(o, op.folder);
         if (!tf) return { ok: false, error: 'Folder no longer exists.' };
-        // v1.10 LIB2: video keys only into video folders, asset/brush keys only into folders without a scope
-        if (scopeOf(tf) !== keyScope(key)) return { ok: false, error: keyScope(key) ? 'Videos can only be filed into video folders.' : 'Assets and brushes cannot be filed into a video folder.' };
+        // video keys only into video folders, brush keys only into brush folders, asset keys only into folders without a scope
+        if (scopeOf(tf) !== keyScope(key)) return { ok: false, error: (keyScope(key) === 'image' || scopeOf(tf) === 'image') ? 'Images can only be filed into image folders.' : keyScope(key) === 'video' ? 'Videos can only be filed into video folders.' : keyScope(key) === 'brush' ? 'Brushes can only be filed into brush folders.' : 'Assets can only be filed into asset folders.' };
         o.assignments[key] = op.folder;
       } else {
         delete o.assignments[key];     // back to its palette category
       }
+      save(o);
+      return { ok: true, data: o };
+    }
+
+    case 'moveKey': {
+      // R5a: a renamed item keeps its folder - ONE save, so the old and the new key are never both assigned
+      const from = typeof op.from === 'string' ? op.from : '', to = typeof op.to === 'string' ? op.to : '';
+      const ok = (k) => /^(asset|brush|video|image|character):.+/.test(k) && !(keyScope(k) && k.indexOf('..') >= 0);
+      if (!ok(from) || !ok(to) || keyScope(from) !== keyScope(to)) return { ok: false, error: 'Bad item key.' };
+      if (!(from in o.assignments)) return { ok: true, data: o };
+      o.assignments[to] = o.assignments[from]; delete o.assignments[from];
       save(o);
       return { ok: true, data: o };
     }
@@ -211,4 +285,4 @@ function apply(op) {
   }
 }
 
-module.exports = { load, apply, FILE, fileNow };
+module.exports = { load, apply, migrateFolders, FILE, fileNow };

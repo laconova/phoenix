@@ -1,4 +1,6 @@
 'use strict';
+// One id per server start: the page compares it after an SSE reconnect to tell a restarted server (job numbers begin again) from a dropped connection.
+const BOOT_ID = Date.now().toString(36) + '-' + process.pid.toString(36);
 
 const http = require('http');
 const fs   = require('fs');
@@ -10,6 +12,7 @@ const bench = require('./bench/bench');   // competence mini-benchmark (v1.9 M2.
 const capabilities = require('./providers/capabilities');   // tool-protocol probe results (v1.9 M2)   // seats → provider layer (v1.9 M1): validation, model lists, API keys
 const dbg       = require('./debug-log.js');
 const lock      = require('./lock');
+const pageAssembler = require('./web/assemble');   // R0a: web/src/ parts -> one page
 const palette   = require('./palette');
 const wfp       = require('./workflow-params');   // v1.10 ADV: per-workflow params (cfg/steps/sampler/size/faces ...), one store, two views
 const libFolders = require('./library-folders');
@@ -26,9 +29,21 @@ const jobs      = require('./jobs');
 const i2iEngine = require('./i2i');   // baseForInstance — so the deps check hits each workflow's own instance
 const records = require('./records');   // output record behind the Library's Images / Videos tabs (v1.10 C1)
 const storyboard = require('./storyboard.js');   // shots as timeline events (v1.10 V1)
+const storyboardTimeline = require('./storyboard-timeline');   // R6: the ONE timing source of a board (page animatic + MP4 export)
+const storyboardExport = require('./storyboard-export');   // R6: the animatic MP4 (ffmpeg)
 const remoteAccess = require('./remote-access');   // <r1-remote> R1: use Phoenix from the phone - second loopback listener behind "tailscale serve", laptop-approved pairing
 const remoteTailscale = require('./remote-tailscale');
 const downloader = require('./downloader');   // workflow/engine acquisition core (Stage 1)
+const statusBar = require('./status');   // <r1-shell> status bar provider system: status-providers/*.js, read by GET /status
+const blenderIpc = require('./blender-ipc');
+const brushPreviews = require('./brush-previews');
+const characterPreviews = require('./character-previews');
+const brushBackend = require('./brush-to-unreal');
+const libraryTrash = require('./library-trash');
+brushPreviews.configure({ getCfg: () => a.loadConfig(), busy: () => lock.isHeld() || jobs.isRunning() || deferredInFlight, onStatus: s => broadcast({ kind: 'brush-previews', ...s }) });
+// Foreground actions drive the user's GUI Blender over IPC (a different process). The background exports (brush + character previews) already yield to them
+// (busy = lock / jobs / deferred) and run one at a time across both queues, so a foreground action never waits for a background export.
+characterPreviews.configure({ getCfg: () => a.loadConfig(), busy: () => lock.isHeld() || jobs.isRunning() || deferredInFlight, onStatus: s => broadcast({ kind: 'character-previews', ...s }) });
 
 // <b3-acquire-log>
 // v1.10 B3 — in-memory acquire log (last 200 lines per workflow id, process lifetime only, nothing on disk)
@@ -148,6 +163,60 @@ let deferredInFlight = false;
 // (board:shot = whole shot, board:shot:lid = one line): a second click while one is running answers 409
 const sbVoiceSeen = { names: null };
 const sbSpeakBusy = new Set();
+// R6: the animatic export in server memory: running = { board, job, progress } while the job holds the slot, last = the answer of the latest finished/stopped/failed run
+const sbExport = { running: null, last: null };
+
+// R6: the body of the animatic export job (kept outside the storyboard route region: it broadcasts and writes a record). Runs in the shared jobs slot;
+// `signal` is the slot's AbortSignal (POST /stop -> jobs.cancel). Always ends by publishing `last` and clearing `running` (even on a throw).
+async function sbRunAnimaticJob(board, facts, jid, signal) {
+  let lastTick = 0, res;
+  const onProgress = (f) => {
+    if (sbExport.running && sbExport.running.job === jid) sbExport.running.progress = f;
+    const now = Date.now();
+    if (now - lastTick < 250) return;
+    lastTick = now;
+    try { broadcast({ kind: 'storyboard', phase: 'export', board: board.id, job: jid, progress: f, ok: true }); } catch (_) { /* no clients */ }
+  };
+  try {
+    const tl = storyboardTimeline.timeline(board, facts);
+    const colors = { bg: '#BDBDBD', text: '#1F1F1F' };   // the --ground / --text tokens of :root in web/src/01-base.css; these fallbacks stand when it cannot be read
+    try {
+      const css = fs.readFileSync(path.join(workingDir, 'web', 'src', '01-base.css'), 'utf8');
+      const rootBlock = /:root\s*\{([\s\S]*?)\}/.exec(css);
+      const g = rootBlock && /--ground:\s*(#[0-9a-fA-F]{6})\b/.exec(rootBlock[1]), t = rootBlock && /--text:\s*(#[0-9a-fA-F]{6})\b/.exec(rootBlock[1]);
+      if (g) colors.bg = g[1];
+      if (t) colors.text = t[1];
+    } catch (_) { /* the fallback colours stand */ }
+    const inVo = (take) => { const f = path.join(voice.OUT_DIR, path.basename(String(take))); try { return fs.statSync(f).isFile() ? f : null; } catch (_) { return null; } };
+    res = await storyboardExport.exportBoard(board, tl, {
+      ffmpeg: voice.ffmpegPath(),
+      resolveImage: (rel) => (facts.keyframeOk(rel) ? path.resolve(workingDir, rel) : null),
+      resolveClip: (rel) => (facts.clipOk(rel) ? path.resolve(workingDir, rel) : null),
+      takeFile: inVo,
+      sfxFile: (clip) => (facts.sfxOk(clip) ? path.join(sfx.CLIPS_DIR, path.basename(String(clip))) : null),
+      signal, onProgress, colors, fontFile: storyboardExport.findFont(),
+    });
+  } catch (e) { res = { ok: false, error: String((e && e.message) || e), warnings: [] }; }
+  let p = null, url = null;
+  try {
+    if (res.ok) {
+      const rel = path.relative(workingDir, res.file);
+      const inside = !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+      p = inside ? rel.split(path.sep).join('/') : res.file;
+      const fp = inside ? resolveFileParam(p) : null;
+      url = (fp && fp.allowed) ? '/file?p=' + encodeURIComponent(p) : null;
+      records.appendRecord({ kind: 'video', path: res.file, workflow: 'animatic', prompt: board.title, seed: null, parent: null, category: 'animatic' });
+    }
+  } finally {
+    const done = { board: board.id, ok: res.ok === true, stopped: res.stopped === true, path: p, url, name: res.ok ? res.name : null, warnings: Array.isArray(res.warnings) ? res.warnings : [], error: res.ok ? '' : String(res.error || ''), at: new Date().toISOString() };
+    sbExport.last = done;
+    sbExport.running = null;
+    try { broadcast({ kind: 'storyboard', phase: 'export-done', board: done.board, job: jid, ok: done.ok, stopped: done.stopped, path: done.path, url: done.url, name: done.name, warnings: done.warnings, error: done.error }); } catch (_) { /* no clients */ }
+  }
+  if (res.ok) return 'Animatic ready';
+  if (res.stopped) return 'Animatic stopped';
+  throw new Error(res.error || 'the animatic export failed');
+}
 
 // <v1b3-video> v1.10 V1b-3: the video-backend registry (EMPTY in v1.10 - V2 local preview / V3 fal+Kling register themselves).
 // A backend = { id, label, available(cfg) -> {ok, reason}, estimate(shotRequest) -> {line, usd} | null, start(shotRequest, {confirmed}) }.
@@ -177,6 +246,7 @@ function unregisterVideoBackend(id) {
 const sbKeyframeBusy = new Map(), sbKeyframeErr = new Map(), sbVideoBusy = new Map(), sbVideoErr = new Map();
 // v1.10 V2: a local (gpu) backend's progress line while it runs, the note it leaves with a finished clip, and which shots run in the jobs slot (those can be stopped)
 const sbVideoProgress = new Map(), sbVideoNote = new Map(), sbVideoGpu = new Map();   // sbVideoGpu: '<board>:<shot>' -> the jobs-slot id of its running local run (Stop names it)
+const sbKeyframeRefJob = new Map();   // M4: '<board>:<shot>' -> the jobs-slot id of a running REFERENCE keyframe (the only keyframe a Stop may end)
 const sbStops = new Map();   // jobs-slot id -> what its Stop did at ComfyUI (the backend's cancelPrompt answer), for /stop's reply; keyed by run so a second /stop cannot reset it
 // </v1b3-video>
 
@@ -206,6 +276,13 @@ function unrealState() {
     .then(v => { unrealCache = { at: Date.now(), val: v }; unrealInFlight = null; return v; });
   return unrealInFlight;
 }
+
+// <r1-shell> status bar providers: loaded once at start from status-providers/ (or PHOENIX_STATUS_PROVIDERS_DIR). A provider only gets this ctx.
+const statusFetch = (u, o) => fetch(u, o);   // one stable function: the providers' shared caches are keyed on it
+const statusService = statusBar.makeStatus(
+  statusBar.loadProviders(process.env.PHOENIX_STATUS_PROVIDERS_DIR || path.join(__dirname, 'status-providers'), (m) => { try { console.error('[status] ' + m); } catch (_) {} }),
+  () => ({ cfg: a.loadConfig(), jobs, probeBlender: (c, ms) => blenderIpc.probeBlenderIdle(c, ms), fetch: statusFetch, unrealState, remoteState: () => remote.view() }));
+// </r1-shell>
 
 // ─── Pipeline artifact parser (Phase 2b) ──────────────────────────────────────
 // Pure, exported-for-test function. Maintains module-level state between calls
@@ -773,27 +850,58 @@ function readBody(req) {
   });
 }
 
-function readRawBody(req) {
+function readRawBody(req, limit) {   // limit (bytes, optional): a body over it is refused up front (Content-Length) or as soon as the running total passes it - never fully buffered
   return new Promise((resolve, reject) => {
     const isR = remote.isRemoteReq(req);
     const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end', () => { if (isR && remote.revoked(req)) return; resolve(Buffer.concat(chunks)); });
+    let total = 0, over = false;
+    const tooBig = () => { over = true; chunks.length = 0; const e = new Error('file too large'); e.tooLarge = true; reject(e); try { req.resume(); } catch (_) { /* gone */ } };
+    if (limit > 0) { const cl = Number(req.headers && req.headers['content-length']); if (isFinite(cl) && cl > limit) { tooBig(); return; } }
+    req.on('data', c => { if (over) return; total += c.length; if (limit > 0 && total > limit) { tooBig(); return; } chunks.push(c); });
+    req.on('end', () => { if (over) return; if (isR && remote.revoked(req)) return; resolve(Buffer.concat(chunks)); });
     req.on('error', (e) => { if (isR) { remote.abandon(req); return; } reject(e); });
   });
 }
 // B2: after ANY wait between the body and the action (a lock queue, a probe), a remote request is checked once more. true = go on.
 const REMOTE_GONE = { error: 'Not paired - open the pairing link from Phoenix on the laptop.' };
-const REMOTE_NO_PAID = { error: 'Only on the laptop: paid jobs (Meshy, fal.ai).' };   // LC2i: v1.10 - a paired phone starts nothing that costs money (an opt-in switch is planned for 1.10.1)
+const REMOTE_NO_PAID = { error: 'Only on the laptop: paid jobs (Meshy, fal.ai).' };   // LC2i: v1.10 - a paired phone starts nothing that costs money (an opt-in switch is planned)
 function remoteOk(req, res) { if (remote.authorised(req)) return true; sendJSON(res, 401, REMOTE_GONE); return false; }
 const ifStillAuthorized = (req, fn) => () => (remote.authorised(req) ? fn() : [401, REMOTE_GONE]);
 
-function sendJSON(res, statusCode, obj) {
+// User-facing names of the light /action actions that take the lock with a label (shown in "Phoenix is busy: ...").
+const ACTION_LABELS = Object.freeze({
+  import_asset: 'importing an asset', save_as_brush: 'saving a brush', use_brush: 'placing a brush',
+  apply_material: 'applying a material', rename_asset: 'renaming an asset', rename_brush: 'renaming a brush',
+  delete_asset: 'deleting an asset', delete_brush: 'deleting a brush', list_materials: 'reading the materials',
+  delete_material: 'deleting a material', make_human: 'building a character', place_human: 'placing a character',
+  animate_human: 'animating a character', sequence_animations: 'building an animation sequence',
+  save_animation: 'saving an animation', assign_skeleton: 'assigning a skeleton', spawn_rig: 'spawning a rig',
+  save_clip: 'saving a clip', animate_clip: 'applying a clip', sequence_clips: 'building a clip sequence',
+  save_mesh: 'saving a mesh', save_character: 'saving a character', spawn_character: 'spawning a character',
+  prepare_mesh: 'preparing a mesh', bind_mesh: 'binding a mesh', inspect_render: 'checking a render',
+  asset_to_unreal: 'sending an asset to Unreal', brush_to_unreal: 'sending a brush to Unreal',
+  brush_preview: 'rendering a brush preview', inspect_unreal: 'checking the Unreal scene',
+  unreal_to_blender: 'bringing an asset over from Unreal', unreal_to_brush: 'making a brush from Unreal',
+  character_to_unreal: 'sending a character to Unreal',
+});
+function actionLabel(action) {
+  return Object.prototype.hasOwnProperty.call(ACTION_LABELS, action) ? ACTION_LABELS[action] : String(action).replace(/_/g, ' ');
+}
+
+// The busy refusal of the heavy-job sites: names the real holder (a generation only when one runs), not every lock holder as a generation.
+function busyRefusal() {
+  const who = lock.holder();
+  if (deferredInFlight || jobs.isRunning() || who === lock.GENERATION) return { error: 'a generation is already running — one heavy GPU job at a time; give it a moment', busy: true };   // busy: the storyboard view clears it when jobs go idle
+  return { error: who ? 'Phoenix is busy: ' + who : 'Phoenix is busy with another step', busy: true };
+}
+
+function sendJSON(res, statusCode, obj, extraHeaders) {
   if (res.writableEnded) return;   // <r1-remote> the response was already answered (a revoked remote request): never answer twice
   const body = JSON.stringify(obj);
   res.writeHead(statusCode, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
+    ...(extraHeaders || {}),
   });
   res.end(body);
 }
@@ -938,7 +1046,7 @@ const MCP_CLASS = {
   // M9: Meshy remesh (paid cloud) — writes the library, no scene change, no checkpoint; takes NO chat lock (see /mcp/call)
   remesh_asset: 'L',
   // U
-  brush_to_unreal: 'U', unreal_to_blender: 'U', unreal_to_brush: 'U', character_to_unreal: 'U', inspect_unreal: 'U',
+  asset_to_unreal: 'U', brush_to_unreal: 'U', unreal_to_blender: 'U', unreal_to_brush: 'U', character_to_unreal: 'U', inspect_unreal: 'U',
   // O
   blender_run: 'O', unreal_run: 'O', delete_asset: 'O', delete_brush: 'O', delete_material: 'O',
 };
@@ -990,6 +1098,7 @@ async function remoteApi(req, res, method, p) {
   return answer(remote.disconnect(id));
 }
 
+let lastLevelsOpen = null;
 async function handler(req, res) {
   const method  = req.method;
   const parsedUrl = new URL(req.url, 'http://localhost');
@@ -1007,16 +1116,16 @@ async function handler(req, res) {
 
   // ── GET / ──────────────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/') {
-    const indexPath = path.join(WEB_ROOT, 'index.html');
-    fs.readFile(indexPath, (err, data) => {
-      if (err) {
-        res.writeHead(404);
-        res.end('404 Not Found');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(data);
-    });
+    let page;
+    try { page = pageAssembler.assemblePage({ webRoot: WEB_ROOT }); }
+    catch (err) {
+      const why = String((err && err.message) || err).split(/\r?\n/)[0].slice(0, 300);   // one line, never a stack
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Page assembly failed: ' + why);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(page);
     return;
   }
 
@@ -1089,8 +1198,8 @@ async function handler(req, res) {
   }
 
   // ── GET /examples/<file> ── <b2r-example>
-  // The per-workflow example image / mesh under web/examples/ (read only; a plain file name, no sub-folders). None ship yet:
-  // a missing file makes the UI say "No example yet".
+  // The per-workflow example image / mesh under web/examples/ (read only; a plain file name, no sub-folders). Six examples ship in web/examples;
+  // for any workflow without one the UI says "No example yet".
   if (method === 'GET' && urlPath.startsWith('/examples/')) {
     let fileName = '';
     try { fileName = decodeURIComponent(urlPath.slice('/examples/'.length)); } catch (_) { /* stays '' → 400 */ }
@@ -1220,7 +1329,7 @@ async function handler(req, res) {
       sendJSON(res, 409, { error: 'a background generation (i2i edit / text→motion) is running — chat is blocked until it finishes' });
       return;
     }
-    if (!lock.tryAcquire()) {
+    if (!lock.tryAcquire('a chat turn')) {
       sendJSON(res, 409, { error: 'busy' });
       return;
     }
@@ -1296,7 +1405,7 @@ async function handler(req, res) {
       sendJSON(res, 409, { error: 'A background generation is running - New chat is blocked until it finishes.' });
       return;
     }
-    if (!lock.tryAcquire()) { sendJSON(res, 409, { error: 'Phoenix is busy with a turn - New chat is blocked until it finishes.' }); return; }
+    if (!lock.tryAcquire('a new chat')) { sendJSON(res, 409, { error: 'Phoenix is busy with a turn - New chat is blocked until it finishes.' }); return; }
     try {
       // D2: the empty history goes to disk FIRST; memory changes (and the pages are told) only after that succeeded - a failure leaves memory, file and views as they were
       const cfgR = a.loadConfig();
@@ -1328,13 +1437,16 @@ async function handler(req, res) {
     }
 
     const { action, input } = body || {};
+    // F2.6: the page's request id travels back on every reply/error of this route (a malformed id is dropped)
+    const rid = body && typeof body.requestId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(body.requestId) ? body.requestId : null;
+    const answer = (o) => broadcast(rid ? Object.assign(o, { requestId: rid }) : o);
 
     const ALLOWED = ['generate_image', 'i2i_edit', 'generate_from_refs', 'image_to_3d', 'import_asset', 'save_as_brush', 'use_brush', 'apply_material', 'rename_asset', 'rename_brush', 'delete_asset', 'delete_brush', 'list_materials', 'delete_material', 'make_human', 'place_human', 'animate_human', 'sequence_animations', 'save_animation', 'assign_skeleton', 'spawn_rig', 'save_clip', 'animate_clip', 'sequence_clips', 'save_mesh', 'hy_motion',
       'save_character', 'spawn_character', 'prepare_mesh', 'bind_mesh', 'inspect_render',
       // Registering a tool in assistant.js is NOT enough — the UI posts through here, and this
       // list is a second, independent gate. Missing it produced "unknown action" 400s on every
       // double-click with the brush target set to Unreal (found live 2026-07-31).
-      'brush_to_unreal', 'brush_preview', 'inspect_unreal',
+      'asset_to_unreal', 'brush_to_unreal', 'brush_preview', 'inspect_unreal',
       'unreal_to_blender', 'unreal_to_brush', 'character_to_unreal',
       'remesh_asset'];
     if (!ALLOWED.includes(action)) {
@@ -1354,6 +1466,18 @@ async function handler(req, res) {
       }
     }
 
+    const needsBlender = ['use_brush', 'import_asset', 'apply_material'].includes(action) || (action === 'brush_preview' && !brushBackend.brushGlbFresh(input && input.name));
+    if (needsBlender) {
+      if (lock.isHeld()) { sendJSON(res, 409, { error: 'busy' }); return; }
+      const probe = await blenderIpc.probeBlenderIdle(a.loadConfig(), 3000);
+      if (probe === 'busy') { sendJSON(res, 409, { error: 'busy' }); return; }
+      if (probe !== 'reachable') {
+        sendJSON(res, 202, { accepted: true });
+        answer({ kind: 'reply', action, text: 'BLENDER_UNREACHABLE: Blender is not answering. Open Blender with the Phoenix add-on, or wait until it is free, then try again.' });
+        return;
+      }
+    }
+
     // M9: remesh_asset is a CLOUD job (Meshy) — light: no Blender lock, no GPU, so it is neither refused because a ComfyUI job runs
     // nor blocks one. It runs detached (the click returns 202, progress + the result arrive over SSE); its own flag allows ONE at a time.
     // The jobs.js slot is deliberately NOT used: it is the single GENERATION slot and would make a remesh and a GPU job exclude each other.
@@ -1366,9 +1490,9 @@ async function handler(req, res) {
           const inp = (input && typeof input === 'object') ? input : {};
           broadcast({ kind: 'user', text: '⏷ ' + action });
           const result = await a.TOOLS.remesh_asset(inp, state, cfg, { background: true, uiButton: true });   // progress + done reach the page through the remeshEvents listeners (every start path alike)
-          broadcast({ kind: 'reply', action, text: typeof result === 'string' ? result : JSON.stringify(result) });
+          answer({ kind: 'reply', action, text: typeof result === 'string' ? result : JSON.stringify(result) });
         } catch (err) {
-          broadcast({ kind: 'error', action, message: String((err && err.message) || err) });
+          answer({ kind: 'error', action, message: String((err && err.message) || err) });
         }
       })();
       return;
@@ -1392,7 +1516,7 @@ async function handler(req, res) {
       // lock-based action currently holding the lock. "Does not hold the lock" must never mean
       // "may run twice" — one heavy GPU job at a time.
       if (deferredInFlight || jobs.isRunning() || lock.isHeld()) {
-        sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' });
+        sendJSON(res, 409, busyRefusal());
         return;
       }
       deferredInFlight = true;
@@ -1403,7 +1527,7 @@ async function handler(req, res) {
         sendJSON(res, 409, { error: 'a background generation (i2i edit / text→motion) is using the GPU — try again when it finishes' });
         return;
       }
-      if (!lock.tryAcquire()) {
+      if (!lock.tryAcquire(heavyLockBased ? lock.GENERATION : actionLabel(action))) {
         sendJSON(res, 409, { error: 'busy' });
         return;
       }
@@ -1495,9 +1619,9 @@ async function handler(req, res) {
         // The action name travels with the reply so the UI can react to WHAT finished instead of
         // sniffing the reply text. Text sniffing misfires on chat turns that happen to echo the
         // same wording, and it silently rots the moment a message is reworded.
-        broadcast({ kind: 'reply', action, text: replyText });
+        answer({ kind: 'reply', action, text: replyText });
       } catch (err) {
-        broadcast({ kind: 'error', action, message: String(err.message || err) });
+        answer({ kind: 'error', action, message: String(err.message || err) });
       } finally {
         if (!defersLock) lock.release();
         else deferredInFlight = false;
@@ -1548,9 +1672,41 @@ async function handler(req, res) {
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
     const r = customRig.deleteFolder(body && body.name);
     if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
-    sendJSON(res, 200, { ok: true, folders: customRig.listFolders() });
+    sendJSON(res, 200, { ok: true, id: r.id, folders: customRig.listFolders() });
     return;
   }
+
+  // <r1-shell> status bar: the provider list, one read round, and the user's layout (cfg.ui.statusBar is its one home)
+  if (method === 'GET' && urlPath === '/status/items') { sendJSON(res, 200, statusService.items()); return; }
+  if (method === 'GET' && urlPath === '/version') { sendJSON(res, 200, { version: require('./version'), boot: BOOT_ID }); return; }   // F6.8
+  if (method === 'GET' && urlPath === '/status') { sendJSON(res, 200, await statusService.readAll()); return; }
+  if (method === 'POST' && urlPath === '/status/layout') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const layout = statusBar.validateLayout(body);
+    if (!layout) { sendJSON(res, 400, { error: 'The layout needs { order: [ids], hidden: [ids] } - arrays of up to 64 strings.' }); return; }
+    const fresh = a.loadConfig();
+    fresh.ui = Object.assign({}, (fresh.ui && typeof fresh.ui === 'object') ? fresh.ui : {}, { statusBar: layout });
+    a.saveConfig(fresh);
+    sendJSON(res, 200, { ok: true, statusBar: layout });
+    return;
+  }
+  // </r1-shell>
+  // <t1-themes> the chosen theme lives in the config (cfg.ui.theme) so every browser and the phone show the same
+  if (method === 'POST' && urlPath === '/ui/theme') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch (_) { sendJSON(res, 400, { error: 'Invalid JSON body' }); return; }
+    const theme = body && typeof body === 'object' ? body.theme : null;
+    if (typeof theme !== 'string' || !/^[a-z0-9-]{1,32}$/.test(theme)) { sendJSON(res, 400, { error: 'The theme must be a name of 1-32 lowercase letters, digits or dashes.' }); return; }
+    const fresh = a.loadConfig();
+    fresh.ui = Object.assign({}, (fresh.ui && typeof fresh.ui === 'object') ? fresh.ui : {}, { theme });
+    a.saveConfig(fresh);
+    sendJSON(res, 200, { ok: true, theme });
+    return;
+  }
+  // </t1-themes>
 
   // GET /unreal-state — the header indicator's one call. Cached server-side;
   // see unrealState() for why the client is allowed to be lazy about polling.
@@ -1572,11 +1728,13 @@ async function handler(req, res) {
       health: h,
       voices: (v && v.voices) || [],
       voicesError: (v && v.error) || null,
-      effects: voice.listEffects().map(e => ({ id: e.id, label: e.label })),
-      takes: voice.listTakes(),
+      effects: voice.listEffects(),   // R5b: the full objects (id, label, group, description, parameter) for the one effect rack
+      engines: voice.listVoice(),
+      watermark: voice.cfg().watermark !== false,
+      takes: voice.listTakes(40),
       // VO1: local-dispatcher status line + the reference WAVs in sounds/refs/ (Chatterbox).
       dispatcher: voice.dispatcherStatus(),
-      consent: voice.cfg().consentAck === true,   // VO1b: the one-time cloning consent (Settings -> Voice)
+      consent: voice.cfg().consentAck === true,   // VO1b: the one-time cloning consent (Settings -> Voice engines)
       refs: voice.listRefs(),
     });
     return;
@@ -1672,8 +1830,14 @@ async function handler(req, res) {
   if (method === 'POST' && urlPath === '/sfx-adopt') {
     let body = {};
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
-    const r = sfx.adopt(body);
+    const r = (body && body.library && typeof body.library === 'object') ? sfx.adoptLibrary(body.library.dir, body.library.file) : sfx.adopt(body);   // M1.3: { library: { dir, file } } = a clip of the Library
     sendJSON(res, r.error ? 400 : 200, r);
+    return;
+  }
+
+  // POST /sfx-clear — M1.3: Remove on the bench tile (the global guard refuses cross-site posts like every POST)
+  if (method === 'POST' && urlPath === '/sfx-clear') {
+    sendJSON(res, 200, sfx.clearBench());
     return;
   }
 
@@ -1752,8 +1916,35 @@ async function handler(req, res) {
   // ── GET /characters ────────────────────────────────────────────────────────
   // List the saved (Mixamo-rigged) characters for the Human tab's Character dropdown.
   // They share the animations/ library — there is nothing per-character to list here.
+  // R5a: every character carries posterStamp (its preview key when the GLB export is fresh, else null) and previewError (a failed export).
   if (method === 'GET' && urlPath === '/characters') {
-    sendJSON(res, 200, { characters: characters.listCharacters() });
+    const st = characterPreviews.status();
+    sendJSON(res, 200, {
+      characters: characters.listCharacters().map(c => ({ ...c, posterStamp: characterPreviews.glbFresh(c.name) ? characterPreviews.characterKey(c.name) : null, previewError: st.failed[c.name] || null })),
+      previews: st,
+    });
+    return;
+  }
+
+  // ── POST /characters/previews  {retry?} — (re)start the preview export queue ──
+  if (method === 'POST' && urlPath === '/characters/previews') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body = {}; try { body = JSON.parse((await readBody(req)) || '{}'); } catch (_) {}
+    if (body && body.retry) characterPreviews.retry(body.retry); else characterPreviews.kick('section');
+    sendJSON(res, 200, { ok: true, previews: characterPreviews.status() });
+    return;
+  }
+
+  // ── GET /characters/preview-glb?name=<name> — the fresh preview GLB the poster is rendered from ──
+  if (method === 'GET' && urlPath === '/characters/preview-glb') {
+    const cn = parsedUrl.searchParams.get('name') || '';
+    let data = null;
+    try {
+      if (cn && cn === characters.safeCharName(cn) && characterPreviews.glbFresh(cn)) data = fs.readFileSync(libraryTrash.guarded(characterPreviews.previewDir(), cn + '.glb'));
+    } catch (_) { data = null; }
+    if (!data) { sendJSON(res, 404, { error: 'No fresh preview for that character' }); return; }
+    res.writeHead(200, { 'Content-Type': 'model/gltf-binary', 'Cache-Control': 'no-cache' });
+    res.end(data);
     return;
   }
 
@@ -1765,7 +1956,7 @@ async function handler(req, res) {
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
     const r = characters.renameCharacter(body && body.from, body && body.to);
     if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
-    sendJSON(res, 200, { ok: true, character: r.character, characters: characters.listCharacters() });
+    sendJSON(res, 200, { ok: true, character: r.character, characters: characters.listCharacters(), ...(r.warning ? { warning: r.warning } : {}) });
     return;
   }
 
@@ -1775,7 +1966,7 @@ async function handler(req, res) {
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
     const r = characters.deleteCharacter(body && body.name);
     if (r.error) { sendJSON(res, 400, { error: r.error }); return; }
-    sendJSON(res, 200, { ok: true, characters: characters.listCharacters() });
+    sendJSON(res, 200, { ok: true, id: r.id, characters: characters.listCharacters() });
     return;
   }
 
@@ -1808,7 +1999,7 @@ async function handler(req, res) {
       // marker tells animate_human to "fix" HY conventions, which on a normal Mixamo FBX means
       // laying the character on its back and dividing the hip translation by 100.
       try { fs.unlinkSync(path.join(dir, safe + '.hy.json')); } catch (_) { /* none — fine */ }
-      broadcast({ kind: 'reply', text: 'Added animation: ' + safe + ' — pick it in the Human tab and press Animate.' });
+      broadcast({ kind: 'reply', text: 'Added animation: ' + safe + ' — pick it in Characters ▸ MakeHuman and press Animate.' });
       sendJSON(res, 200, { ok: true, name: safe, animations: animLib.listAnimations() });
     } catch (e) {
       sendJSON(res, 500, { error: String(e.message || e) });
@@ -1834,7 +2025,7 @@ async function handler(req, res) {
     }
 
     try {
-      const buf = await readRawBody(req);
+      const buf = await readRawBody(req, 50 * 1024 * 1024);
 
       if (buf.length === 0) {
         sendJSON(res, 400, { error: 'empty upload' });
@@ -1848,9 +2039,14 @@ async function handler(req, res) {
       const uploadsDir = path.join(workingDir, 'output', 'uploads');
       fs.mkdirSync(uploadsDir, { recursive: true });
 
-      const finalName = Date.now() + '_' + safe;
-      const absPath   = path.join(uploadsDir, finalName);
-      fs.writeFileSync(absPath, buf);
+      // exclusive create: the same name in the same millisecond must never overwrite an earlier upload
+      let finalName = null, absPath = null;
+      for (let k = 0; k < 20; k++) {
+        finalName = Date.now() + '_' + (k ? require('crypto').randomBytes(3).toString('hex') + '_' : '') + safe;
+        absPath   = path.join(uploadsDir, finalName);
+        try { fs.writeFileSync(absPath, buf, { flag: 'wx' }); break; }
+        catch (e) { if (!e || e.code !== 'EEXIST' || k === 19) throw e; }
+      }
 
       const rel = 'output/uploads/' + finalName;
       const url = '/file?p=' + encodeURIComponent(rel);
@@ -1869,10 +2065,25 @@ async function handler(req, res) {
         broadcast({ kind: 'reply', text: 'Loaded image: ' + finalName + ' — it is in the Image tab. Click "Make 3D" to convert it (set a face count first if you like).' });
       }
 
-      sendJSON(res, 200, { ok: true, url });
+      sendJSON(res, 200, { ok: true, url, path: rel });
     } catch (e) {
+      if (e && e.tooLarge) { res.once('finish', () => { try { req.destroy(); } catch (_) { /* gone */ } }); sendJSON(res, 413, { error: 'file too large (max 50MB)' }); return; }
       sendJSON(res, 500, { error: String(e.message || e) });
     }
+    return;
+  }
+
+  // ── F2.9 cached previews: orphaned poster JPEGs + preview GLBs (Settings > Storage) ────────────────────────
+  if (method === 'GET' && urlPath === '/storage/caches') {
+    try { const s = require('./cache-clean').scan(); sendJSON(res, 200, { ok: true, count: s.count, bytes: s.bytes }); }
+    catch (e) { sendJSON(res, 500, { ok: false, error: String((e && e.message) || e) }); }
+    return;
+  }
+  if (method === 'POST' && urlPath === '/storage/caches/clean') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    if (brushPreviews.status().running || characterPreviews.status().running) { sendJSON(res, 409, { ok: false, error: 'A preview export is running — try again when it has finished.' }); return; }
+    try { const r = require('./cache-clean').clean(); sendJSON(res, 200, { ok: true, removed: r.removed, freed: r.freed, failed: r.failed }); }
+    catch (e) { sendJSON(res, 500, { ok: false, error: String((e && e.message) || e) }); }
     return;
   }
 
@@ -1889,7 +2100,7 @@ async function handler(req, res) {
     // Sweep 3 H: while a recent probe found Blender silent, do not take the chat lock for another 500 ms on every refresh (a send right after a
     // reply would meet 409) - the last known value is returned until the quiet period is over.
     const cpQuiet = (Date.now() - lastCpProbeFailAt) < 15000;
-    if (!cpQuiet && lock.tryAcquire()) {
+    if (!cpQuiet && !blenderIpc.queueBusy(fresh) && lock.tryAcquire('a checkpoint check')) {
       // 500 ms bound: the lock is held only that long when Blender is down (a send / Rewind right after a reply must
       // not meet 409). No answer in time → the last known value, stale:true.
       try {
@@ -1920,7 +2131,7 @@ async function handler(req, res) {
       sendJSON(res, 409, { error: 'a background generation is running — rewind is blocked until it finishes' });
       return;
     }
-    if (!lock.tryAcquire()) { sendJSON(res, 409, { error: 'busy' }); return; }
+    if (!lock.tryAcquire('a rewind')) { sendJSON(res, 409, { error: 'busy' }); return; }
     let r;
     try {
       cfg = a.loadConfig();
@@ -1948,19 +2159,20 @@ async function handler(req, res) {
     const meta = (fresh.seats && fresh.seats.metaprompter) || {};
     sendJSON(res, 200, {
       gates: Object.assign({}, (fresh && fresh.gates) || {}, { mode: a.runConfig(fresh).mode }),
-      orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3,
+      orchestrator: { model: orch.model || 'claude-sonnet-4-6', historyMessages: orch.historyMessages || 3, stepTimeoutS: a.stepTimeoutMs(fresh) / 1000,
         maxToolCalls: a.runConfig(fresh, 'ask').budget, maxToolCallsAuto: a.runConfig(fresh, 'auto').budget },
       metaprompter: { model: meta.model || '', ejectAfterUse: !!meta.ejectAfterUse },
       checkpoints: checkpoints.settings(fresh),
       mcp: mcpFlagsView(fresh),
       remesh: remeshView(fresh),   // M9: never the key, never the base URL
       video: videoView(fresh),     // V3: fal.ai video opt-in + "key present"; never the key
-      voice: voice.settingsView(fresh),   // VO1b: Settings -> Voice (local engines, install folder, free space, watermark, consent)
+      voice: voice.settingsView(fresh),   // VO1b: Settings -> Voice engines (local engines, install folder, free space, watermark, consent)
       mcpScript: path.join(workingDir, 'phoenix-mcp.js'),   // absolute path for the Settings setup lines
       endpoints: { local: (fresh.endpoints && fresh.endpoints.local) || '', comfyui: (fresh.endpoints && fresh.endpoints.comfyui) || '' },
       seats: seatsView(fresh),
       endpointNames: endpointNamesOf(fresh),
       keys: providers.listKeys(),   // booleans only — a key value never leaves the server
+      ui: { statusBar: (fresh.ui && fresh.ui.statusBar) || null, theme: (fresh.ui && typeof fresh.ui.theme === 'string') ? fresh.ui.theme : null },   // <r1-shell> the saved status bar layout
       apps: { blender: (fresh.apps && fresh.apps.blender) || '', comfyOutput: (fresh.apps && fresh.apps.comfyOutput) || '' },
       feedback: { endpointUrl: (fresh.feedback && fresh.feedback.endpointUrl) || '' },
       // Defaults land HERE, not in the browser: the double-click handler reads brushTarget on
@@ -1975,6 +2187,183 @@ async function handler(req, res) {
     return;
   }
 
+  if (method === 'POST' && urlPath === '/brushes/previews') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body = {}; try { body = JSON.parse((await readBody(req)) || '{}'); } catch (_) {}
+    if (body.retry) brushPreviews.retry(body.retry); else brushPreviews.kick('section'); sendJSON(res, 200, { ok: true, previews: brushPreviews.status() }); return;
+  }
+  if (urlPath === '/levels' || urlPath.startsWith('/levels/')) {
+    const L = require('./levels'), fresh = a.loadConfig();
+    const reply = (status, value, headers) => sendJSON(res,status,value,headers);
+    const busy = () => reply(409,{ok:false,code:'BUSY',error:'Busy — another action is running'});
+    const unreachable = () => reply(503,{ok:false,code:'BLENDER_UNREACHABLE',error:'BLENDER_UNREACHABLE: Blender is not answering. Open Blender with the Phoenix add-on, or wait until it is free, then try again.'});
+    if (method === 'GET' && urlPath === '/levels') {
+      // R4d3 P1: a level whose level.blend is newer than poster.jpg queues ONE poster render (debounced, never while it is open + dirty in Blender)
+      const isOpenDirty = async (file) => {
+        // true = open + dirty; false = known clean (the ONLY answer that allows a render); null = unknown (lock held, busy, unreachable, no state)
+        // r5: holds NOTHING. The Blender IPC is one FIFO queue per directory, so a foreground action that starts meanwhile queues behind this query.
+        if (lock.isHeld()) return null;
+        const reach = await require('./blender-ipc').probeBlenderIdle(fresh,3000);
+        if (reach === 'busy') return null;
+        if (reach !== 'reachable') { const running = await L.blenderRunning(fresh); return running === false ? false : null; }   // Blender closed: nothing to protect, render
+        if (lock.isHeld()) return null;
+        const open = await L.readOpen({cfg:fresh,background:true});
+        if (!open) return null;
+        return !!(open.dirty && open.filepath && path.resolve(open.filepath).toLowerCase() === path.resolve(file).toLowerCase());
+      };
+      try { L.autoPoster(fresh,{isOpenDirty,onDone:(s,r) => broadcast({kind:'level-poster',level:s,...r})}); } catch (_) {}
+      reply(200,{levels:L.list(fresh)},{'Cache-Control':'no-store'}); return;
+    }
+    if (method === 'GET' && urlPath === '/levels/poster') {
+      try { const slug = parsedUrl.searchParams.get('level'); if (!L.slugOk(slug)) throw new Error('Invalid level'); const file = libraryTrash.guarded(L.root(fresh),slug + '/poster.jpg'); const bytes = fs.readFileSync(file); res.writeHead(200,{'Content-Type':'image/jpeg'}); res.end(bytes); } catch (_) { reply(404,{error:'Poster not found'}); } return;
+    }
+    if (method === 'GET' && urlPath === '/levels/open') {
+      if (lock.isHeld()) { reply(200,{open:lastLevelsOpen,reachable:true,busy:true}); return; }
+      const reach = await require('./blender-ipc').probeBlenderIdle(fresh,3000);
+      if (reach === 'busy') reply(200,{open:lastLevelsOpen,reachable:true,busy:true});
+      else if (reach !== 'reachable') reply(200,{open:null,reachable:false,reason:reach});
+      else { lastLevelsOpen = await L.readOpen({cfg:fresh}); reply(200,{open:lastLevelsOpen,reachable:true}); } return;
+    }
+    if (method === 'POST') {
+      if (!isLocalRequest(req)) { reply(403,{error:'Cross-site request refused.'}); return; }
+      let body; try { body = JSON.parse(await readBody(req)); } catch (_) { reply(400,{ok:false,code:'NAME',error:'Invalid request.'}); return; }
+      if (body.choice !== undefined && !['save','discard'].includes(body.choice)) { reply(400,{ok:false,code:'NAME',error:'Invalid open choice.'}); return; }
+      const action = urlPath.slice(8), slug = body.level, scene = body.scene;
+      if (action === 'orphan') {
+        if (!['reattach','keep','delete'].includes(body.pick)) { reply(400,{ok:false,code:'CHOICE',error:'Choose an animation action.'}); return; }
+        if (!L.slugOk(scene) || typeof body.action !== 'string' || !body.action.trim() || body.action.length > 256 || (body.pick === 'reattach' && (typeof body.object !== 'string' || !body.object.trim()))) { reply(400,{ok:false,code:'NAME',error:'Choose a scene, animation and target object.'}); return; }
+      }
+      let file, nameSlug;
+      try {
+        if (action === 'stage') { if (!L.excludeMap(body.stage)) { reply(400,{ok:false,code:'STAGE',error:'Unknown stage.'}); return; } }
+        else if (action === 'new') {
+          nameSlug = L.slugify(body.name); if (!L.slugOk(nameSlug)) { reply(400,{ok:false,code:'NAME',error:'Enter a level name.'}); return; }
+          if (fs.existsSync(libraryTrash.guarded(L.root(fresh),nameSlug))) { reply(409,{ok:false,code:'EXISTS',error:'That level already exists.'}); return; }
+        } else {
+          if (!L.slugOk(slug) || (scene !== undefined && !L.slugOk(scene))) { reply(400,{ok:false,code:'NAME',error:'Invalid level or scene name.'}); return; }
+          file = libraryTrash.guarded(L.root(fresh),slug + (scene ? '/scenes/' + scene + '.blend' : '/level.blend'));
+          if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) { reply(404,{ok:false,error:'Level or scene not found.'}); return; }
+          if (action === 'scenes/new') { nameSlug = L.slugify(body.name); if (!L.slugOk(nameSlug)) { reply(400,{ok:false,code:'NAME',error:'Enter a scene name.'}); return; } if (fs.existsSync(libraryTrash.guarded(L.root(fresh),slug + '/scenes/' + nameSlug + '.blend'))) { reply(409,{ok:false,code:'EXISTS',error:'That scene already exists.'}); return; } }
+        }
+      } catch(e) { reply(404,{ok:false,error:e.message}); return; }
+      if (action === 'trash' && !scene && L.posterBusy(slug)) { reply(409,{ok:false,code:'POSTER_BUSY',error:'The poster of this level is still rendering — try again in a moment.'}); return; }
+      if (lock.isHeld()) { busy(); return; }
+      const reach = await require('./blender-ipc').probeBlenderIdle(fresh,3000);
+      if (reach === 'busy' && action !== 'trash') { busy(); return; }
+      if (action !== 'trash' && reach !== 'reachable') { unreachable(); return; }
+      if (!lock.tryAcquire('a level change')) { busy(); return; }
+      try {
+        if (action === 'trash' && !scene && L.posterBusy(slug)) { reply(409,{ok:false,code:'POSTER_BUSY',error:'The poster of this level is still rendering — try again in a moment.'}); return; }
+        if (action === 'trash') {
+          const op = reach === 'reachable' ? await L.readOpen({cfg:fresh}) : null;
+          if (!op && body.force !== true) { reply(409,{ok:false,code:'OPEN_UNKNOWN',error:"Blender isn't answering — if this level is open there, close it first."}); return; }
+          const opts = {cfg:fresh,openPath:op && op.filepath}; const r = scene ? libraryTrash.trashScene(slug,scene,opts) : libraryTrash.trashLevel(slug,opts); reply(r.ok ? 200 : r.open ? 409 : 404,r); return;
+        }
+        if (action === 'stage') { const r = await L.setStage(body.stage,{cfg:fresh}); if (r.open) lastLevelsOpen = r.open; reply(r.ok ? 200 : 409,{...r,...(r.converted ? {note:[L.CONVERT_NOTE,...L.unmappedLines(r.unmapped || [])].join(' ')} : {})}); return; }
+        const op = await L.readOpen({cfg:fresh});
+        if (!op) { unreachable(); return; }
+        if (action === 'orphan') {
+          if (op.kind !== 'scene' || op.slug !== slug || op.scene !== scene || !op.filepath || path.resolve(op.filepath).toLowerCase() !== path.resolve(file).toLowerCase()) { reply(409,{ok:false,code:'NOT_OPEN',error:'Open this scene first.'}); return; }
+          const result = await require('./blender-ipc').callBlender(L.orphanPython({choice:body.pick,action:body.action,object:body.object}),{cfg:fresh,timeoutMs:10000,readOnly:body.pick === 'keep',label:body.pick === 'reattach' ? 'reattach animation' : 'delete animation'});
+          const line = String(result.stdout || '').split(/\r?\n/).find(l => l.startsWith('PHX_ORPHAN:'));
+          const r = line ? JSON.parse(line.slice(11)) : {ok:false,error:result.message || 'Could not update the animation.'};
+          if (!r.ok) { reply(409,{ok:false,code:'ORPHAN',error:r.error}); return; }
+          lastLevelsOpen = r.open; reply(200,{ok:true,open:r.open}); return;
+        }
+        if (action === 'save') {
+          if (!op.filepath || path.resolve(op.filepath).toLowerCase() !== path.resolve(file).toLowerCase()) { reply(409,{ok:false,code:'NOT_OPEN',error:'This level or scene is not the file open in Blender — open it first.'}); return; }
+          const saved = await require('./blender-ipc').callBlender(L.savePython(file),{cfg:fresh,readOnly:true,timeoutMs:60000,label:'save'});
+          if (saved.status && saved.status !== 'ok') throw new Error(saved.message || 'Blender could not save the file.');
+          const stateLine = String(saved.stdout || '').split(/\r?\n/).find(l => l.startsWith('PHX_LEVEL:'));
+          const state = stateLine ? JSON.parse(stateLine.slice(10)) : {}; if (state.error) throw new Error(state.error);
+          if (!scene) { L.touch(slug,fresh); reply(200,{ok:true,poster:'pending'}); setImmediate(async () => { try { const poster = await L.renderPoster(slug,{cfg:fresh}); broadcast({kind:'level-poster',level:slug,...poster}); } catch(e) { broadcast({kind:'level-poster',level:slug,ok:false,error:e.message}); } }); }
+          else reply(200,{ok:true,hints:L.keyHints({location:state.keyedLocation || [],scale:state.keyedScale || []})}); return;
+        }
+        if (!['new','scenes/new','open'].includes(action)) { reply(404,{ok:false,error:'Unknown level action.'}); return; }
+        if (op.dirty && !body.choice) { reply(200,{ok:false,needsChoice:true,untitled:!op.filepath}); return; }
+        if (body.choice === 'save' && !op.filepath) { reply(409,{ok:false,code:'UNTITLED',error:'This scene was never saved.'}); return; }
+        let created = {slug,scene,file};
+        if (action === 'new') created = await L.createLevel(body.name,{cfg:fresh});
+        if (action === 'scenes/new') created = await L.createScene(slug,body.name,{cfg:fresh});
+        if (created.ok === false) { reply(500,created); return; }
+        const createdInfo = action === 'new' ? {created:{slug:created.slug}} : action === 'scenes/new' ? {created:{slug:created.slug,scene:created.scene}} : {};   // R4d3 P3: the file exists from here on, whatever the open does
+        const opened = await L.openFile(created.file,{cfg:fresh,choice:body.choice}); if (!opened.ok) { if (opened.needsChoice) reply(200,{...opened,...(action !== 'open' ? {retry:{url:'/levels/open',body:{level:created.slug,...(created.scene ? {scene:created.scene} : {})}}} : {}),...createdInfo}); else reply(500,{...opened,...createdInfo}); return; }
+        const openHints = [...L.unmappedLines(opened.unmapped || []),...L.keyHints(opened.keyed || {})];
+        lastLevelsOpen = opened.open; reply(200,{ok:true,...createdInfo,slug:created.slug,...(created.scene ? {scene:created.scene} : {}),open:opened.open,...(opened.convertError ? {convertError:opened.convertError} : {}),...(opened.converted ? {note:L.CONVERT_NOTE} : {}),...(openHints.length ? {hints:openHints} : {})});
+      } catch(e) { reply(500,{ok:false,error:e.message}); } finally { lock.release(); }
+      return;
+    }
+  }
+
+  if (method === 'GET' && urlPath === '/library/trash') { sendJSON(res, 200, { items: libraryTrash.list({cfg:a.loadConfig()}) }); return; }
+  if (method === 'POST' && ['/library/trash/restore', '/library/trash/empty'].includes(urlPath)) {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body = {}; try { body = JSON.parse(await readBody(req)); } catch (_) {}
+    if (!lock.tryAcquire('the library trash')) { sendJSON(res, 409, { ok: false, busy: true, error: 'Phoenix is busy (a save or another step is running) — try again when it finishes.' }); return; }
+    let r;
+    try { r = urlPath.endsWith('/restore') ? libraryTrash.restore(body.id, {cfg:a.loadConfig()}) : libraryTrash.empty({cfg:a.loadConfig()}); } finally { lock.release(); }
+    sendJSON(res, r.ok ? 200 : r.clash ? 409 : 404, r); return;
+  }
+  // R5b: the Audio takes desk moves sounds/vo + sounds/sfx files into the Library trash (kind `sound`; restore = /library/trash/restore)
+  if (method === 'POST' && urlPath === '/library/trash/sound') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body = {}; try { body = JSON.parse(await readBody(req)); } catch (_) {}
+    if (!lock.tryAcquire('the library trash')) { sendJSON(res, 409, { ok: false, busy: true, error: 'Phoenix is busy (a save or another step is running) — try again when it finishes.' }); return; }
+    let r;
+    try { r = libraryTrash.trashSounds(body && body.files); } finally { lock.release(); }
+    sendJSON(res, r.ok ? 200 : 400, r); return;
+  }
+  // R5b/F4: which storyboards use these takes / clips (the desk's delete confirm warns with it; read-only)
+  if (method === 'POST' && urlPath === '/library/sound-users') {
+    if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    let body = {}; try { body = JSON.parse(await readBody(req)); } catch (_) {}
+    let users = []; try { users = storyboard.usersOfSound(body && body.files); } catch (_) { users = []; }
+    sendJSON(res, 200, { ok: true, users }); return;
+  }
+  if ((method === 'GET' && urlPath === '/poster') || (method === 'POST' && urlPath === '/posters')) {
+    if (method === 'POST' && !isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }
+    const q = new URL(req.url, 'http://localhost').searchParams, key = q.get('key'), stamp = q.get('stamp');
+    let current = null;
+    if (key && key.startsWith('asset:')) {
+      const hit = a.listStagedFiles().find(f => 'asset:' + f.category + '/' + f.name === key);
+      if (hit) { try { const st = fs.statSync(hit.path); current = st.size + '-' + st.mtimeMs; } catch (_) {} }
+    } else if (key && /^brush:[a-z0-9_]+$/i.test(key)) current = brushBackend.brushKey(key.slice(6));
+    else if (key && key.startsWith('character:')) {
+      // R5a: a character poster exists only for a FRESH preview export (a failed / stale export never gets a poster)
+      const cn = key.slice(10), abs = cn && cn === characters.safeCharName(cn) ? characters.charPath(cn) : null;
+      if (abs && fs.existsSync(abs)) {
+        if (!characterPreviews.glbFresh(cn)) { sendJSON(res, method === 'POST' ? 409 : 404, { error: 'No fresh preview for that character' }); return; }
+        current = characterPreviews.characterKey(cn);
+      }
+    }
+    if (!current) { sendJSON(res, 404, { error: 'Unknown library item' }); return; }
+    if (stamp !== current) { sendJSON(res, method === 'POST' ? 409 : 404, { error: 'Poster stamp changed' }); return; }
+    const dir = path.resolve(process.env.PHOENIX_POSTER_CACHE_DIR || path.join(__dirname, 'poster-cache'));
+    let file;
+    try {
+      if (isLinkSync(dir)) throw new Error('Poster folder is a link');
+      if (fs.existsSync(dir) && path.resolve(fs.realpathSync(dir)).toLowerCase() !== path.join(fs.realpathSync(path.dirname(dir)), path.basename(dir)).toLowerCase()) throw new Error('Poster folder resolves elsewhere');
+      const name = require('crypto').createHash('sha1').update('v2|' + key + '|' + stamp).digest('hex') + '.jpg';
+      file = libraryTrash.guarded(dir, name);
+    } catch (_) { sendJSON(res, method === 'POST' ? 400 : 404, { error: 'Poster links are refused' }); return; }
+    if (method === 'GET') {
+      try { const data = fs.readFileSync(file); res.writeHead(200, { 'Content-Type': 'image/jpeg' }); res.end(data); } catch (_) { sendJSON(res, 404, { error: 'No poster' }); } return;
+    }
+    let bytes = 0, chunks = [];
+    for await (const chunk of req) { bytes += chunk.length; if (bytes <= 204800) chunks.push(chunk); }
+    if (bytes > 204800) { sendJSON(res, 413, { error: 'Poster exceeds 200 KB' }); return; }
+    const data = Buffer.concat(chunks);
+    if (req.headers['content-type'] !== 'image/jpeg' || data.length < 3 || data[0] !== 255 || data[1] !== 216 || data[2] !== 255) { sendJSON(res, 400, { error: 'JPEG required' }); return; }
+    if (data.length < 2048) { sendJSON(res, 400, { error: 'Poster looks empty' }); return; }
+    try {
+      fs.mkdirSync(dir, { recursive: true }); const tmp = file + '.tmp'; fs.writeFileSync(tmp, data); fs.renameSync(tmp, file);
+      const files = fs.readdirSync(dir).filter(n => /^[a-f0-9]{40}\.jpg$/.test(n)).map(n => { const p = libraryTrash.guarded(dir, n), st = fs.statSync(p); return { p, size: st.size, time: st.mtimeMs }; }).sort((a, b) => a.time - b.time);
+      let total = files.reduce((n, f) => n + f.size, 0), cap = Number(process.env.PHOENIX_POSTER_CACHE_MAX_BYTES) || 100 * 1024 * 1024;
+      for (const f of files) { if (total <= cap) break; fs.unlinkSync(f.p); total -= f.size; }
+      sendJSON(res, 200, { ok: true });
+    } catch (e) { sendJSON(res, 400, { error: e.message }); } return;
+  }
+
   // ── GET /assets ──────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/assets') {
     let assets = [];
@@ -1987,7 +2376,8 @@ async function handler(req, res) {
       assets = a.listStagedFiles().map(({ name, category, orphaned, path: abs }) => {
         let sizeMB = null;   // M9: the Library's Remesh dialog says how much it would upload
         try { sizeMB = Math.round(fs.statSync(abs).size / 104857.6) / 10; } catch (_) { /* gone between list and stat */ }
-        return { name, category, orphaned: !!orphaned, label: labels[category + '/' + name] || null, sizeMB };
+        let posterStamp = ''; try { const st = fs.statSync(abs); posterStamp = st.size + '-' + st.mtimeMs; } catch (_) {}
+        return { name, category, orphaned: !!orphaned, label: labels[category + '/' + name] || null, sizeMB, posterStamp };
       })
         .sort((x, y) => (x.label || x.name).localeCompare(y.label || y.name, undefined, { numeric: true, sensitivity: 'base' }));
     } catch (_) {}
@@ -2137,7 +2527,7 @@ async function handler(req, res) {
           if (!c.voice) { available = false; reason = 'no voice pack chosen'; }
           else if (known && !known.has(c.voice)) { available = false; reason = 'voice pack "' + c.voice + '" is not in the current list'; }
         } else if (c.engine === 'chatterbox') {
-          if (!hasDisp) { available = false; reason = 'turn on "Run voice engines on this PC" in Settings → Voice'; }
+          if (!hasDisp) { available = false; reason = 'turn on "Run voice engines on this PC" in Settings → Voice engines'; }
           else if (c.reference) { const rr = voice.resolveRef(c.reference); if (rr.error) { available = false; reason = rr.error; } }
           else if (workflows.dispatcherMode((vcfg || {}).voice) === 'local') { available = false; reason = 'pick a reference voice'; }
         } else { available = false; reason = 'unknown engine "' + c.engine + '"'; }
@@ -2162,6 +2552,16 @@ async function handler(req, res) {
     const sbHasVoiceTake = (s) => !!(s && Array.isArray(s.lines) && s.lines.some(l => l && l.take));
     const sbAudioDefault = (s, cfgAudio) => sbHasVoiceTake(s) ? { on: false, reason: 'off — this shot has a voice take' } : { on: cfgAudio !== undefined ? cfgAudio : videoView(a.loadConfig()).fal.audio, reason: '' };
     // </v1b3>
+    // R6: what the timeline needs to know about files (one rule each: the servable-image rule, the real take file, the SFX library)
+    const sbTimelineFacts = () => {
+      let sfxNames = null;
+      const imageOk = (rel) => typeof rel === 'string' && !!rel && sbImageError(rel) === '';
+      return {
+        keyframeOk: imageOk, clipOk: imageOk,
+        takeSeconds: (take) => storyboardTimeline.wavSeconds(path.join(voice.OUT_DIR, path.basename(String(take)))),
+        sfxOk: (clip) => { if (!sfxNames) sfxNames = new Set(sfx.listClips().map(c => c.file)); return sfxNames.has(clip); },
+      };
+    };
     const sbView = (board) => {
       let clips = null;
       // <lc2a-r2> M6 / r3 M1: config (and the key lookup behind videoView) is read ONCE per view build - availability, audio default and estimates all use it
@@ -2193,7 +2593,7 @@ async function handler(req, res) {
         out.compiled = { keyframe: storyboard.compilePrompt(s, 'keyframe'), video: storyboard.compilePrompt(s, 'video') };
         // V1b-3: progress / last failure of the long actions, and the cost line of a paid video backend
         const sk = sbKey(board.id, s.id);
-        out.keyframe_busy = sbKeyframeBusy.has(sk); out.keyframe_error = sbKeyframeErr.get(sk) || '';
+        out.keyframe_busy = sbKeyframeBusy.has(sk); out.keyframe_error = sbKeyframeErr.get(sk) || ''; out.keyframe_job = sbKeyframeRefJob.get(sk) ?? null;
         out.video_busy = sbVideoBusy.has(sk); out.video_error = sbVideoErr.get(sk) || '';
         out.video_estimate = null;
         { const ad = sbAudioDefault(s, cfgAudio); out.video_audio = { on: ad.on, reason: ad.reason }; }   // <lc2a-fal-audio> the confirm row's default for "with sound"
@@ -2214,15 +2614,18 @@ async function handler(req, res) {
         const we = workflows.getActive('image', vcfg), R = we && we.reference;
         keyframe = { workflow: (we && we.id) || '', label: (we && (we.label || we.id)) || 'the active image workflow', mode: !R ? 'none' : (R.mode === 'img2img' ? 'img2img' : (Number(R.maxRefs) >= 1 ? 'edit' : 'none')), max_refs: R ? (Number(R.maxRefs) || 0) : 0 };
       } catch (_) { /* no workflow info: the page shows the generic line */ }
-      const out = { board, total_s, shots, cast: sbCastView(board, vcfg), keyframe, video: { available: vs.available, reason: vs.reason, backend: vs.backend ? { id: vs.backend.id, label: vs.backend.label } : null } };
+      const lt = storyboard.listTags();   // R6: the shared own-tag list rides along with every view
+      const out = { board, total_s, shots, camera_tags: lt.ok ? lt.tags : [], cast: sbCastView(board, vcfg), keyframe, video: { available: vs.available, reason: vs.reason, backend: vs.backend ? { id: vs.backend.id, label: vs.backend.label } : null } };
       if (vList.length) { const au = sbVideoState(vcfg, 'auto');   // <v2-choice> what the selector in ③ lists (absent while no backend is registered); video{} above is untouched
         out.video_choice = { choice: sbVideoChoice(vcfg), auto: au.backend ? au.backend.id : null, backends: vList.map(x => ({ id: x.b.id, label: x.b.label, gpu: x.b.gpu === true, available: x.r.ok, reason: x.r.ok ? '' : x.r.reason, ...(x.b.status === 'unverified' ? { unverified: true } : {}) })) }; }
+      if (!board.error) { try { out.timeline = storyboardTimeline.timeline(board, sbTimelineFacts()); } catch (_) { /* a view never fails because of the timeline */ } }   // R6
+      if (!board.error) out.undo = storyboard.pendingUndo(board.id);   // R6: the one remove the server can still undo (the page shows its Undo row only while this matches)
       if (board.warning) out.warning = board.warning;
       if (board.error) { out.error = board.error; out.board = { version: board.version, id: board.id, title: board.title, group: board.group, aspect: board.aspect, cast: board.cast, shots: board.shots }; }
       return out;
     };
     // storyboard.js error -> HTTP status (unknown shot / board 404, unreadable 409, save failed 500, else 400)
-    const sbStatus = (err) => (err === 'unknown shot' || err === storyboard.UNKNOWN_BOARD) ? 404 : (err === storyboard.UNREADABLE ? 409 : ((err === storyboard.SAVE_FAILED || err === storyboard.BACKUP_FAILED) ? 500 : 400));
+    const sbStatus = (err) => (err === 'unknown shot' || err === storyboard.UNKNOWN_BOARD) ? 404 : ((err === storyboard.UNREADABLE || err === storyboard.UNDO_GONE || /^too many tags/.test(String(err))) ? 409 : ((err === storyboard.SAVE_FAILED || err === storyboard.BACKUP_FAILED) ? 500 : 400));
     // '' when fine (or no image given), else the plain error for a 400.
     const sbImageError = (img) => servable.servableImageError(workingDir, img);   // one path rule (servable.js), shared with generate_from_refs
     if (method === 'GET' && urlPath === '/storyboard') {
@@ -2238,10 +2641,54 @@ async function handler(req, res) {
       sendJSON(res, 200, { active: r.active, boards: r.boards, groups: r.groups });
       return;
     }
-    if (method === 'POST' && ['/storyboard/shot', '/storyboard/shot/update', '/storyboard/shot/remove', '/storyboard/shot/move'].includes(urlPath)) {
+    // <r6-tags> R6: the shared own camera tags (session/storyboards/_tags.json)
+    if (method === 'GET' && urlPath === '/storyboard/tags') {
+      const r = storyboard.listTags();
+      if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      sendJSON(res, 200, { tags: r.tags });
+      return;
+    }
+    if (method === 'POST' && (urlPath === '/storyboard/tags/add' || urlPath === '/storyboard/tags/remove')) {
       let body;
       try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
       if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      const r = urlPath === '/storyboard/tags/add' ? storyboard.addTag(body.tag) : storyboard.removeTag(body.tag);
+      if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      sendJSON(res, 200, { ok: true, tags: r.tags });
+      return;
+    }
+    // </r6-tags>
+    // <r6-export> R6: Export board as video (the animatic MP4). One job in the shared slot; Stop = the existing POST /stop {kind:'video', job}
+    if (method === 'GET' && urlPath === '/storyboard/export/status') {
+      sendJSON(res, 200, { running: sbExport.running ? { board: sbExport.running.board, job: sbExport.running.job, progress: sbExport.running.progress } : null, last: sbExport.last, idle: !(deferredInFlight || lock.isHeld() || jobs.isRunning()) });   // idle: the phone can confirm a busy refusal is stale (/mcp/status is laptop-only)
+      return;
+    }
+    if (method === 'POST' && urlPath === '/storyboard/export') {
+      if (!isLocalRequest(req)) { sendJSON(res, 403, { error: 'Cross-site request refused.' }); return; }   // starts a long ffmpeg job and writes a file
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      const bid = body.board == null || body.board === '' ? null : String(body.board);
+      const board = storyboard.load(bid);
+      if (board.error) { sendJSON(res, sbStatus(board.error), { error: board.error }); return; }
+      if (!board.shots.length) { sendJSON(res, 400, { error: 'nothing to export \u2014 add a shot first' }); return; }
+      if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, busyRefusal()); return; }
+      const facts = sbTimelineFacts();
+      const started = jobs.start({ kind: 'video', label: 'Animatic ' + board.title }, (jid, signal) => sbRunAnimaticJob(board, facts, jid, signal));
+      if (!started.started) { sendJSON(res, 409, { error: started.reason, busy: true }); return; }
+      sbExport.running = { board: board.id, job: started.id, progress: 0 };
+      sendJSON(res, 200, { ok: true, job: started.id });
+      return;
+    }
+    // </r6-export>
+    if (method === 'POST' && ['/storyboard/shot', '/storyboard/shot/update', '/storyboard/shot/line/add', '/storyboard/shot/remove', '/storyboard/shot/restore', '/storyboard/shot/move'].includes(urlPath)) {
+      let body;
+      try { body = JSON.parse(await readBody(req)); } catch (_) { body = null; }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJSON(res, 400, { error: 'request body must be a JSON object' }); return; }
+      if (urlPath === '/storyboard/shot' || urlPath === '/storyboard/shot/update') {   // stored in the spelling every later check accepts: an absolute path inside a root (on Windows also OUTPUT/x.png) becomes output/x.png
+        body.image = servable.relativeForm(workingDir, body.image);
+        if (Array.isArray(body.refs)) body.refs = body.refs.map(ref => (ref && typeof ref === 'object' && typeof ref.path === 'string') ? { ...ref, path: servable.relativeForm(workingDir, ref.path) } : ref);
+      }
       const imgErr = urlPath === '/storyboard/shot' || urlPath === '/storyboard/shot/update' ? sbImageError(body.image) : '';
       if (imgErr) { sendJSON(res, 400, { error: imgErr }); return; }
       const bid = body.board == null || body.board === '' ? null : String(body.board);
@@ -2256,9 +2703,18 @@ async function handler(req, res) {
             if (rerr) { sendJSON(res, 400, { error: rerr }); return; }
           }
         }
-        if (body.lines !== undefined) {   // <sb3> the whole list; a line's take is NOT client-settable (Speak sets it server-side; storyboard.js keeps it by lid)
+        if (body.lines !== undefined) {   // <sb3> the whole list. R6: a client take is honoured when it is a string naming a take that really is in sounds/vo (take -> storyboard); absent / null keeps the line's take by lid
           if (!Array.isArray(body.lines)) { sendJSON(res, 400, { error: 'bad lines' }); return; }
-          patch.lines = body.lines.map(l => { if (!l || typeof l !== 'object' || Array.isArray(l)) return l; const { take: _ignored, takeExists: _ig2, ...rest } = l; return rest; });
+          for (const l of body.lines) {
+            if (!l || typeof l !== 'object' || Array.isArray(l) || l.take === undefined || l.take === null) continue;
+            const tk = l.take;
+            const base = typeof tk === 'string' ? path.basename(tk) : '';
+            if (typeof tk !== 'string' || tk !== '/vo/' + base || /[\\/]/.test(base) || storyboard.normTake(tk) === null) { sendJSON(res, 400, { error: 'bad line take' }); return; }
+            let isFile = false;
+            try { isFile = fs.statSync(path.join(voice.OUT_DIR, base)).isFile(); } catch (_) { isFile = false; }
+            if (!isFile) { sendJSON(res, 400, { error: 'that take is not in sounds/vo' }); return; }
+          }
+          patch.lines = body.lines.map(l => { if (!l || typeof l !== 'object' || Array.isArray(l)) return l; const { take, takeExists: _ig2, take_s: _ig3, ...rest } = l; if (typeof take === 'string') rest.take = take; return rest; });   // a validated string take is set; absent / null leaves it to storyboard.js (kept by lid)
         }
         if (body.sound !== undefined) {
           if (!body.sound || typeof body.sound !== 'object' || Array.isArray(body.sound)) { sendJSON(res, 400, { error: 'bad sound' }); return; }
@@ -2268,9 +2724,21 @@ async function handler(req, res) {
         }
         r = storyboard.updateShot(bid, body.id, patch);
       }
+      else if (urlPath === '/storyboard/shot/line/add') {   // R6: atomic "+ new line" (the lines are read under the write; same take rule as update)
+        const tk = body.take;
+        const base = typeof tk === 'string' ? path.basename(tk) : '';
+        if (typeof tk !== 'string' || tk !== '/vo/' + base || /[\\/]/.test(base) || storyboard.normTake(tk) === null) { sendJSON(res, 400, { error: 'bad line take' }); return; }
+        let isFile = false;
+        try { isFile = fs.statSync(path.join(voice.OUT_DIR, base)).isFile(); } catch (_) { isFile = false; }
+        if (!isFile) { sendJSON(res, 400, { error: 'that take is not in sounds/vo' }); return; }
+        r = storyboard.addLine(bid, body.id, { speaker: body.speaker, line: body.line, gap_s: body.gap_s, take: tk });
+      }
       else if (urlPath === '/storyboard/shot/remove') r = storyboard.removeShot(bid, body.id);
+      else if (urlPath === '/storyboard/shot/restore') r = storyboard.restoreShot(bid, body.shot, body.at);   // R6: Undo of the last remove of that board
       else r = storyboard.moveShot(bid, body.id, body.index);
       if (!r.ok) { sendJSON(res, sbStatus(r.error), { error: r.error }); return; }
+      if (urlPath === '/storyboard/shot/remove') { sendJSON(res, 200, { ...sbView(r.board), removed: { shot: r.removed, at: r.at } }); return; }
+      if (urlPath === '/storyboard/shot/restore') { sendJSON(res, 200, { ...sbView(r.board), restored: r.restored }); return; }
       sendJSON(res, 200, sbView(r.board));
       return;
     }
@@ -2333,15 +2801,25 @@ async function handler(req, res) {
           if (!R) { sendJSON(res, 400, { error: '"' + label + '" has no reference mode — use Flux Klein (up to 2 references) or Z-Image Turbo (1 reference).' }); return; }
           if (refs.length > R.maxRefs) { sendJSON(res, 400, { error: 'The active image workflow takes ' + R.maxRefs + ' reference images — this shot has ' + refs.length + '. Remove some or switch the workflow.' }); return; }
         }
-        if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' }); return; }
+        if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, busyRefusal()); return; }
         const dims = { '16:9': [1344, 768], '9:16': [768, 1344], '1:1': [1024, 1024] }[board.aspect] || [1344, 768];
         const nr = board.shots.indexOf(shot) + 1;
-        const started = jobs.start({ kind: 'image', label: 'Keyframe shot ' + nr }, async () => {
-          let ok = false;
+        const started = jobs.start({ kind: 'image', label: 'Keyframe shot ' + nr }, async (jid, signal) => {
+          let ok = false, stoppedRun = false, timedOut = false, timer = null, limit = 0;
+          const ac = new AbortController();
           try {
             let rel;
             if (refs.length) {   // I1's entry point, exactly as its spec defines it
-              const out = await a.TOOLS.generate_from_refs({ refs, prompt, width: dims[0], height: dims[1], category: 'storyboard' }, state, a.loadConfig(), { background: true, ownsJobSlot: true });
+              // M4: a reference run has a deadline (cfg.storyboard.keyframeTimeoutMs, else 12 min) and a Stop; the call ends even when the tool ignores the signal
+              const kt = Number(((a.loadConfig() || {}).storyboard || {}).keyframeTimeoutMs);
+              limit = Number.isFinite(kt) && kt > 0 ? kt : 720000;
+              timer = setTimeout(() => { timedOut = true; ac.abort(); }, limit);
+              if (signal) { if (signal.aborted) ac.abort(); else signal.addEventListener('abort', () => ac.abort(), { once: true }); }
+              const gone = new Promise((_, rej) => { const f = () => rej(Object.assign(new Error('Stopped'), { aborted: true })); if (ac.signal.aborted) f(); else ac.signal.addEventListener('abort', f, { once: true }); });
+              gone.catch(() => {});
+              const call = Promise.resolve(a.TOOLS.generate_from_refs({ refs, prompt, width: dims[0], height: dims[1], category: 'storyboard' }, state, a.loadConfig(), { background: true, ownsJobSlot: true, signal: ac.signal, timeoutMs: limit }));
+              call.catch(() => {});
+              const out = await Promise.race([call, gone]);
               const t = a.parseRefTile(out);
               if (!t) throw new Error(String(out).replace(/^(ERROR|BUSY):\s*/, ''));
               rel = path.relative(workingDir, t.abs).split(path.sep).join('/');
@@ -2355,15 +2833,25 @@ async function handler(req, res) {
             sbKeyframeErr.delete(k); ok = true;
             return 'Keyframe shot ' + nr + ' ready';
           } catch (e) {
+            if (refs.length && timedOut) {
+              sbKeyframeErr.set(k, 'Keyframe timed out after ' + Math.max(1, Math.round(limit / 60000)) + ' min. Check that ComfyUI is running, then try again.');
+              throw new Error(sbKeyframeErr.get(k));
+            }
+            if (refs.length && ac.signal.aborted) {   // a Stop is not an alarm: the same line where errors show, no failure bubble
+              sbKeyframeErr.set(k, 'Keyframe stopped.'); stoppedRun = true;
+              return 'Keyframe shot ' + nr + ' stopped';
+            }
             sbKeyframeErr.set(k, String((e && e.message) || e));
             throw e;
           } finally {
+            if (timer) clearTimeout(timer);
+            sbKeyframeRefJob.delete(k);
             sbKeyframeBusy.delete(k);
             broadcast({ kind: 'storyboard', phase: 'keyframe', board: board.id, shot: shot.id, ok });   // the open Storyboard tab reloads once
           }
         });
-        if (!started.started) { sendJSON(res, 409, { error: started.reason }); return; }
-        sbKeyframeErr.delete(k); sbKeyframeBusy.set(k, true);
+        if (!started.started) { sendJSON(res, 409, { error: started.reason, busy: true }); return; }
+        sbKeyframeErr.delete(k); sbKeyframeBusy.set(k, true); if (refs.length) sbKeyframeRefJob.set(k, started.id);
         sendJSON(res, 200, view());
         return;
       }
@@ -2474,7 +2962,7 @@ async function handler(req, res) {
         };
         sbVideoErr.delete(k);
         if (be.gpu === true) {   // a local GPU backend: ONE heavy GPU job at a time, in the shared jobs slot (blocks keyframes, is blocked by them)
-          if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, { error: 'a generation is already running — one heavy GPU job at a time; give it a moment' }); return; }
+          if (deferredInFlight || lock.isHeld()) { sendJSON(res, 409, busyRefusal()); return; }
           const started = jobs.start({ kind: 'video', label: 'Video shot ' + nr }, async (jid, signal) => {   // <v2-choice> the slot's AbortSignal = the stop path (POST /stop -> jobs.cancel)
             let ret;
             const onProgress = (t) => { sbVideoProgress.set(k, String(t)); broadcast({ kind: 'storyboard', phase: 'progress', board: board.id, shot: shot.id, text: String(t), ok: true }); };   // the page patches ONLY the progress text for this phase
@@ -2485,7 +2973,7 @@ async function handler(req, res) {
             if (f) throw new Error(f);
             return 'Video shot ' + nr + ' ready';
           });
-          if (!started.started) { sendJSON(res, 409, { error: started.reason }); return; }
+          if (!started.started) { sendJSON(res, 409, { error: started.reason, busy: true }); return; }
           sbVideoBusy.set(k, true); sbVideoGpu.set(k, started.id); sbVideoNote.delete(k); sbVideoProgress.delete(k);
           sendJSON(res, 200, view());
           return;
@@ -2535,15 +3023,15 @@ async function handler(req, res) {
   if (method === 'POST' && urlPath === '/images/use') {
     let body = {};
     try { body = JSON.parse(await readBody(req)); } catch (_) { /* {} */ }
-    const p = body && typeof body.path === 'string' ? body.path : '';
+    const p = body && typeof body.path === 'string' ? servable.relativeForm(workingDir, body.path) : '';   // records and /file?p= use the relative form
     const rec = (!p || p.includes('..')) ? null : records.readRecords({ kinds: ['image', 'i2i', 'upload'] }).find(r => r.path === p);   // <l1-library> imported images can be used too
     if (!rec) { sendJSON(res, 400, { error: 'not a recorded image' }); return; }
     const abs = path.resolve(workingDir, p);
     let isFile = false;
     try { isFile = fs.statSync(abs).isFile(); } catch (_) {}
     if (!isFile) { sendJSON(res, 404, { error: 'file is gone' }); return; }
-    const f = path.isAbsolute(p) ? null : resolveFileParam(p);
-    if (!f || !f.allowed) { sendJSON(res, 400, { error: 'image is outside the servable roots' }); return; }
+    const roots = servable.servableImageError(workingDir, p);   // the one path rule (links, roots)
+    if (roots) { sendJSON(res, 400, { error: roots }); return; }
     state.lastImage         = abs;
     state.lastImageCategory = (rec.kind !== 'upload' && typeof rec.category === 'string' && rec.category) ? rec.category : 'item';   // <l1-library> 'imported' is a gallery group, not a seat category
     state.lastImageDesc     = path.basename(abs, path.extname(abs));
@@ -2558,8 +3046,8 @@ async function handler(req, res) {
   // ── GET /brushes ──────────────────────────────────────────────────────────
   if (method === 'GET' && urlPath === '/brushes') {
     let brushes = [];
-    try { brushes = a.listBrushesData(); } catch (_) {}
-    sendJSON(res, 200, { brushes });
+    try { brushes = a.listBrushesData().map(b => ({ ...b, posterStamp: brushBackend.brushKey(b.slug), glbFresh: brushBackend.brushGlbFresh(b.slug), previewError: brushPreviews.status().failed[b.slug] || null })); } catch (_) {}
+    sendJSON(res, 200, { brushes, previews: brushPreviews.status() });
     return;
   }
 
@@ -2874,6 +3362,16 @@ async function handler(req, res) {
       staged.orchestrator.historyMessages = hm;
     }
 
+    // Step timeout (S1 T7-7): seconds, 60..1800.
+    if (hasOrch && 'stepTimeoutS' in body.orchestrator) {
+      const st = body.orchestrator.stepTimeoutS;
+      if (!Number.isInteger(st) || st < 60 || st > 1800) {
+        sendJSON(res, 400, { error: 'Step timeout must be an integer between 60 and 1800 seconds.', field: 'stepTimeoutS' });
+        return;
+      }
+      staged.orchestrator.stepTimeoutS = st;
+    }
+
     // Tool budget per turn (Ask / Auto) — same integer rule as historyMessages.
     for (const [key, label] of [['maxToolCalls', 'Tool steps per turn (Ask)'], ['maxToolCallsAuto', 'Tool steps per turn (Auto)']]) {
       if (hasOrch && key in body.orchestrator) {
@@ -3169,6 +3667,9 @@ async function handler(req, res) {
       if (voiceApplied.error) { sendJSON(res, 400, { error: voiceApplied.error, field: voiceApplied.field }); return; }
     }
 
+    // M1.1: the seat tests / pings above can take a minute; a workflow selected meanwhile (POST /workflows) is not ours to overwrite - POST /config never edits workflows
+    const latest = a.loadConfig();
+    if (latest && latest.workflows) fresh.workflows = latest.workflows; else delete fresh.workflows;
     a.saveConfig(fresh);
     try { voice.dispatcherSync(); } catch (_) { /* VO1: start/stop the local voice dispatcher to match the saved config */ }
     for (const sd of forcedSeats) capabilities.markForced(sd);   // the troubleshooter was forced past a failed test
@@ -3189,7 +3690,7 @@ async function handler(req, res) {
         visionHeight: fresh.unreal.visionHeight || 720,
       },
       gates: Object.assign({}, fresh.gates, { mode: a.runConfig(fresh).mode }),
-      orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages,
+      orchestrator: { model: fresh.seats.orchestrator.model, historyMessages: fresh.seats.orchestrator.historyMessages, stepTimeoutS: a.stepTimeoutMs(fresh) / 1000,
         maxToolCalls: a.runConfig(fresh, 'ask').budget, maxToolCallsAuto: a.runConfig(fresh, 'auto').budget },
       metaprompter: { model: fresh.seats.metaprompter.model, ejectAfterUse: !!fresh.seats.metaprompter.ejectAfterUse },
       checkpoints: checkpoints.settings(fresh),
@@ -3829,7 +4330,7 @@ async function handler(req, res) {
         throw new Error(errText);   // never the raw error: jobs.js would put its message on SSE + the debug log
       } finally {
         acquireRunning.delete(id);
-        try { voice.invalidateFreeSpace(); } catch (_) {}   // R3-M1: the disk figure in Settings -> Voice is stale after an install
+        try { voice.invalidateFreeSpace(); } catch (_) {}   // R3-M1: the disk figure in Settings -> Voice engines is stale after an install
       }
     });
 
@@ -4387,10 +4888,10 @@ async function handler(req, res) {
     if (!intent) intent = Array.from(tool + ' ' + JSON.stringify(input)).slice(0, 500).join('');
     const client = (body && typeof body.client === 'string' && body.client.trim()) ? body.client.trim().slice(0, 80) : 'mcp';
     // M9: remesh_asset is cloud work — no chat lock, not refused by a running GPU job (own one-at-a-time flag in the tool). Consent:
-    // only when Settings → Connections is on; MCP counts as Auto. The tool re-checks the same gates (enabled, key) in the same order.
+    // only when Settings → Cloud & keys (Meshy) is on; MCP counts as Auto. The tool re-checks the same gates (enabled, key) in the same order.
     const cloudTool = tool === 'remesh_asset';
     if (cloudTool && !(fresh.remesh && fresh.remesh.enabled === true)) {
-      sendJSON(res, 200, { result: 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Connections', failed: true, verdict: null, gateNote: '', stopReason: null });
+      sendJSON(res, 200, { result: 'REJECTED: remesh uploads meshes to Meshy (paid) — enable it in Settings → Cloud & keys', failed: true, verdict: null, gateNote: '', stopReason: null });
       return;
     }
     const readOnly = mcpClass === 'R' || cloudTool;   // 'readOnly' here = takes no chat lock
@@ -4398,7 +4899,7 @@ async function handler(req, res) {
       sendJSON(res, 409, { error: 'a background generation is running — wait for it to finish, then try again' });
       return;
     }
-    if (!readOnly && !lock.tryAcquire()) { sendJSON(res, 409, { error: 'busy' }); return; }   // read-only tools never take the lock: parallel agent calls must not 409
+    if (!readOnly && !lock.tryAcquire('an agent tool')) { sendJSON(res, 409, { error: 'busy' }); return; }   // read-only tools never take the lock: parallel agent calls must not 409
     const cut = (t, n) => { const cps = Array.from(String(t)); return cps.length > n ? cps.slice(0, n).join('') + '…' : cps.join(''); };
     try {
       cfg = fresh;
@@ -4472,6 +4973,21 @@ async function handler(req, res) {
     let sbody = null;
     try { sbody = JSON.parse(await readBody(req)); } catch (_) { sbody = null; }
     const videoOnly = !!(sbody && typeof sbody === 'object' && sbody.kind === 'video');
+    // M4: the keyframe card's Stop names its run { kind:'keyframe', job }: it ends only THAT registered reference run, waits (max 3 s) for the slot to free, and touches nothing else
+    const kfWait = async (id) => { for (let i = 0; i < 120 && jobs.info() && jobs.info().id === id; i++) await new Promise(r => setTimeout(r, 25)); };
+    const kfRegistered = (id) => id != null && [...sbKeyframeRefJob.values()].includes(id);
+    if (sbody && typeof sbody === 'object' && sbody.kind === 'keyframe') {
+      if (!(job && Number(sbody.job) === job.id && kfRegistered(job.id))) {
+        sendJSON(res, 200, { stopped: false, reason: 'that keyframe run is not the one running', stage: null, comfyui: 'not attempted', job: job ? { id: job.id, kind: job.kind, label: job.label, runningMs: Date.now() - job.startedAt } : null });
+        return;
+      }
+      jobs.cancel(job.id);
+      await kfWait(job.id);
+      const still = !!(jobs.info() && jobs.info().id === job.id);
+      broadcast({ kind: 'notice', text: '⛔ Stopped the keyframe.' });
+      sendJSON(res, 200, { stopped: true, stage: 'keyframe', comfyui: still ? 'Stop requested - the run ends as soon as ComfyUI answers' : 'cancelled', job: { id: job.id, kind: job.kind, label: job.label, runningMs: Date.now() - job.startedAt } });
+      return;
+    }
     // LC2f: a video Stop that names no run (a fal shot has no local job id) cancels NOTHING - it must never hit another shot's local run that happens to hold the slot
     if (videoOnly && sbody.job == null) {
       sendJSON(res, 200, { stopped: false, reason: 'no local video run named', stage: null, comfyui: 'not attempted', job: job ? { id: job.id, kind: job.kind, label: job.label, runningMs: Date.now() - job.startedAt } : null });
@@ -4496,14 +5012,19 @@ async function handler(req, res) {
       }
     }
 
-    if (local.stopped) {
+    // M4: a bare /stop (the chat Stop) also ends a registered reference keyframe run
+    let keyframeStopped = false;
+    if (!local.stopped && !videoStopped && !videoOnly && job && kfRegistered(job.id) && jobs.cancel(job.id).ok) { keyframeStopped = true; await kfWait(job.id); }
+    if (keyframeStopped) {
+      broadcast({ kind: 'notice', text: '⛔ Stopped the keyframe.' });
+    } else if (local.stopped) {
       broadcast({ kind: 'notice', text: `⛔ Stopped the ${stage || 'running'} stage (ComfyUI: ${remote}).` });
     } else if (videoStopped) {
       broadcast({ kind: 'notice', text: '⛔ Stopped the local video (ComfyUI: ' + remote + ').' });
     }
     sendJSON(res, 200, {
-      stopped:  local.stopped || videoStopped,
-      stage:    stage || (videoStopped ? 'video' : null),
+      stopped:  local.stopped || videoStopped || keyframeStopped,
+      stage:    stage || (videoStopped ? 'video' : (keyframeStopped ? 'keyframe' : null)),
       comfyui:  remote,
       // Reported even when nothing was killed, so the UI can say WHY it could not stop.
       job:      job ? { id: job.id, kind: job.kind, label: job.label,
@@ -4587,11 +5108,13 @@ const localVideoBackend = require('./providers/comfy-i2v').create({
 function registerLocalVideo() { return registerVideoBackend(localVideoBackend); }
 // </v2-backend>
 
-module.exports = { remote, _safeDirName: safeDirName, _thumbFailedSize: () => thumbFailed.size, registerFalVideo, falVideoBackend, registerLocalVideo, localVideoBackend, registerVideoBackend, unregisterVideoBackend, videoBackends, NO_VIDEO_BACKEND, feedPipelineLine, _resetPipelineState, _resetCpProbeQuiet: () => { lastCpProbeFailAt = 0; }, handler, _setProviderDeps, _setMcpRenderPath };
+module.exports = { remote, _actionLabels: ACTION_LABELS, _actionLabel: actionLabel, _safeDirName: safeDirName, _thumbFailedSize: () => thumbFailed.size, registerFalVideo, falVideoBackend, registerLocalVideo, localVideoBackend, registerVideoBackend, unregisterVideoBackend, videoBackends, NO_VIDEO_BACKEND, feedPipelineLine, _resetPipelineState, _resetCpProbeQuiet: () => { lastCpProbeFailAt = 0; }, handler, _setProviderDeps, _setMcpRenderPath };
 
 // ─── Start server (only when run directly, not when required for tests) ────────
 
 if (require.main === module) {
+  brushPreviews.kick('start');
+  characterPreviews.kick('start');
   // Subscribe to debug-log — forward every event to SSE clients + parse pipeline lines
   dbg.subscribe(rec => {
     broadcast({ kind: 'event', rec });

@@ -466,7 +466,7 @@ async function makeHuman(input = {}, cfg) {
   const code = buildMakeHumanCode(input || {});
   let r;
   try {
-    r = await callBlender(code, { cfg, timeoutMs: 300000 }); // MPFB2 builds + asset fitting can be slow
+    r = await callBlender(code, { cfg, timeoutMs: 300000, label: 'make human' }); // MPFB2 builds + asset fitting can be slow
   } catch (e) {
     return 'ERROR: ' + e.message;
   }
@@ -480,7 +480,7 @@ async function makeHuman(input = {}, cfg) {
   if (m) {
     // Best-effort face preview for the Human tab (server broadcasts it as slot:'human').
     try {
-      await callBlender(buildHeadshotCode(m[1], PREVIEW_ABS), { cfg, timeoutMs: 120000 });
+      await callBlender(buildHeadshotCode(m[1], PREVIEW_ABS), { cfg, timeoutMs: 120000, label: 'render human headshot' });
     } catch (_) { /* preview is optional — ignore */ }
     // Two markers, and the Mixamo one matters most to the user: it is the rig everything in the
     // animation path targets. `\bRIG_ADDED\b` alone also matches "RIG_ADDED:mixamo", which used to
@@ -542,7 +542,7 @@ function buildPlaceHumanCode() {
 async function placeHuman(_input = {}, cfg) {
   let r;
   try {
-    r = await callBlender(buildPlaceHumanCode(), { cfg, timeoutMs: 60000 });
+    r = await callBlender(buildPlaceHumanCode(), { cfg, timeoutMs: 60000, label: 'place human' });
   } catch (e) {
     return 'ERROR: ' + e.message;
   }

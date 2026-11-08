@@ -6,7 +6,7 @@ Phoenix is **alpha**: usable, but early.
 
 ## Now (this release)
 
-The core text → 3D prop pipeline, driven from one browser UI — now with storyboards and video, reference images, per-workflow settings and phone access (see *New in 1.10.0* below):
+The core text → 3D prop pipeline, driven from one browser UI — now with storyboards and video, reference images, per-workflow settings and phone access (see *New in 1.10.0* and *New in 1.10.1* below):
 
 - **Chat-driven generation** with per-stage gates (prompt · image · mesh) — plus a **vision gate**
   (`off` / `focused` / `full`) that renders the viewport after a scene-changing action and has a model
@@ -104,7 +104,8 @@ New in **1.9.0** — your choice of brain, safer automation, and Phoenix as a to
 - **Remesh via Meshy** *(optional, paid)* — rebuild a staged mesh's topology in the cloud; a Meshy *quad*
   result gets its quads restored on import (GLB can only store triangles).
 - **Resizable, collapsible panels** — drag or collapse the assistant and the Library; Settings is split into
-  a General and a Connections tab.
+  a General and a Connections tab (1.10.1 rebuilt it into six sections: General, Brains, Connections, Voice engines,
+  Cloud & keys, Storage & checkpoints).
 
 New in **1.10.0** — from props to shots:
 
@@ -118,13 +119,31 @@ New in **1.10.0** — from props to shots:
 - **Per-workflow settings** — CFG, steps, sampler, size, denoise … per workflow (Advanced), with category
   overrides, reset and seed lock (`workflow-params.json`).
 - **Use Phoenix from your phone** *(optional, off by default)* — over your own Tailscale network, paired by QR code.
-- **Chatterbox on this PC** — the voice dispatcher now ships: turn on *Settings ▸ Voice ▸ Run voice engines on this
+- **Chatterbox on this PC** — the voice dispatcher now ships: turn on *Settings ▸ Voice engines ▸ Run voice engines on this
   PC* and Acquire Chatterbox (Windows included).
 - **Acquire troubleshooting** — disk full, gated Hugging Face models, interrupted downloads and a wrong ComfyUI folder
   each get an entry the error links to.
 
+New in **1.10.1** — a new shell and workspaces:
+
+- **New shell** — a left rail (Create · Characters · Audio · Story · Library · Settings · Help), a top bar with Quick
+  switches, a Ctrl K command palette, a Copilot panel and a status bar with live providers.
+- **Settings rebuilt** — six sections (General · Brains · Connections · Voice engines · Cloud & keys · Storage &
+  checkpoints), a search, every change saved at once.
+- **Library regrouped** — Media / 3D / Scenes / Tools plus a Trash with Restore (Undo right after a delete in Media, Characters and Audio); Levels (Blockout / Movable /
+  Detail) under Scenes.
+- **Characters, Audio and Story workspaces** — Characters with MakeHuman and Custom rig as two sources; Audio with Speak a
+  line, Cast a new voice and Sound effects in one panel; Story with a storyboard workbench and per-shot camera tags.
+- **Export board as video** — the board's timeline as one MP4 (animatic) through ffmpeg.
+- **Make video fixes** — a custom video workflow's frame rate reaches the clip, the local/fal pick is remembered per
+  browser, a keyframe from reference images can be stopped (and times out), and an open storyboard picks up a new image or video workflow at once.
+
 ## Near future
 
+- **Marking AI output** — machine-readable marking of generated output (C2PA metadata plus a watermark) for the EU AI Act
+  (Art. 50), planned for the next release.
+- **Game-ready assets** — the next big focus: generated assets that drop straight into a game engine. That means
+  a baked normal map, real-world scale with the pivot on the ground, LODs and collision, and sharper textures.
 - **Foliage / scatter workflow** — the trick that makes generated trees work: mesh a *single* leaf
   (a compact body — what the mesher is good at), then instance it thousands of times over a trunk.
   Leaf size becomes a **dial** instead of a property baked into the mesh. This exists today as a
@@ -143,8 +162,8 @@ New in **1.10.0** — from props to shots:
 
 ## Middle future
 
-- **Longer and text-to-video** — 1.10 makes short image-to-video clips per shot; next are longer clips, text-to-video
-  and cutting a storyboard into one film.
+- **Longer and text-to-video** — 1.10 makes short image-to-video clips per shot, and 1.10.1 exports a board as one
+  animatic MP4 (Export board as video); next are longer clips and text-to-video.
 - **Live motion capture** — drive animation from live mocap.
 - **Depth-to-video** — depth-conditioned video generation.
 
@@ -159,20 +178,11 @@ New in **1.10.0** — from props to shots:
 ## Known limitations
 
 - **Edit tab: category overrides don't apply.** A per-category override set in a workflow's Advanced section is used for
-  images and meshes, but an Edit (i2i) run always uses the workflow-level value. *(fix planned for 1.10.1)*
-- **Custom video workflows: the frame rate field.** Changing *Frames per second* in a self-added video workflow changes
-  the frame count and the shown duration, but not the frame rate written into the clip — keep it at the workflow's own
-  value. The built-in LTX-2 workflow is not affected. *(1.10.1)*
-- **Storyboard after a workflow switch.** An open storyboard keeps showing the previous workflow's label and limits
-  until it is reopened; the run itself already uses the new workflow. *(1.10.1)*
-- **Make video backend choice is per click.** The local/fal pick in a shot is not remembered; a default other than
-  `auto` is set with `video.backend` in `phoenix-config.json`. *(1.10.1)*
-- **Keyframes from reference images can't be stopped.** Stop does not cancel a storyboard keyframe made from reference
-  images, and a ComfyUI that stops answering mid-request can keep that job waiting until Phoenix is restarted. *(1.10.1)*
+  images and meshes, but an Edit (i2i) run always uses the workflow-level value. *(planned)*
 - **Paid jobs only from the laptop.** A paired phone cannot start Meshy remeshes or fal.ai clips; a switch to allow it is
-  planned. *(1.10.1)*
+  planned.
 - **Second ComfyUI only in the config file.** `endpoints.comfyui_bild` (a second ComfyUI for separate environments) has
-  no field in Settings yet. *(1.10.1)*
+  no field in Settings yet. *(planned)*
 - **Background isn't always clean.** Some `flat`-style props still render on a surface/"carpet"
   instead of a pure white background. The **style palette is the escape hatch** — edit the category's
   style preset to tune the look. Better shipped defaults are on the list.

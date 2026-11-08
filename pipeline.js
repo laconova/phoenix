@@ -372,13 +372,16 @@ async function runImportStage(ctx, opts) {
   // M5: checkpoint of the open scene BEFORE the import (covers generate_prop's import, background phase C and the
   // /action approve-mesh). A chat tool that already checkpointed in this turn (import_asset) says so in ctx.checkpointed.
   // A broken checkpoint never blocks the import; the warning line travels back in the result.
+  // Preflight without overwriting a pending Blender command; busy keeps the normal import path.
+  let cpCfg = opts && opts.cfg;
+  try { if (!cpCfg) cpCfg = require('./assistant').loadConfig(); } catch (_) {}
+  const reach = await require('./blender-ipc').probeBlenderIdle(cpCfg, 3000);
+  if (reach !== 'reachable' && reach !== 'busy') return { ok: false, stage: 'import', error: 'Blender is not reachable — open Blender with the Phoenix add-on, then Import from Create ▸ Scene.' };
   let checkpointWarning = '';
   if (!ctx.checkpointed) {
-    let cpCfg = opts && opts.cfg;
     let cpTurn = opts && opts.turn;
     try {
       const asst = require('./assistant');   // lazy: assistant.js requires this module
-      if (!cpCfg) cpCfg = asst.loadConfig();
       if (cpTurn == null) cpTurn = (asst.loadState() || {}).turnSeq;
     } catch (_) {}
     if (checkpoints.settings(cpCfg).enabled) {
@@ -388,7 +391,7 @@ async function runImportStage(ctx, opts) {
   }
 
   try {
-    const result = await callBlender(code);
+    const result = await callBlender(code, { label: 'import ' + basename });
     // callBlender RESOLVES with {status:'error'} on a Python failure (it only REJECTS on a transport
     // timeout, caught below) — so a corrupt/unimportable GLB or an importer exception would otherwise
     // be reported as a successful import and poison the scene cache. Require the IMPORT_OK marker,

@@ -23,7 +23,8 @@ const path = require('path');
 const fs = require('fs');
 const { callBlender } = require('./blender-ipc');
 
-const CHAR_DIR = path.join(__dirname, 'characters');
+// Test seam: PHOENIX_CHARACTERS_DIR moves the library (suites never touch the real folder). Default = today's folder.
+const CHAR_DIR = process.env.PHOENIX_CHARACTERS_DIR || path.join(__dirname, 'characters');
 
 // The one bone that defines "this is the standard humanoid skeleton" — the same test
 // animate_human.js uses to find its target. Keeping it identical is the point: a character
@@ -75,7 +76,7 @@ function describeCharacter(name) {
   };
 }
 
-function listCharacters() {
+function listCharacters(opts) {
   ensureDir();
   let names = [];
   try {
@@ -83,7 +84,7 @@ function listCharacters() {
       .filter(f => /\.blend$/i.test(f))
       .map(f => f.replace(/\.blend$/i, ''))
       .sort((a, b) => a.localeCompare(b));
-  } catch (_) { /* ignore */ }
+  } catch (e) { if (opts && opts.strict && e && e.code !== 'ENOENT') throw e; /* otherwise ignore */ }
   return names.map(describeCharacter).filter(Boolean);
 }
 
@@ -97,22 +98,44 @@ function renameCharacter(from, to) {
   if (!fs.existsSync(src)) return { error: 'character does not exist.' };
   if (path.resolve(src) === path.resolve(dst)) return { character: describeCharacter(to) };
   if (fs.existsSync(dst)) return { error: 'a character with the new name already exists.' };
+  // transactional (R5a): .blend first, then the sidecar; a failed sidecar rename puts the .blend back
+  try { fs.renameSync(src, dst); } catch (e) { return { error: e.message }; }
+  const scOld = sidecarPath(src), scNew = sidecarPath(dst);
+  if (fs.existsSync(scOld)) {
+    try { fs.renameSync(scOld, scNew); }
+    catch (e) {
+      try { fs.renameSync(dst, src); }
+      catch (re) { return { error: 'Could not rename the info file (' + e.message + ') and could not undo the rename (' + re.message + '): ' + path.basename(dst) + ' and ' + path.basename(scOld) + ' are now in ' + CHAR_DIR + ' - rename ' + path.basename(dst) + ' back to ' + path.basename(src) + '.' }; }
+      return { error: e.message };
+    }
+  }
+  // the library folder assignment follows the new name (one mutation: never both keys). The folder is cosmetic: a failure
+  // keeps the rename and comes back as a warning the row shows.
+  let warning = null;
+  const FOLDER_WARN = 'Renamed, but its Library folder could not be moved - reassign it in Library';
   try {
-    fs.renameSync(src, dst);
-    if (fs.existsSync(sidecarPath(src))) fs.renameSync(sidecarPath(src), sidecarPath(dst));
-  } catch (e) { return { error: e.message }; }
-  return { character: describeCharacter(to) };
+    const LF = require('./library-folders'), oldKey = 'character:' + safeCharName(from), newKey = 'character:' + safeCharName(to);
+    // no guard through the forgiving LF.load() (a locked / corrupt file reads as EMPTY there): apply's strict read refuses
+    // such a file, and a missing file or a character without a folder is already a no-op (ok:true, nothing saved)
+    const r = LF.apply({ action: 'moveKey', from: oldKey, to: newKey });
+    if (!r || r.ok !== true) warning = FOLDER_WARN + ' (' + ((r && r.error) || 'no answer') + ').';
+  } catch (e) { warning = FOLDER_WARN + ' (' + e.message + ').'; }
+  // the old name's preview cache entries are dead; the new name gets its own export (R5a)
+  try {
+    const CP = require('./character-previews'), dir = CP.previewDir(), old = safeCharName(from);
+    for (const ext of ['glb', 'key']) { try { fs.unlinkSync(path.join(dir, old + '.' + ext)); } catch (_) { /* none */ } }
+    CP.kick('rename');
+  } catch (_) { /* previews are optional */ }
+  return warning ? { character: describeCharacter(to), warning } : { character: describeCharacter(to) };
 }
 
 function deleteCharacter(name) {
   const abs = charPath(name);
   if (!abs) return { error: 'invalid name.' };
   if (!fs.existsSync(abs)) return { error: 'character does not exist.' };
-  try {
-    fs.unlinkSync(abs);
-    if (fs.existsSync(sidecarPath(abs))) fs.unlinkSync(sidecarPath(abs));
-  } catch (e) { return { error: e.message }; }
-  return { ok: true };
+  // R5a: delete = move to the Library trash (Undo restores it); nothing is unlinked here
+  const r = require('./library-trash').trashCharacter(safeCharName(name));
+  return r.ok ? { ok: true, id: r.id } : { error: r.error };
 }
 
 // ─── Save the character in the scene as a spawnable .blend ────────────────────
@@ -126,8 +149,12 @@ function deleteCharacter(name) {
 // rig is refused BEFORE anything is written (no file to clean up afterwards).
 function buildSaveCharacterCode(outAbs) {
   const OUT = outAbs.replace(/\\/g, '/');
+  // lazy: the one helper block for copying a possibly hidden figure (animate_human.js): records hide_viewport + hide_get, verifies every pick with select_get(), restores in finally
+  const HIDE_HELPERS_PY = require('./animate_human').HIDE_HELPERS_PY;
+  const _ind = (lines, n) => lines.map(l => ' '.repeat(n) + l);
   return [
     'import bpy, os',
+    ...HIDE_HELPERS_PY,
     `OUT = ${JSON.stringify(OUT)}`,
     `ROOTBONE = ${JSON.stringify(MIXAMO_ROOT)}`,
     'def _is_mixamo_arm(o):',
@@ -162,9 +189,9 @@ function buildSaveCharacterCode(outAbs) {
     '    _any = [o for o in bpy.data.objects if o.type == "ARMATURE"]',
     '    if _any:',
     '        print("CHAR_ERR:the armature in the scene is not a Mixamo skeleton (no ' + MIXAMO_ROOT + ' bone). ' +
-      'Rig it at mixamo.com, or use the Custom-Rig tab for creature rigs.")',
+      'Rig it at mixamo.com, or use Characters ▸ Custom rig for creature rigs.")',
     '    else:',
-    '        print("CHAR_ERR:no rigged character in the scene — build one with Rig = Mixamo, or import a Mixamo-rigged character.")',
+    '        print("CHAR_ERR:No Mixamo rig in the scene. Set Rig to Mixamo, Rebuild preview, Place in scene, then save.")',
     'else:',
     // Every mesh bound to the rig: body + eyes + teeth + hair + clothes are separate objects.
     '    def _bound(o):',
@@ -184,38 +211,47 @@ function buildSaveCharacterCode(outAbs) {
     '    _nmesh = len(_meshes)',
     '    try: bpy.ops.object.mode_set(mode="OBJECT")',
     '    except Exception: pass',
-    '    bpy.ops.object.select_all(action="DESELECT")',
-    '    for _o in _meshes: _o.select_set(True)',
-    '    _arm.select_set(True); bpy.context.view_layer.objects.active = _arm',
-    // Namensvergleich statt Selektion: "loesche, was selektiert ist" wuerde im Fall,
-    // dass duplicate() nichts erzeugt, die ORIGINALE des Users treffen. Ueber die
-    // Differenz vorher/nachher kann nur Neues geloescht werden.
-    '    _before = set(o.name for o in bpy.data.objects)',
-    '    bpy.ops.object.duplicate()',
-    '    _dups = [o for o in bpy.data.objects if o.name not in _before]',
-    '    if not _dups:',
-    '        raise RuntimeError("duplicate() created nothing - aborting before touching the originals")',
-    // try/finally, not a straight line: if libraries.write raises (full disk, bad path, denied
-    // permission) the cleanup below would never run and the DUPLICATES stay in the user's scene
-    // as Human.rig.001 + mesh copies — a failed save that silently litters the file it was
-    // protecting. The copies must go whether the write succeeded or not.
+    // The figure can be a staged (hidden) preview that was never placed. A hidden object cannot be selected and select_set() says nothing,
+    // so duplicate() copied nothing. Unhide for the copy, verify, and restore the exact prior hide state in the outer finally.
+    '    _prior = _phx_unhide([_arm] + _meshes)',
     '    try:',
-    '        _darm = next((o for o in _dups if o.type == "ARMATURE"), None)',
-    '        if _darm is not None:',
-    '            if _darm.animation_data:',
-    '                _darm.animation_data_clear()',
-    '            for _pb in _darm.pose.bones:',
-    '                _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
-    '                _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
-    '        bpy.data.libraries.write(OUT, set(_dups), fake_user=True)',
-    '        _size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
+    ..._ind([
+      '_phx_select(_meshes + [_arm], _arm)',
+      // Namensvergleich statt Selektion: "loesche, was selektiert ist" wuerde im Fall,
+      // dass duplicate() nichts erzeugt, die ORIGINALE des Users treffen. Ueber die
+      // Differenz vorher/nachher kann nur Neues geloescht werden.
+      '_before = set(o.name for o in bpy.data.objects)',
+      'bpy.ops.object.duplicate()',
+      '_dups = [o for o in bpy.data.objects if o.name not in _before]',
+      'if not _dups:',
+      '    raise RuntimeError("duplicate() created nothing - aborting before touching the originals")',
+      // try/finally, not a straight line: if libraries.write raises (full disk, bad path, denied
+      // permission) the cleanup below would never run and the DUPLICATES stay in the user's scene
+      // as Human.rig.001 + mesh copies — a failed save that silently litters the file it was
+      // protecting. The copies must go whether the write succeeded or not.
+      'try:',
+      '    _phx_untag(_dups)',   // a stale mh_staged tag would get the spawned copy deleted by the next preview
+      '    _darm = next((o for o in _dups if o.type == "ARMATURE"), None)',
+      '    if _darm is not None:',
+      '        if _darm.animation_data:',
+      '            _darm.animation_data_clear()',
+      '        for _pb in _darm.pose.bones:',
+      '            _pb.location = (0, 0, 0); _pb.rotation_quaternion = (1, 0, 0, 0)',
+      '            _pb.rotation_euler = (0, 0, 0); _pb.scale = (1, 1, 1)',
+      '    bpy.data.libraries.write(OUT, set(_dups), fake_user=True)',
+      '    _size = os.path.getsize(OUT) if os.path.exists(OUT) else -1',
+      'finally:',
+      '    for _o in _dups:',
+      '        try: bpy.data.objects.remove(_o, do_unlink=True)',
+      '        except Exception: pass',
+      'print("CHAR_DONE:meshes=" + str(_nmesh) + ":arm=" + _arm.name +',
+      '      ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
+      'print("CHAR_SIG:" + ",".join(_sig))',
+    ], 8),
+    '    except _PhxNoSelect as _e:',
+    '        print("CHAR_ERR:" + str(_e))',
     '    finally:',
-    '        for _o in _dups:',
-    '            try: bpy.data.objects.remove(_o, do_unlink=True)',
-    '            except Exception: pass',
-    '    print("CHAR_DONE:meshes=" + str(_nmesh) + ":arm=" + _arm.name +',
-    '          ":bones=" + str(len(_sig)) + ":bytes=" + str(_size))',
-    '    print("CHAR_SIG:" + ",".join(_sig))',
+    '        _phx_restore(_prior)',
   ].join('\n');
 }
 
@@ -264,7 +300,7 @@ async function saveCharacter(input = {}, cfg) {
   try {
     // A full MPFB human with clothes/hair is heavy to pack + write; give it the same headroom
     // as the custom-rig mesh save (a 70-bone creature took ~2 min on a busy scene).
-    r = await callBlender(buildSaveCharacterCode(tmpAbs), { cfg, timeoutMs: 180000 });
+    r = await callBlender(buildSaveCharacterCode(tmpAbs), { cfg, timeoutMs: 180000, label: 'save character' });
   } catch (e) { _cleanTmp(); return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') { _cleanTmp(); return 'ERROR: ' + (r.message || out); }
@@ -278,10 +314,15 @@ async function saveCharacter(input = {}, cfg) {
   // parsing ever drifts. Cheap, and it keeps a broken character out of the library.
   if (!bones.includes(MIXAMO_ROOT)) {
     _cleanTmp();
-    return `ERROR: that skeleton has no ${MIXAMO_ROOT} bone — it can't be animated in the Human tab. ` +
-           'Use the Custom-Rig tab for non-Mixamo rigs.';
+    return `ERROR: that skeleton has no ${MIXAMO_ROOT} bone — it can't be animated in Characters ▸ MakeHuman. ` +
+           'Use Characters ▸ Custom rig for non-Mixamo rigs.';
   }
   // Commit: atomically replace the (possibly existing) character only now that it is verified good.
+  // A character of this name may have appeared while Blender was saving (rename, second save): never overwrite it silently.
+  if (!input.overwrite && fs.existsSync(outAbs)) {
+    _cleanTmp();
+    return `ERROR: a character named "${safe}" already exists — pick another name (or delete it first).`;
+  }
   try { fs.renameSync(tmpAbs, outAbs); }
   catch (e) { _cleanTmp(); return 'ERROR: character built but could not be finalized — ' + e.message; }
   try {
@@ -292,10 +333,11 @@ async function saveCharacter(input = {}, cfg) {
   } catch (e) {
     return 'ERROR: character saved but its info file could not be written — ' + e.message;
   }
+  try { require('./character-previews').kick('save'); } catch (_) { /* previews are optional */ }
   const nMesh = Number(m[1]);
   const bytesMb = m[4] > 0 ? ` (${(Number(m[4]) / 1048576).toFixed(1)} MB)` : '';
   return `Saved character "${safe}" — ${nMesh} mesh${nMesh === 1 ? '' : 'es'} on "${m[2]}", ` +
-         `${m[3]} bones${bytesMb}. Pick it in the Character dropdown to spawn it; ` +
+         `${m[3]} bones${bytesMb}. It is in the cast list; ` +
          'every clip in the animation list works on it.';
 }
 
@@ -305,7 +347,7 @@ async function spawnCharacter(input = {}, cfg) {
   if (!fs.existsSync(abs)) return 'ERROR: no saved character with that name.';
   let r;
   try {
-    r = await callBlender(buildSpawnCharacterCode(abs), { cfg, timeoutMs: 120000 });
+    r = await callBlender(buildSpawnCharacterCode(abs), { cfg, timeoutMs: 120000, label: 'spawn character' });
   } catch (e) { return 'ERROR: ' + e.message; }
   const out = (r.stdout || r.output || '').trim();
   if (r.status === 'error') return 'ERROR: ' + (r.message || out);

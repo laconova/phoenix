@@ -21,7 +21,44 @@ const path = require('path');
 const fs = require('fs');
 const { callBlender } = require('./blender-ipc');
 
-const ANIM_DIR = path.join(__dirname, 'animations');
+// Shared by every script that copies a figure with bpy.ops.object.duplicate() (R1, v1.10.1 round 3; character-to-unreal.js solved it first). Lives here because custom_rig.js and characters.js both require this file.
+// 🔴 A hidden object cannot be selected and select_set(True) says nothing, so duplicate() copies nothing. Two hide states exist per object:
+// hide_viewport (what make_human staging sets) and hide_get()/hide_set() (the H key; they raise for an object outside the view layer).
+// Record both, unhide for the copy, verify with select_get(), and put back EXACTLY what was there in the caller's finally.
+const HIDE_HELPERS_PY = [
+  'class _PhxNoSelect(Exception): pass',
+  'def _phx_unhide(objs):',
+  '    prior = []',
+  '    for o in objs:',
+  '        eye = None',
+  '        try: eye = o.hide_get()',
+  '        except Exception: pass',
+  '        prior.append((o, o.hide_viewport, eye))',
+  '        o.hide_viewport = False',
+  '        if eye:',
+  '            try: o.hide_set(False)',
+  '            except Exception: pass',
+  '    return prior',
+  'def _phx_restore(prior):',
+  '    for o, hv, eye in prior:',
+  '        try:',
+  '            o.hide_viewport = hv',
+  '            if eye is not None: o.hide_set(eye)',
+  '        except Exception: pass',
+  'def _phx_select(objs, active):',
+  '    bpy.ops.object.select_all(action="DESELECT")',
+  '    for o in objs: o.select_set(True)',
+  '    bpy.context.view_layer.objects.active = active',
+  '    missed = [o.name for o in objs if not o.select_get()]',
+  '    if missed: raise _PhxNoSelect("could not select " + ", ".join(missed) + " - they stay unselectable even unhidden, nothing was copied")',
+  // make_human.js deletes every object tagged mh_staged on the next preview: a spawned copy must not carry the tag
+  'def _phx_untag(objs):',
+  '    for o in objs:',
+  '        if "mh_staged" in o.keys(): del o["mh_staged"]',
+];
+
+// Test seam: PHOENIX_ANIMATIONS_DIR moves the clip library. Default = today's folder.
+const ANIM_DIR = process.env.PHOENIX_ANIMATIONS_DIR || path.join(__dirname, 'animations');
 
 function ensureAnimDir() {
   try { fs.mkdirSync(ANIM_DIR, { recursive: true }); } catch (_) { /* ignore */ }
@@ -393,6 +430,8 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
   const APPEND = append === true ? 'True' : 'False';
   const targetPy    = opts.targetPy    || TARGET_SELECT_PY;
   const errNoTarget = opts.errNoTarget || 'no mixamo-rigged character in scene (build one with rig=mixamo)';
+  // Optional: the target picker may set _amb (several rigs, none chosen) -> a different refusal text.
+  const errAmbiguous = opts.errAmbiguous || '';
   const rootPy      = opts.rootPy      || ['    HIPS = "mixamorig:Hips"'];
   // How to tell whether an fcurve belongs to the root bone. Mixamo's name is unique enough for
   // a substring test; a custom rig is not ("Bone" is a prefix of "Bone.001"), so that caller
@@ -429,7 +468,7 @@ function buildSequenceAnimationsCode(fbxAbsList, blend, speed, characterName, ap
     'def _suf(n): return n.split(":")[-1]',
     ...targetPy,
     'if dst is None:',
-    `    print("SEQ_ERR:${errNoTarget}")`,
+    errAmbiguous ? `    print("SEQ_ERR:${errAmbiguous}" if _amb else "SEQ_ERR:${errNoTarget}")` : `    print("SEQ_ERR:${errNoTarget}")`,
     'elif not FBXS:',
     '    print("SEQ_ERR:no animations given")',
     'else:',
@@ -1052,7 +1091,7 @@ async function sequenceAnimations(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildSequenceAnimationsCode(resolved, input.blend, input.speed, input.character, input.append), { cfg, timeoutMs: 600000 });
+    r = await callBlender(buildSequenceAnimationsCode(resolved, input.blend, input.speed, input.character, input.append), { cfg, timeoutMs: 600000, label: 'apply animation sequence' });
   } catch (e) {
     return 'ERROR: ' + e.message;
   }
@@ -1103,7 +1142,7 @@ async function animateHuman(input = {}, cfg) {
     // That blew through the old 300 s ceiling on this machine (2026-07-23), and the failure mode is
     // nasty: Blender finishes the job anyway, so the caller reports a timeout while the character
     // silently DID get animated. Better to wait than to lie.
-    r = await callBlender(buildAnimateHumanCode(fbxAbs, input.character, hyFix), { cfg, timeoutMs: 900000 });
+    r = await callBlender(buildAnimateHumanCode(fbxAbs, input.character, hyFix), { cfg, timeoutMs: 900000, label: 'animate ' + (input.character || 'character') });
   } catch (e) {
     return 'ERROR: ' + e.message;
   }
@@ -1145,6 +1184,7 @@ function buildSaveAnimationCode(outAbs, characterName) {
   const OUT = outAbs.replace(/\\/g, '/');   // Blender takes forward slashes on every OS
   return [
     'import bpy, addon_utils, os',
+    ...HIDE_HELPERS_PY,
     `OUT = ${JSON.stringify(OUT)}`,
     `NAME = ${JSON.stringify(NAME)}`,
     'addon_utils.enable("io_scene_fbx", default_set=False, persistent=False)',
@@ -1178,15 +1218,22 @@ function buildSaveAnimationCode(outAbs, characterName) {
     '            _prev_mode = None',
     '        _dup = None',
     '        _err = None',
+    // A staged (hidden) rig cannot be selected, so duplicate() copied nothing and the ORIGINAL became the "copy" (renamed, then removed in the finally).
+    // Unhide for the copy, verify, find the copy by name difference, and rehide in the very last step of the finally.
+    '        _prior = _phx_unhide([dst])',
     '        try:',
     // FBX bake_anim_use_nla_strips exports each NLA strip as its OWN take (a 4-clip sequence
     // came back as 4 separate 120-frame actions, losing every seam fix). To get ONE take with
     // the evaluated motion, the NLA must first be baked into a single action. Do that on a
     // DUPLICATE so the user's live scene is never touched, then export the duplicate.
     '            bpy.ops.object.select_all(action="DESELECT")',
-    '            dst.select_set(True); bpy.context.view_layer.objects.active = dst',
+    '            _phx_select([dst], dst)',
+    '            _before = set(o.name for o in bpy.data.objects)',
     '            bpy.ops.object.duplicate()',
-    '            _dup = bpy.context.view_layer.objects.active',
+    '            _new = [o for o in bpy.data.objects if o.name not in _before]',
+    '            if not _new:',
+    '                raise RuntimeError("duplicate() created nothing - nothing was saved, the rig was not touched")',
+    '            _dup = _new[0]',
     '            _dup.name = "__save_tmp__"',
     '            bpy.ops.object.mode_set(mode="POSE")',
     '            bpy.ops.pose.select_all(action="SELECT")',
@@ -1230,6 +1277,7 @@ function buildSaveAnimationCode(outAbs, characterName) {
     '                    _po.select_set(True)',
     '                    if _prev_mode: bpy.ops.object.mode_set(mode=_prev_mode)',
     '            except Exception: pass',
+    '            _phx_restore(_prior)',   // last: the mode restore above still needs the rig selectable
     // The net: any exception comes back as one readable SAVE_ERR line, never a traceback.
     '        if _err is not None:',
     '            _m = str(_err).replace(chr(10), " ").strip()',
@@ -1264,7 +1312,7 @@ async function saveAnimation(input = {}, cfg) {
   }
   let r;
   try {
-    r = await callBlender(buildSaveAnimationCode(outAbs, input.character), { cfg, timeoutMs: 180000 });
+    r = await callBlender(buildSaveAnimationCode(outAbs, input.character), { cfg, timeoutMs: 180000, label: 'save animation' });
   } catch (e) {
     return 'ERROR: ' + e.message;
   }
@@ -1293,6 +1341,6 @@ async function saveAnimation(input = {}, cfg) {
 
 module.exports = {
   animateHuman, buildAnimateHumanCode, sequenceAnimations, buildSequenceAnimationsCode,
-  saveAnimation, buildSaveAnimationCode, safeSaveName,
+  saveAnimation, buildSaveAnimationCode, safeSaveName, HIDE_HELPERS_PY,
   listAnimations, resolveFbx, ensureAnimDir, needsHyFix, ANIM_DIR,
 };

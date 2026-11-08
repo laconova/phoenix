@@ -72,7 +72,7 @@ function seedFresh() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'phoenix-scaffold-'));
   fs.copyFileSync(SCAFFOLD_JS, path.join(tmp, 'brush-scaffold.js'));
   const mod = require(path.join(tmp, 'brush-scaffold.js'));
-  const r = mod.ensureBrushScaffold();
+  const r = mod.ensureBrushScaffold({ locked: true });   // a lone temp copy: no brush-lock module beside it, nobody else writes here
   const text = fs.readFileSync(r.PY, 'utf8');
   return { text, tmp, version: mod.SCAFFOLD_VERSION };
 }

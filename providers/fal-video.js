@@ -74,7 +74,7 @@ function shortBody(text, key) {
 }
 
 function httpError(status, text, key) {
-  if (status === 401 || status === 403) return fail('fal rejected the API key — check it in Settings → Connections', 'auth');
+  if (status === 401 || status === 403) return fail('fal rejected the API key — check it in Settings → Cloud & keys', 'auth');
   if (status === 402) return fail('fal: not enough balance', 'credits');
   if (status === 429) return fail('fal is rate-limiting — try again in a minute', 'rate');
   return fail('fal HTTP ' + status + ': ' + shortBody(text, key), 'http');
@@ -288,7 +288,7 @@ async function submit(input, o) {
   const model = String(o.model || DEFAULT_MODEL).replace(/^\/+/, '');
   const signal = o.signal;
   if (!fetchImpl) return fail('no fetch available in this Node version', 'env');
-  if (!key || typeof key !== 'string') return fail('no fal.ai API key — add it in Settings → Connections', 'nokey');
+  if (!key || typeof key !== 'string') return fail('no fal.ai API key — add it in Settings → Cloud & keys', 'nokey');
   if (!input || typeof input !== 'object') return fail('no request given — nothing was sent', 'input');
   if (signal && signal.aborted) return fail('video cancelled', 'cancelled');   // aborted before anything was sent: nothing can have been charged
   const body = JSON.stringify(input);
@@ -352,7 +352,7 @@ async function waitAndFetch(task, o) {
   const base = baseOf(o);
   const signal = o.signal;
   if (!fetchImpl) return fail('no fetch available in this Node version', 'env');
-  if (!key || typeof key !== 'string') return fail('no fal.ai API key — add it in Settings → Connections', 'nokey');
+  if (!key || typeof key !== 'string') return fail('no fal.ai API key — add it in Settings → Cloud & keys', 'nokey');
   if (!task || !safeQueueUrl(task.statusUrl, base, key) || !safeQueueUrl(task.responseUrl, base, key)) return fail('the status address is outside fal\'s queue host — refused, the key was not sent there', 'bad_url');
   const auth = { Authorization: 'Key ' + key };
   const t0 = now();

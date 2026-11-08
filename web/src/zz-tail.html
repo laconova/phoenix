@@ -1,0 +1,234 @@
+    })();
+
+      // ── Panel layout (M10): drag handles + collapse, persisted per viewer ──────────────────────────────────────────
+      (function () {
+        const LAYOUT_KEY = 'phoenix.layout.v1';
+        const DEF = { chatW: 340, libW: 440 };
+        const CLAMP = { chat: [260, 700], lib: [300, 900], mid: 320 };
+        const main = document.getElementById('main-area'), chat = document.getElementById('chat-wrap'), lib = document.getElementById('library-wrap');
+        const hChat = document.getElementById('handle-chat'), hLib = document.getElementById('handle-lib');
+        if (!main || !chat || !lib || !hChat || !hLib) return;
+        let L = { chatW: DEF.chatW, libW: DEF.libW, chatCollapsed: false, libCollapsed: false, createRight: 'inspector' };
+        try {
+          const raw = localStorage.getItem(LAYOUT_KEY);
+          const j = raw ? JSON.parse(raw) : null;
+          if (j && typeof j === 'object') {
+            if (Number.isFinite(j.chatW)) L.chatW = Math.min(CLAMP.chat[1], Math.max(CLAMP.chat[0], j.chatW));
+            if (Number.isFinite(j.libW)) L.libW = Math.min(CLAMP.lib[1], Math.max(CLAMP.lib[0], j.libW));
+            L.createRight = j.createRight === 'library' ? 'library' : 'inspector';
+            L.chatCollapsed = j.chatCollapsed === true; L.libCollapsed = j.libCollapsed === true;
+          }
+        } catch (_) { /* broken or missing -> defaults */ }
+        function save() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(L)); } catch (_) {} }
+        window.__createRight = { get: function () { return L.createRight; }, set: function (v) { if (v !== 'inspector' && v !== 'library') return; L.createRight = v; save(); } };
+        if (window.__syncCreateRight) window.__syncCreateRight();
+        // D3: the effective widths — when the window is too narrow the library shrinks first, then the chat (never below their minimums),
+        // so the middle keeps its 320 px. The stored widths stay the user's choice and come back when the window widens.
+        function eff() {
+          const total = main.getBoundingClientRect().width;
+          let c = L.chatCollapsed ? 28 : L.chatW, l = L.libCollapsed ? 28 : L.libW;
+          let over = c + l + 12 + CLAMP.mid - total;
+          if (over > 0 && !L.libCollapsed) { const d = Math.min(over, l - CLAMP.lib[0]); l -= Math.max(0, d); over -= Math.max(0, d); }
+          if (over > 0 && !L.chatCollapsed) { const d = Math.min(over, c - CLAMP.chat[0]); c -= Math.max(0, d); }
+          return { c: c, l: l };
+        }
+        function apply() {
+          const e = eff();
+          chat.style.flex = '0 0 ' + (L.chatCollapsed ? L.chatW : e.c) + 'px';
+          lib.style.flex = '0 0 ' + (L.libCollapsed ? L.libW : e.l) + 'px';
+          chat.classList.toggle('collapsed', L.chatCollapsed);
+          lib.classList.toggle('collapsed', L.libCollapsed);
+          hChat.classList.toggle('hidden-by-collapse', L.chatCollapsed);
+          hLib.classList.toggle('hidden-by-collapse', L.libCollapsed);
+        }
+        function setCollapsed(which, on) {
+          L[which + 'Collapsed'] = on; apply(); save();
+          if (!on && which === 'chat') { const m = document.getElementById('messages'); if (m) m.scrollTop = m.scrollHeight; }
+        }
+        document.getElementById('chat-collapse').addEventListener('click', function () { setCollapsed('chat', true); });
+        document.getElementById('lib-collapse').addEventListener('click', function () { try { imagesTab.stopPlayback(); } catch (_) {} setCollapsed('lib', true); });   // VP1: leaving the Library stops a tile video
+        document.getElementById('chat-strip').addEventListener('click', function () { setCollapsed('chat', false); });
+        document.getElementById('lib-strip').addEventListener('click', function () { setCollapsed('lib', false); });
+        function drag(handle, which) {
+          const key = which + 'W', lim = CLAMP[which];
+          handle.addEventListener('dblclick', function () { L[key] = DEF[key]; apply(); save(); });
+          handle.addEventListener('pointerdown', function (e) {
+            e.preventDefault();
+            const cur = eff(); L.chatW = L.chatCollapsed ? L.chatW : cur.c; L.libW = L.libCollapsed ? L.libW : cur.l;   // commit what is shown
+            const startX = e.clientX, startW = L[key], total = main.getBoundingClientRect().width;
+            const otherW = which === 'chat' ? (L.libCollapsed ? 28 : L.libW) : (L.chatCollapsed ? 28 : L.chatW);
+            const max = Math.min(lim[1], total - otherW - CLAMP.mid - 12);   // the middle never goes below 320 px: the handle stops
+            handle.classList.add('dragging');
+            try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+            function move(ev) {
+              const dx = ev.clientX - startX;
+              L[key] = Math.round(Math.max(lim[0], Math.min(Math.max(lim[0], max), which === 'chat' ? startW + dx : startW - dx)));
+              apply();
+            }
+            function up() {
+              handle.classList.remove('dragging');
+              handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', up); handle.removeEventListener('pointercancel', up);
+              save();
+            }
+            handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', up); handle.addEventListener('pointercancel', up);
+          });
+        }
+        drag(hChat, 'chat'); drag(hLib, 'lib');
+        apply();
+        try { window.addEventListener('resize', apply); } catch (_) {}
+      })();
+
+      // <remote-ui>
+      // R1: Settings -> Connections -> Remote access (laptop) and the remote viewer (phone). deps: { document, fetch, qr(link) -> image src | '', setInterval, clearInterval, now }.
+      // Everything a phone can influence (its name) is written with textContent only - never as markup.
+      function makeRemoteUi(deps) {
+        const d = deps.document, $ = function (id) { return d.getElementById(id); };
+        let remoteMode = false, remoteName = '', timer = null, expiresAt = 0, busy = false;
+        const HONEST = "A paired phone can do everything you can do in Phoenix's chat — including running Blender Python on this laptop. Pair only your own devices; Disconnect removes access at once.";   // shown in the Settings hint AND next to every pending request: Connect is the moment that matters
+        const post = function (path, body) {
+          return deps.fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+            .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, status: r.status, json: j }; }); });
+        };
+        function err(t) { const e = $('remote-err'); if (!e) return; e.textContent = t || ''; e.hidden = !t; }
+        function clear(n) { while (n && n.firstChild) n.removeChild(n.firstChild); }
+        function mk(tag, cls, text) { const e = d.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+        function btn(label, act, id) { const b = mk('button', 'modal-btn', label); b.type = 'button'; b.setAttribute('data-remote-act', act); b.setAttribute('data-remote-id', id); return b; }
+        const when = function (t) { try { return t ? new Date(t).toLocaleString() : 'never'; } catch (_) { return ''; } };
+        const mmss = function (left) { return Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0'); };
+        let codeLive = false, rows = [];
+        const asked = new Set();   // request ids whose expiry already asked the server once   // rows: the pending rows' deadlines { el, at }
+        // ONE interval drives the code countdown and every pending row; it runs only while one of them still counts
+        function syncTimer() {
+          const need = codeLive || rows.length > 0;
+          if (need && !timer) timer = deps.setInterval(tick, 1000);
+          else if (!need && timer) { deps.clearInterval(timer); timer = null; }
+        }
+        function tickCode() {
+          const c = $('remote-count'); if (!c) return;
+          const left = Math.max(0, Math.ceil((expiresAt - deps.now()) / 1000));
+          c.textContent = left > 0 ? 'valid ' + mmss(left) : 'expired - press Pair a phone again';
+          if (left <= 0) codeLive = false;
+        }
+        function tick() {
+          if (codeLive) tickCode();
+          let gone = false;
+          rows = rows.filter(function (r) {
+            if (r.at > deps.now()) { r.el.textContent = 'expires in ' + mmss(Math.ceil((r.at - deps.now()) / 1000)); return true; }
+            if (asked.has(r.id)) { r.el.textContent = 'expires in 0:00'; return false; }   // the server still lists it: it stays until its prune/emit
+            asked.add(r.id);   // one refresh per request, so a row the server keeps can not start a request loop
+            if (r.row && r.row.parentNode) r.row.parentNode.removeChild(r.row);
+            gone = true; return false;
+          });
+          syncTimer();
+          if (gone) refresh();   // the server's prune confirms
+        }
+        function showPairing(p) {
+          const box = $('remote-pairbox'); if (!box) return;
+          if (!p) { box.hidden = true; codeLive = false; return; }
+          box.hidden = false;
+          $('remote-link').textContent = p.link; $('remote-code').textContent = p.code;
+          const img = $('remote-qr'); let src = ''; try { src = deps.qr(p.link) || ''; } catch (_) {}
+          if (src) { img.src = src; img.hidden = false; } else { img.hidden = true; }
+          expiresAt = p.expiresAt; codeLive = expiresAt - deps.now() > 0; tickCode();
+        }
+        function render(v) {
+          const sw = $('remote-enabled'), line = $('remote-state'), pb = $('remote-pair');
+          if (sw) sw.checked = v.state === 'on' || v.state === 'enabling';
+          if (line) line.textContent = v.state === 'on' ? 'on - ' + v.origin : v.state === 'enabling' ? 'switching on...' : v.state === 'error' ? 'error: ' + (v.error || 'unknown') : 'off';
+          if (pb) pb.disabled = v.state !== 'on';
+          rows = [];
+          showPairing(v.pairing);
+          const pend = $('remote-pending'); clear(pend);
+          if ((v.pending || []).length) pend.appendChild(mk('div', 'settings-hint remote-honest', HONEST));
+          (v.pending || []).forEach(function (p) {
+            const row = mk('div', 'remote-row');
+            row.appendChild(mk('span', 'remote-name', p.name));
+            row.appendChild(mk('span', 'remote-confirm', p.confirm));
+            row.appendChild(mk('span', 'settings-hint', 'wants to connect - same code on the phone?'));
+            const ex = mk('span', 'settings-hint remote-expires', ''); row.appendChild(ex);
+            rows.push({ id: p.id, el: ex, row: row, at: Number(p.expiresAt) || 0 });
+            row.appendChild(btn('Connect', 'approve', p.id)); row.appendChild(btn('Reject', 'reject', p.id));
+            pend.appendChild(row);
+          });
+          tick();
+          const dev = $('remote-devices'); clear(dev);
+          if ((v.devices || []).length) dev.appendChild(mk('div', 'settings-title', 'Paired phones'));
+          (v.devices || []).forEach(function (x) {
+            const row = mk('div', 'remote-row');
+            row.appendChild(mk('span', 'remote-name', x.name));
+            row.appendChild(mk('span', 'settings-hint', 'paired ' + when(x.createdAt) + ' · last seen ' + when(x.lastSeen) + (x.connected ? ' · connected now' : '')));
+            if (x.unsaved) row.appendChild(mk('span', 'settings-hint', 'disconnected - not saved yet (it stays refused until Phoenix restarts)'));
+            row.appendChild(btn(x.unsaved ? 'Retry disconnect' : 'Disconnect', 'disconnect', x.id));
+            dev.appendChild(row);
+          });
+        }
+        function refresh() {
+          if (remoteMode) return Promise.resolve();
+          return deps.fetch('/remote/api/state').then(function (r) { return r.ok ? r.json() : null; }).then(function (v) { if (v) render(v); }, function () {});
+        }
+        async function toggle(on) {
+          err(''); const line = $('remote-state'); if (line && on) line.textContent = 'switching on...';
+          const r = await post('/config', { remote: { enabled: on } });
+          if (!r.ok) err((r.json && r.json.error) || 'Could not change Remote access.');
+          else if (typeof deps.flash === 'function') deps.flash();   // R2: the Settings header's "Saved ✓"
+          await refresh();
+        }
+        async function pair() {
+          err(''); const r = await post('/remote/api/pair');
+          if (!r.ok) { err((r.json && r.json.error) || 'Could not start pairing.'); return; }
+          showPairing(r.json.pairing); syncTimer();
+        }
+        async function act(kind, id) {
+          if (busy) return; busy = true;   // one click = one request (the server is idempotent too)
+          try { const r = await post('/remote/api/' + kind, { id: id }); if (!r.ok) err((r.json && r.json.error) || 'That did not work.'); else err(''); } finally { busy = false; }
+          await refresh();
+        }
+        function wire() {
+          const sw = $('remote-enabled'), pb = $('remote-pair'), blk = $('remote-block');
+          if (sw) sw.addEventListener('change', function () { toggle(sw.checked); });
+          if (pb) pb.addEventListener('click', pair);
+          if (blk) blk.addEventListener('click', function (e) {
+            const t = e.target && e.target.closest ? e.target.closest('[data-remote-act]') : null;
+            if (t) act(t.getAttribute('data-remote-act'), t.getAttribute('data-remote-id'));
+          });
+        }
+        // who am I: on the laptop { remote:false }; on a paired phone { remote:true, name }
+        function identity() {
+          return deps.fetch('/remote/api/me').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) {
+            if (!j || j.remote !== true) return false;
+            remoteMode = true; remoteName = String(j.name || '');
+            if (typeof deps.onRemote === 'function') deps.onRemote(remoteName);   // R1: the status bar's page item shows "Remote · <name>" (it replaced the header badge)
+            const blk = $('remote-block'); if (blk) blk.hidden = true;
+            const note = $('remote-phone-note'); if (note) note.hidden = false;
+            if (d.body && d.body.classList) d.body.classList.add('is-remote');
+            return true;
+          }, function () { return false; });
+        }
+        return { wire: wire, refresh: refresh, identity: identity, toggle: toggle, pair: pair, act: act, render: render, isRemote: function () { return remoteMode; }, name: function () { return remoteName; } };
+      }
+      // </remote-ui>
+      window.__remoteUi = makeRemoteUi({
+        document: document, fetch: function (u, o) { return fetch(u, o); }, now: function () { return Date.now(); },
+        onRemote: function () { if (window.__renderStatusBar) window.__renderStatusBar(); },
+        flash: function () { if (typeof flashSettingsSaved === 'function') flashSettingsSaved(); },
+        setInterval: function (f, ms) { return setInterval(f, ms); }, clearInterval: function (t) { clearInterval(t); },
+        qr: function (link) { if (typeof qrcode !== 'function') return ''; const q = qrcode(0, 'M'); q.addData(link); q.make(); return q.createDataURL(4, 2); },
+      });
+      window.__remoteUi.wire();
+      window.__remoteUi.identity().then(function (isRemote) {
+        if (!isRemote) return;
+        // a phone shows any "Only on the laptop" refusal where errors normally appear, and a lost pairing as a plain sentence
+        const realFetch = window.fetch.bind(window);
+        window.fetch = function () {
+          return realFetch.apply(null, arguments).then(function (r) {
+            if (r.status === 403 || r.status === 401) r.clone().json().then(function (j) {
+              if (j && typeof j.error === 'string' && /^(Only on the laptop|Not paired)/.test(j.error)) appendBubble('error', j.error);
+            }).catch(function () {});
+            return r;
+          });
+        };
+      });
+  </script>
+
+</body>
+</html>
